@@ -7,6 +7,10 @@ edition = "2021"
 name = "survey"
 path = "survey.rs"
 
+[[bin]]
+name = "aeon-mcp"
+path = "src/bin/aeon_mcp.rs"
+
 [dependencies]
 bevy_ecs = "0.13"
 ascent = "0.7"
