@@ -161,6 +161,26 @@ fn handle_tools_list() -> Value {
                     "start_addr": {"type": "string", "description": "Start virtual address in hex, e.g. '0x512025c'"},
                     "stop_addr": {"type": "string", "description": "Stop virtual address in hex (exclusive), e.g. '0x51202cc'"}
                 }, "required": ["start_addr", "stop_addr"]})),
+
+            tool_schema("get_function_at",
+                "Find the function containing a given address. Returns the function's start address, size, name, and IL listing.",
+                json!({"type": "object", "properties": {
+                    "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"}
+                }, "required": ["addr"]})),
+
+            tool_schema("get_string",
+                "Read a null-terminated string at any virtual address (works across all ELF segments, not just .text).",
+                json!({"type": "object", "properties": {
+                    "addr": {"type": "string", "description": "Virtual address in hex"},
+                    "max_len": {"type": "integer", "description": "Max bytes to scan for null terminator", "default": 256}
+                }, "required": ["addr"]})),
+
+            tool_schema("get_data",
+                "Read raw bytes at any virtual address (works across all ELF segments). Returns hex + ASCII.",
+                json!({"type": "object", "properties": {
+                    "addr": {"type": "string", "description": "Virtual address in hex"},
+                    "size": {"type": "integer", "description": "Number of bytes to read", "default": 64}
+                }, "required": ["addr"]})),
         ]
     })
 }
@@ -188,6 +208,9 @@ fn handle_tool_call(name: &str, args: &Value, server: &mut AeonMcp) -> Value {
         "search_rc4" => tool_search_rc4(server),
         "get_coverage" => tool_get_coverage(server),
         "get_asm" => tool_get_asm(args, server),
+        "get_function_at" => tool_get_function_at(args, server),
+        "get_string" => tool_get_string(args, server),
+        "get_data" => tool_get_data(args, server),
         _ => Err(format!("Unknown tool: {}", name)),
     };
 
@@ -431,6 +454,7 @@ fn tool_get_coverage(server: &AeonMcp) -> Result<Value, String> {
         text_section_addr: binary.text_section_addr,
         text_section_size: binary.text_section_size,
         functions: Vec::new(), // not needed for coverage
+        segments: Vec::new(),
     });
     Ok(engine.coverage_report())
 }
@@ -476,6 +500,70 @@ fn tool_get_asm(args: &Value, server: &AeonMcp) -> Result<Value, String> {
         "size": size,
         "instruction_count": listing.len(),
         "listing": listing,
+    }))
+}
+
+fn tool_get_function_at(args: &Value, server: &AeonMcp) -> Result<Value, String> {
+    let binary = server.require_binary().map_err(|(_,m)| m)?;
+    let addr = parse_addr_arg(args)?;
+
+    let func = binary.function_containing(addr)
+        .ok_or_else(|| format!("No function containing 0x{:x}", addr))?;
+
+    let func_addr = func.addr;
+    let func_size = func.size;
+    let func_name = func.name.clone();
+
+    let bytes = binary.function_bytes(func)
+        .ok_or("Function bytes out of range")?;
+
+    let listing = lift_function(bytes, func_addr);
+
+    Ok(json!({
+        "query_addr": format!("0x{:x}", addr),
+        "function": format!("0x{:x}", func_addr),
+        "size": func_size,
+        "name": func_name.as_deref().unwrap_or_null(),
+        "instruction_count": listing.len(),
+        "listing": listing,
+    }))
+}
+
+fn tool_get_string(args: &Value, server: &AeonMcp) -> Result<Value, String> {
+    let binary = server.require_binary().map_err(|(_,m)| m)?;
+    let addr = parse_addr_arg(args)?;
+    let max_len = args.get("max_len").and_then(|v| v.as_u64()).unwrap_or(256) as usize;
+    let max_len = max_len.min(4096);
+
+    let s = binary.read_string(addr, max_len)
+        .ok_or_else(|| format!("Cannot read address 0x{:x} — not in any LOAD segment", addr))?;
+
+    Ok(json!({
+        "addr": format!("0x{:x}", addr),
+        "length": s.len(),
+        "string": s,
+    }))
+}
+
+fn tool_get_data(args: &Value, server: &AeonMcp) -> Result<Value, String> {
+    let binary = server.require_binary().map_err(|(_,m)| m)?;
+    let addr = parse_addr_arg(args)?;
+    let size = args.get("size").and_then(|v| v.as_u64()).unwrap_or(64) as usize;
+    let size = size.min(4096);
+
+    let bytes = binary.read_vaddr(addr, size)
+        .ok_or_else(|| format!("Cannot read address 0x{:x} — not in any LOAD segment", addr))?;
+
+    let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    let ascii: String = bytes.iter()
+        .map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' })
+        .collect();
+
+    Ok(json!({
+        "addr": format!("0x{:x}", addr),
+        "size": bytes.len(),
+        "hex": hex,
+        "ascii": ascii,
     }))
 }
 
