@@ -154,6 +154,13 @@ fn handle_tools_list() -> Value {
             tool_schema("get_coverage",
                 "Get IL lift coverage statistics: proper IL vs intrinsic vs nop vs decode errors.",
                 json!({"type": "object", "properties": {}})),
+
+            tool_schema("get_asm",
+                "Disassemble ARM64 instructions between two virtual addresses. Like objdump --start-address/--stop-address.",
+                json!({"type": "object", "properties": {
+                    "start_addr": {"type": "string", "description": "Start virtual address in hex, e.g. '0x512025c'"},
+                    "stop_addr": {"type": "string", "description": "Stop virtual address in hex (exclusive), e.g. '0x51202cc'"}
+                }, "required": ["start_addr", "stop_addr"]})),
         ]
     })
 }
@@ -180,6 +187,7 @@ fn handle_tool_call(name: &str, args: &Value, server: &mut AeonMcp) -> Value {
         "get_bytes" => tool_get_bytes(args, server),
         "search_rc4" => tool_search_rc4(server),
         "get_coverage" => tool_get_coverage(server),
+        "get_asm" => tool_get_asm(args, server),
         _ => Err(format!("Unknown tool: {}", name)),
     };
 
@@ -425,6 +433,50 @@ fn tool_get_coverage(server: &AeonMcp) -> Result<Value, String> {
         functions: Vec::new(), // not needed for coverage
     });
     Ok(engine.coverage_report())
+}
+
+fn tool_get_asm(args: &Value, server: &AeonMcp) -> Result<Value, String> {
+    let binary = server.require_binary().map_err(|(_,m)| m)?;
+
+    let start_str = args.get("start_addr").and_then(|a| a.as_str())
+        .ok_or("Missing required parameter: start_addr")?;
+    let stop_str = args.get("stop_addr").and_then(|a| a.as_str())
+        .ok_or("Missing required parameter: stop_addr")?;
+
+    let start_addr = parse_hex(start_str)
+        .ok_or_else(|| format!("Invalid hex address: {}", start_str))?;
+    let stop_addr = parse_hex(stop_str)
+        .ok_or_else(|| format!("Invalid hex address: {}", stop_str))?;
+
+    if stop_addr <= start_addr {
+        return Err("stop_addr must be greater than start_addr".into());
+    }
+
+    let size = stop_addr - start_addr;
+    if size > 1_048_576 {
+        return Err("Range too large (max 1MB)".into());
+    }
+
+    // Convert virtual address to file offset
+    let offset_in_text = start_addr.checked_sub(binary.text_section_addr)
+        .ok_or("start_addr before .text section")?;
+    let file_start = (binary.text_section_file_offset + offset_in_text) as usize;
+    let file_end = file_start + size as usize;
+
+    if file_end > binary.data.len() {
+        return Err(format!("Address range 0x{:x}..0x{:x} extends past binary data", start_addr, stop_addr));
+    }
+
+    let bytes = &binary.data[file_start..file_end];
+    let listing = lift_function(bytes, start_addr);
+
+    Ok(json!({
+        "start_addr": format!("0x{:x}", start_addr),
+        "stop_addr": format!("0x{:x}", stop_addr),
+        "size": size,
+        "instruction_count": listing.len(),
+        "listing": listing,
+    }))
 }
 
 // ═══════════════════════════════════════════════════════════════════════
