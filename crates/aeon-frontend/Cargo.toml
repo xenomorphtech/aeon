@@ -1,0 +1,21 @@
+[package]
+name = "aeon-frontend"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "aeon"
+path = "src/main.rs"
+
+[[bin]]
+name = "aeon-mcp"
+path = "src/bin/aeon_mcp.rs"
+
+[[bin]]
+name = "aeon-http"
+path = "src/bin/aeon_http.rs"
+
+[dependencies]
+aeon = { path = "../aeon" }
+serde_json = "1.0"
+tiny_http = "0.12"

@@ -1,21 +1,7 @@
-[package]
-name = "aeon"
-version = "0.1.0"
-edition = "2021"
-
-[[bin]]
-name = "survey"
-path = "survey.rs"
-
-[[bin]]
-name = "aeon-mcp"
-path = "src/bin/aeon_mcp.rs"
-
-[dependencies]
-bevy_ecs = "0.13"
-ascent = "0.7"
-bad64 = "0.6"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-object = { version = "0.36", default-features = false, features = ["read", "elf"] }
-gimli = { version = "0.31", default-features = false, features = ["read"] }
+[workspace]
+members = [
+    "crates/aeon",
+    "crates/aeon-frontend",
+    "crates/survey",
+]
+resolver = "2"

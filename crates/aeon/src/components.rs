@@ -15,3 +15,6 @@ pub struct BelongsToFunction(pub u64);
 
 #[derive(Component, Debug, Clone)]
 pub struct CfgEdges(pub Vec<u64>);
+
+#[derive(Component, Debug, Clone)]
+pub struct AnalysisName(pub String);

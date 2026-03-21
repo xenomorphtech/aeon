@@ -1,8 +1,12 @@
-use bevy_ecs::world::World;
+use bevy_ecs::{entity::Entity, world::World};
+use regex::Regex;
+use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::il::Stmt;
-use crate::components::{Address, RawInstruction, LiftedIL, BelongsToFunction, CfgEdges};
+use crate::components::{
+    Address, AnalysisName, BelongsToFunction, CfgEdges, LiftedIL, RawInstruction,
+};
 use crate::analysis::AeonAnalysis;
 use crate::elf::LoadedBinary;
 use crate::lifter;
@@ -10,6 +14,13 @@ use crate::lifter;
 pub struct AeonEngine {
     pub world: World,
     pub binary: Option<LoadedBinary>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AnalysisNameMatch {
+    pub address: u64,
+    pub analysis_name: String,
+    pub function: Option<u64>,
 }
 
 impl AeonEngine {
@@ -93,6 +104,45 @@ impl AeonEngine {
                 entity.insert(CfgEdges(result.edges));
             }
         }
+    }
+
+    /// Attach or overwrite an analysis name on an address entity.
+    pub fn set_analysis_name(&mut self, addr: u64, name: impl Into<String>) {
+        let entity = self.find_address_entity(addr).unwrap_or_else(|| {
+            self.world.spawn((Address(addr),)).id()
+        });
+        self.world
+            .entity_mut(entity)
+            .insert(AnalysisName(name.into()));
+    }
+
+    /// Search analysis names attached to addresses using a regex.
+    pub fn search_analysis_names(
+        &mut self,
+        pattern: &str,
+    ) -> Result<Vec<AnalysisNameMatch>, regex::Error> {
+        let regex = Regex::new(pattern)?;
+        let mut matches = Vec::new();
+
+        let mut query = self
+            .world
+            .query::<(&Address, &AnalysisName, Option<&BelongsToFunction>)>();
+        for (addr, analysis_name, belongs) in query.iter(&self.world) {
+            if regex.is_match(&analysis_name.0) {
+                matches.push(AnalysisNameMatch {
+                    address: addr.0,
+                    analysis_name: analysis_name.0.clone(),
+                    function: belongs.map(|belongs| belongs.0),
+                });
+            }
+        }
+
+        matches.sort_by(|lhs, rhs| {
+            lhs.address
+                .cmp(&rhs.address)
+                .then(lhs.analysis_name.cmp(&rhs.analysis_name))
+        });
+        Ok(matches)
     }
 
     /// Run Datalog analysis and return JSON report
@@ -205,5 +255,39 @@ impl AeonEngine {
             "text_section_addr": format!("0x{:x}", binary.text_section_addr),
             "text_section_size": format!("0x{:x}", binary.text_section_size),
         })
+    }
+
+    fn find_address_entity(&mut self, addr: u64) -> Option<Entity> {
+        let mut query = self.world.query::<(Entity, &Address)>();
+        query
+            .iter(&self.world)
+            .find_map(|(entity, address)| (address.0 == addr).then_some(entity))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AeonEngine, AnalysisNameMatch};
+    use crate::components::{Address, BelongsToFunction};
+
+    #[test]
+    fn analysis_name_search_matches_regex_and_reports_function() {
+        let mut engine = AeonEngine::new();
+        engine
+            .world
+            .spawn((Address(0x1010), BelongsToFunction(0x1000)));
+        engine.set_analysis_name(0x1010, "rc4_candidate");
+        engine.set_analysis_name(0x2020, "aes_round");
+
+        let matches = engine.search_analysis_names("^rc4_.*$").unwrap();
+
+        assert_eq!(
+            matches,
+            vec![AnalysisNameMatch {
+                address: 0x1010,
+                analysis_name: "rc4_candidate".to_string(),
+                function: Some(0x1000),
+            }]
+        );
     }
 }
