@@ -26,6 +26,8 @@ The repository includes a small sample ARM64 ELF at `samples/hello_aarch64.elf` 
 
 ## Workspace Layout
 
+- `crates/aeon-eval` - evaluation corpus, task, claim, and evidence models
+- `crates/aeonil` - standalone AeonIL crate
 - `crates/aeon` - reusable analysis library
 - `crates/aeon-frontend` - CLI, MCP, and HTTP frontends
 - `crates/survey` - standalone opcode survey utility
@@ -84,6 +86,10 @@ curl -s http://127.0.0.1:8787/call \
 curl -s http://127.0.0.1:8787/call \
   -H 'content-type: application/json' \
   -d '{"name":"get_function_at","arguments":{"addr":"0x7d8"}}'
+
+curl -s http://127.0.0.1:8787/call \
+  -H 'content-type: application/json' \
+  -d '{"name":"get_il","arguments":{"addr":"0x7d8"}}'
 ```
 
 Useful endpoints:
@@ -140,14 +146,15 @@ Generated from `crates/aeon-frontend/src/service.rs` via `cargo run -p aeon-fron
 | `define_struct` | Attach or overwrite a structure definition on an address. |
 | `add_hypothesis` | Record a semantic hypothesis on an address. Duplicate notes are ignored. |
 | `search_analysis_names` | Search analysis names attached to addresses using a regex pattern. |
-| `get_function_il` | Get the lifted AeonIL intermediate language listing for a function. |
+| `get_il` | Get the lifted AeonIL intermediate language listing for the function containing a given address. |
+| `get_function_il` | Backwards-compatible alias for get_il. |
 | `get_function_cfg` | Get the Control Flow Graph for a function. Returns adjacency list, terminal blocks, and reachability from Datalog analysis. |
 | `get_xrefs` | Get cross-references for an address: outgoing calls from the function, and incoming calls from other functions. |
 | `get_bytes` | Read raw bytes from the binary at a virtual address. Returns hex-encoded string. |
 | `search_rc4` | Search for RC4 cipher implementations using Datalog behavioral subgraph isomorphism. Detects KSA (swap+256+mod256) and PRGA (swap+keystream XOR) patterns. |
 | `get_coverage` | Get IL lift coverage statistics: proper IL vs intrinsic vs nop vs decode errors. |
-| `get_asm` | Disassemble ARM64 instructions between two virtual addresses. Like objdump --start-address/--stop-address. |
-| `get_function_at` | Find the function containing a given address. Returns the function's start address, size, name, and IL listing. |
+| `get_asm` | Disassemble ARM64 instructions between two virtual addresses. Returns asm only, without AeonIL. |
+| `get_function_at` | Find the function containing a given address. Returns function metadata by default, and can optionally attach asm and/or AeonIL listings. |
 | `get_string` | Read a null-terminated string at any virtual address (works across all ELF segments, not just .text). |
 | `get_data` | Read raw bytes at any virtual address (works across all ELF segments). Returns hex + ASCII. |
 <!-- END GENERATED TOOL SURFACE -->
@@ -167,10 +174,12 @@ ELF binary
 
 | File | Purpose |
 |------|---------|
+| `crates/aeon-eval/src/lib.rs` | Evaluation corpus, task, and evidence models |
+| `crates/aeonil/src/lib.rs` | AeonIL data types and expression helpers |
 | `crates/aeon/src/api.rs` | High-level session API |
 | `crates/aeon/src/elf.rs` | ELF parsing and function discovery |
 | `crates/aeon/src/lifter.rs` | ARM64 to AeonIL lifting |
-| `crates/aeon/src/il.rs` | AeonIL data types |
+| `crates/aeon/src/il.rs` | Compatibility re-export of `aeonil` |
 | `crates/aeon/src/components.rs` | ECS components for lifted facts |
 | `crates/aeon/src/analysis.rs` | Datalog rules for CFG and reachability |
 | `crates/aeon/src/rc4_search.rs` | Behavioral RC4 detection |

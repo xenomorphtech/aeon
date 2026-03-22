@@ -6,12 +6,21 @@ version = 4
 name = "aeon"
 version = "0.1.0"
 dependencies = [
+ "aeonil",
  "ascent",
  "bad64",
  "bevy_ecs",
  "gimli",
  "object",
  "regex",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "aeon-eval"
+version = "0.1.0"
+dependencies = [
  "serde",
  "serde_json",
 ]
@@ -24,6 +33,10 @@ dependencies = [
  "serde_json",
  "tiny_http",
 ]
+
+[[package]]
+name = "aeonil"
+version = "0.1.0"
 
 [[package]]
 name = "ahash"

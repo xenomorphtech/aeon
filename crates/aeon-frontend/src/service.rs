@@ -30,6 +30,7 @@ impl AeonFrontend {
             "define_struct" => self.tool_define_struct(args),
             "add_hypothesis" => self.tool_add_hypothesis(args),
             "search_analysis_names" => self.tool_search_analysis_names(args),
+            "get_il" => self.tool_get_il(args),
             "get_function_il" => self.tool_get_function_il(args),
             "get_function_cfg" => self.tool_get_function_cfg(args),
             "get_xrefs" => self.tool_get_xrefs(args),
@@ -130,9 +131,13 @@ impl AeonFrontend {
     }
 
     fn tool_get_function_il(&self, args: &Value) -> Result<Value, String> {
+        self.tool_get_il(args)
+    }
+
+    fn tool_get_il(&self, args: &Value) -> Result<Value, String> {
         let session = self.require_session()?;
         let addr = parse_addr_arg(args)?;
-        session.get_function_il(addr)
+        session.get_il(addr)
     }
 
     fn tool_get_function_cfg(&self, args: &Value) -> Result<Value, String> {
@@ -188,7 +193,9 @@ impl AeonFrontend {
     fn tool_get_function_at(&self, args: &Value) -> Result<Value, String> {
         let session = self.require_session()?;
         let addr = parse_addr_arg(args)?;
-        session.get_function_at(addr)
+        let include_asm = parse_bool_arg(args, "include_asm", false)?;
+        let include_il = parse_bool_arg(args, "include_il", false)?;
+        session.get_function_at(addr, include_asm, include_il)
     }
 
     fn tool_get_string(&self, args: &Value) -> Result<Value, String> {
@@ -263,10 +270,16 @@ pub fn tools_list() -> Value {
                     "pattern": {"type": "string", "description": "Regex pattern matched against analysis names"}
                 }, "required": ["pattern"]})),
 
-            tool_schema("get_function_il",
-                "Get the lifted AeonIL intermediate language listing for a function.",
+            tool_schema("get_il",
+                "Get the lifted AeonIL intermediate language listing for the function containing a given address.",
                 json!({"type": "object", "properties": {
-                    "addr": {"type": "string", "description": "Function address in hex, e.g. '0x1000'"}
+                    "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"}
+                }, "required": ["addr"]})),
+
+            tool_schema("get_function_il",
+                "Backwards-compatible alias for get_il.",
+                json!({"type": "object", "properties": {
+                    "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"}
                 }, "required": ["addr"]})),
 
             tool_schema("get_function_cfg",
@@ -297,16 +310,18 @@ pub fn tools_list() -> Value {
                 json!({"type": "object", "properties": {}})),
 
             tool_schema("get_asm",
-                "Disassemble ARM64 instructions between two virtual addresses. Like objdump --start-address/--stop-address.",
+                "Disassemble ARM64 instructions between two virtual addresses. Returns asm only, without AeonIL.",
                 json!({"type": "object", "properties": {
                     "start_addr": {"type": "string", "description": "Start virtual address in hex, e.g. '0x512025c'"},
                     "stop_addr": {"type": "string", "description": "Stop virtual address in hex (exclusive), e.g. '0x51202cc'"}
                 }, "required": ["start_addr", "stop_addr"]})),
 
             tool_schema("get_function_at",
-                "Find the function containing a given address. Returns the function's start address, size, name, and IL listing.",
+                "Find the function containing a given address. Returns function metadata by default, and can optionally attach asm and/or AeonIL listings.",
                 json!({"type": "object", "properties": {
-                    "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"}
+                    "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"},
+                    "include_asm": {"type": "boolean", "description": "Include asm in the returned listing", "default": false},
+                    "include_il": {"type": "boolean", "description": "Include AeonIL in the returned listing", "default": false}
                 }, "required": ["addr"]})),
 
             tool_schema("get_string",
@@ -370,6 +385,15 @@ fn parse_addr_arg(args: &Value) -> Result<u64, String> {
 fn parse_hex(s: &str) -> Option<u64> {
     let s = s.trim_start_matches("0x").trim_start_matches("0X");
     u64::from_str_radix(s, 16).ok()
+}
+
+fn parse_bool_arg(args: &Value, key: &str, default: bool) -> Result<bool, String> {
+    match args.get(key) {
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| format!("Invalid boolean parameter: {}", key)),
+        None => Ok(default),
+    }
 }
 
 fn escape_markdown_cell(value: &str) -> String {

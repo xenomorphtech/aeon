@@ -164,24 +164,34 @@ impl AeonSession {
         })
     }
 
-    pub fn get_function_il(&self, addr: u64) -> Result<Value, String> {
-        let func = self.find_function(addr)?;
+    pub fn get_il(&self, addr: u64) -> Result<Value, String> {
+        let func = self
+            .binary
+            .function_containing(addr)
+            .ok_or_else(|| format!("No function containing 0x{:x}", addr))?;
         let bytes = self
             .binary
             .function_bytes(func)
             .ok_or("Function bytes out of range")?;
         let engine = self.analysis_state.borrow();
-        let listing = lift_function(bytes, addr, &self.binary, &engine);
+        let listing = render_instruction_listing(bytes, func.addr, &self.binary, &engine, ListingMode::Il);
 
         Ok(json!({
-            "function": format!("0x{:x}", addr),
+            "query_addr": format!("0x{:x}", addr),
+            "query_semantic": semantic_value(&engine, addr),
+            "function": format!("0x{:x}", func.addr),
             "size": func.size,
             "name": option_str(func.name.as_deref()),
             "resolved_name": resolved_name_value(func.addr, func.name.as_deref(), &self.binary, &engine),
             "semantic": semantic_value(&engine, func.addr),
+            "listing_kind": ListingMode::Il.label(),
             "instruction_count": listing.len(),
             "listing": listing,
         }))
+    }
+
+    pub fn get_function_il(&self, addr: u64) -> Result<Value, String> {
+        self.get_il(addr)
     }
 
     pub fn get_function_details(&self, addr: u64) -> Result<Value, String> {
@@ -436,31 +446,31 @@ impl AeonSession {
 
         let bytes = &self.binary.data[file_start..file_end];
         let engine = self.analysis_state.borrow();
-        let listing = lift_function(bytes, start_addr, &self.binary, &engine);
+        let listing =
+            render_instruction_listing(bytes, start_addr, &self.binary, &engine, ListingMode::Asm);
 
         Ok(json!({
             "start_addr": format!("0x{:x}", start_addr),
             "stop_addr": format!("0x{:x}", stop_addr),
             "size": size,
+            "listing_kind": ListingMode::Asm.label(),
             "instruction_count": listing.len(),
             "listing": listing,
         }))
     }
 
-    pub fn get_function_at(&self, addr: u64) -> Result<Value, String> {
+    pub fn get_function_at(
+        &self,
+        addr: u64,
+        include_asm: bool,
+        include_il: bool,
+    ) -> Result<Value, String> {
         let func = self
             .binary
             .function_containing(addr)
             .ok_or_else(|| format!("No function containing 0x{:x}", addr))?;
-
-        let bytes = self
-            .binary
-            .function_bytes(func)
-            .ok_or("Function bytes out of range")?;
         let engine = self.analysis_state.borrow();
-        let listing = lift_function(bytes, func.addr, &self.binary, &engine);
-
-        Ok(json!({
+        let mut response = json!({
             "query_addr": format!("0x{:x}", addr),
             "query_semantic": semantic_value(&engine, addr),
             "function": format!("0x{:x}", func.addr),
@@ -468,9 +478,29 @@ impl AeonSession {
             "name": option_str(func.name.as_deref()),
             "resolved_name": resolved_name_value(func.addr, func.name.as_deref(), &self.binary, &engine),
             "semantic": semantic_value(&engine, func.addr),
-            "instruction_count": listing.len(),
-            "listing": listing,
-        }))
+        });
+
+        if let Some(mode) = ListingMode::from_flags(include_asm, include_il) {
+            let bytes = self
+                .binary
+                .function_bytes(func)
+                .ok_or("Function bytes out of range")?;
+            let listing =
+                render_instruction_listing(bytes, func.addr, &self.binary, &engine, mode);
+            if let Some(object) = response.as_object_mut() {
+                object.insert(
+                    "listing_kind".to_string(),
+                    Value::String(mode.label().to_string()),
+                );
+                object.insert(
+                    "instruction_count".to_string(),
+                    Value::Number((listing.len() as u64).into()),
+                );
+                object.insert("listing".to_string(), Value::Array(listing));
+            }
+        }
+
+        Ok(response)
     }
 
     pub fn search_rc4(&self) -> Value {
@@ -581,11 +611,46 @@ fn data_view(addr: u64, bytes: &[u8], binary: &LoadedBinary, engine: &AeonEngine
     })
 }
 
-fn lift_function(
+#[derive(Clone, Copy)]
+enum ListingMode {
+    Asm,
+    Il,
+    AsmAndIl,
+}
+
+impl ListingMode {
+    fn from_flags(include_asm: bool, include_il: bool) -> Option<Self> {
+        match (include_asm, include_il) {
+            (true, true) => Some(Self::AsmAndIl),
+            (true, false) => Some(Self::Asm),
+            (false, true) => Some(Self::Il),
+            (false, false) => None,
+        }
+    }
+
+    fn include_asm(self) -> bool {
+        matches!(self, Self::Asm | Self::AsmAndIl)
+    }
+
+    fn include_il(self) -> bool {
+        matches!(self, Self::Il | Self::AsmAndIl)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Asm => "asm",
+            Self::Il => "il",
+            Self::AsmAndIl => "asm+il",
+        }
+    }
+}
+
+fn render_instruction_listing(
     raw_bytes: &[u8],
     start_addr: u64,
     binary: &LoadedBinary,
     engine: &AeonEngine,
+    mode: ListingMode,
 ) -> Vec<Value> {
     let mut listing = Vec::new();
     let mut offset = 0usize;
@@ -603,18 +668,39 @@ fn lift_function(
             let result = lifter::lift(&insn, pc, next_pc);
             let mut entry = json!({
                 "addr": format!("0x{:x}", pc),
-                "asm": result.disasm,
-                "il": format!("{:?}", result.stmt),
-                "edges": result.edges.iter().map(|edge| format!("0x{:x}", edge)).collect::<Vec<_>>(),
             });
+            if let Some(object) = entry.as_object_mut() {
+                if mode.include_asm() {
+                    object.insert("asm".to_string(), Value::String(result.disasm.clone()));
+                }
+                if mode.include_il() {
+                    object.insert("il".to_string(), Value::String(format!("{:?}", result.stmt)));
+                    object.insert(
+                        "edges".to_string(),
+                        Value::Array(
+                            result
+                                .edges
+                                .iter()
+                                .map(|edge| Value::String(format!("0x{:x}", edge)))
+                                .collect(),
+                        ),
+                    );
+                }
+            }
             annotate_instruction_entry(&mut entry, pc, &result.stmt, binary, engine);
             entry
         } else {
             let mut entry = json!({
                 "addr": format!("0x{:x}", pc),
-                "asm": "(invalid)",
-                "il": "Nop",
             });
+            if let Some(object) = entry.as_object_mut() {
+                if mode.include_asm() {
+                    object.insert("asm".to_string(), Value::String("(invalid)".to_string()));
+                }
+                if mode.include_il() {
+                    object.insert("il".to_string(), Value::String("Nop".to_string()));
+                }
+            }
             annotate_instruction_address(&mut entry, "addr", pc, None, binary, engine);
             entry
         };

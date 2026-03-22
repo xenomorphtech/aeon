@@ -119,6 +119,22 @@ The `survey` crate is well positioned to evolve from a one-off batch utility int
 - Result
   aeon stops being a single-agent microscope and becomes a substrate for coordinated autonomous analysis.
 
+## Workstream 6: Evaluation and Benchmarking
+
+An agent framework needs a reproducible way to measure capability and evidence quality, not just a growing tool surface.
+
+- Evaluation models in `crates/aeon-eval`
+  Define corpus entries, task specs, expected outcomes, evidence bundles, claims, run metrics, and scored results as versioned machine-readable types.
+
+- Benchmark corpus
+  Build a representative set of closed-source software analysis tasks such as configuration loading, packet shape recovery, reachability proofs, decrypted string extraction, custom crypto loop identification, and behavior classification.
+
+- Evidence-first scoring
+  Judge runs by whether claims are backed by concrete addresses, query results, slices, emulation traces, or structured artifacts rather than by free-form prose alone.
+
+- Result
+  aeon can be optimized against repeatable task completion and evidence quality instead of ad hoc demos.
+
 ## Exit Criteria
 
 - An agent can triage a binary without first reading raw assembly.

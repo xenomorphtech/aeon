@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+aeonil = { path = "../aeonil" }
 bevy_ecs = "0.13"
 ascent = "0.7"
 bad64 = "0.6"
