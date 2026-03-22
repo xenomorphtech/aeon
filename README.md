@@ -4,6 +4,8 @@ aeon is meant to be a sensory organ, reasoning sandbox, and execution environmen
 
 In this repository, that idea is applied to ARM64 ELF analysis. The workspace provides a reusable Rust analysis core plus thin agent-facing frontends that load binaries, lift instructions into AeonIL, run Datalog analyses, and expose the results through strict JSON interfaces.
 
+The repository includes a small sample ARM64 ELF at `samples/hello_aarch64.elf` for smoke tests and examples.
+
 ## Design Principles
 
 - **Agent-native first** - interfaces are machine-oriented and JSON-based
@@ -39,6 +41,7 @@ This produces:
 - `target/release/aeon`
 - `target/release/aeon-mcp`
 - `target/release/aeon-http`
+- `target/release/survey`
 
 ## Interfaces
 
@@ -48,20 +51,20 @@ The CLI is intentionally small and machine-friendly. It prints JSON and supports
 
 ```bash
 # Search for RC4 implementations
-aeon rc4 path/to/binary.so
+aeon rc4 samples/hello_aarch64.elf
 
 # Report IL lift coverage
-aeon coverage path/to/binary.so
+aeon coverage samples/hello_aarch64.elf
 
 # Inspect the function containing a specific address
-aeon func path/to/binary.so 0x51203d0
+aeon func samples/hello_aarch64.elf 0x7d8
 ```
 
 ### MCP Server
 
 `aeon-mcp` exposes the analysis session as JSON-RPC 2.0 over stdio for agent runtimes that speak MCP.
 
-The project root includes `.mcp.json` for local auto-discovery in Claude Code.
+The project root includes `.mcp.json` for local auto-discovery in Claude Code. It runs the server through `cargo run --release`, so it does not depend on a machine-specific binary path.
 
 ### HTTP API
 
@@ -76,11 +79,11 @@ Example calls:
 ```bash
 curl -s http://127.0.0.1:8787/call \
   -H 'content-type: application/json' \
-  -d '{"name":"load_binary","arguments":{"path":"libUnreal.so"}}'
+  -d '{"name":"load_binary","arguments":{"path":"samples/hello_aarch64.elf"}}'
 
 curl -s http://127.0.0.1:8787/call \
   -H 'content-type: application/json' \
-  -d '{"name":"get_function_at","arguments":{"addr":"0x51203d0"}}'
+  -d '{"name":"get_function_at","arguments":{"addr":"0x7d8"}}'
 ```
 
 Useful endpoints:
@@ -103,7 +106,7 @@ serde_json = "1.0"
 use aeon::AeonSession;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let session = AeonSession::load("libUnreal.so")?;
+    let session = AeonSession::load("samples/hello_aarch64.elf")?;
     let functions = session.list_functions(0, 10, None);
     println!("{}", serde_json::to_string_pretty(&functions)?);
     Ok(())
@@ -112,26 +115,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Lower-level modules remain public for callers that want direct access to ELF parsing, lifting, IL types, engine internals, or RC4 search logic.
 
+### Survey
+
+`survey` is a generic opcode survey tool for any ELF that aeon can parse:
+
+```bash
+survey samples/hello_aarch64.elf --limit 20
+survey samples/hello_aarch64.elf --json
+```
+
 ## Tool Surface
 
 These tools are exposed by the MCP and HTTP frontends:
 
+Generated from `crates/aeon-frontend/src/service.rs` via `cargo run -p aeon-frontend --bin aeon_docgen`.
+
+<!-- BEGIN GENERATED TOOL SURFACE -->
 | Tool | Description |
 |------|-------------|
-| `load_binary` | Load an ELF binary for analysis |
-| `list_functions` | Paginated function listing with optional name filter |
-| `set_analysis_name` | Attach or overwrite an analysis name on an address |
-| `search_analysis_names` | Regex search over assigned analysis names |
-| `get_function_il` | Lift a function to AeonIL |
-| `get_function_cfg` | Return CFG edges, terminal blocks, and reachability |
-| `get_xrefs` | Return incoming and outgoing cross-references |
-| `get_bytes` | Read raw bytes from a virtual address |
-| `get_asm` | Disassemble an address range |
-| `get_function_at` | Find the function containing a given address |
-| `get_string` | Read a null-terminated string at an address |
-| `get_data` | Read raw data across ELF segments |
-| `get_coverage` | Report IL lift coverage statistics |
-| `search_rc4` | Search for RC4 implementations via behavioral matching |
+| `load_binary` | Load an ELF binary for analysis. Must be called before other tools. |
+| `list_functions` | List functions discovered from .eh_frame unwind tables. Supports pagination and name filtering. |
+| `set_analysis_name` | Backwards-compatible alias for rename_symbol. Attaches or overwrites a semantic symbol on an address. |
+| `rename_symbol` | Attach or overwrite a semantic symbol name on an address. |
+| `define_struct` | Attach or overwrite a structure definition on an address. |
+| `add_hypothesis` | Record a semantic hypothesis on an address. Duplicate notes are ignored. |
+| `search_analysis_names` | Search analysis names attached to addresses using a regex pattern. |
+| `get_function_il` | Get the lifted AeonIL intermediate language listing for a function. |
+| `get_function_cfg` | Get the Control Flow Graph for a function. Returns adjacency list, terminal blocks, and reachability from Datalog analysis. |
+| `get_xrefs` | Get cross-references for an address: outgoing calls from the function, and incoming calls from other functions. |
+| `get_bytes` | Read raw bytes from the binary at a virtual address. Returns hex-encoded string. |
+| `search_rc4` | Search for RC4 cipher implementations using Datalog behavioral subgraph isomorphism. Detects KSA (swap+256+mod256) and PRGA (swap+keystream XOR) patterns. |
+| `get_coverage` | Get IL lift coverage statistics: proper IL vs intrinsic vs nop vs decode errors. |
+| `get_asm` | Disassemble ARM64 instructions between two virtual addresses. Like objdump --start-address/--stop-address. |
+| `get_function_at` | Find the function containing a given address. Returns the function's start address, size, name, and IL listing. |
+| `get_string` | Read a null-terminated string at any virtual address (works across all ELF segments, not just .text). |
+| `get_data` | Read raw bytes at any virtual address (works across all ELF segments). Returns hex + ASCII. |
+<!-- END GENERATED TOOL SURFACE -->
 
 ## Architecture
 

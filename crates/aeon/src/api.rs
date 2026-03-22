@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use serde_json::{json, Value};
 
 use crate::elf::{self, FunctionInfo, LoadedBinary};
-use crate::engine::AeonEngine;
+use crate::engine::{AeonEngine, SemanticContext};
 use crate::il::{Expr, Stmt};
 use crate::lifter;
 
@@ -32,7 +32,8 @@ impl AeonSession {
     }
 
     pub fn set_analysis_name(&self, addr: u64, name: &str) -> Value {
-        self.analysis_state
+        let semantic = self
+            .analysis_state
             .borrow_mut()
             .set_analysis_name(addr, name.to_string());
 
@@ -40,23 +41,70 @@ impl AeonSession {
             "status": "assigned",
             "addr": format!("0x{:x}", addr),
             "analysis_name": name,
+            "semantic": semantic_to_value(Some(semantic)),
+        })
+    }
+
+    pub fn rename_symbol(&self, addr: u64, name: &str) -> Value {
+        let semantic = self
+            .analysis_state
+            .borrow_mut()
+            .rename_symbol(addr, name.to_string());
+
+        json!({
+            "status": "renamed",
+            "addr": format!("0x{:x}", addr),
+            "symbol": name,
+            "semantic": semantic_to_value(Some(semantic)),
+        })
+    }
+
+    pub fn define_struct(&self, addr: u64, definition: &str) -> Value {
+        let semantic = self
+            .analysis_state
+            .borrow_mut()
+            .define_struct(addr, definition.to_string());
+
+        json!({
+            "status": "defined",
+            "addr": format!("0x{:x}", addr),
+            "struct_definition": definition,
+            "semantic": semantic_to_value(Some(semantic)),
+        })
+    }
+
+    pub fn add_hypothesis(&self, addr: u64, note: &str) -> Value {
+        let semantic = self
+            .analysis_state
+            .borrow_mut()
+            .add_hypothesis(addr, note.to_string());
+
+        json!({
+            "status": "recorded",
+            "addr": format!("0x{:x}", addr),
+            "hypothesis": note,
+            "semantic": semantic_to_value(Some(semantic)),
         })
     }
 
     pub fn search_analysis_names(&self, pattern: &str) -> Result<Value, String> {
-        let matches = self
-            .analysis_state
-            .borrow_mut()
+        let engine = self.analysis_state.borrow();
+        let matches = engine
             .search_analysis_names(pattern)
             .map_err(|e| format!("Invalid regex: {}", e))?;
 
         let matches: Vec<Value> = matches
             .into_iter()
             .map(|entry| {
+                let function = self
+                    .binary
+                    .function_containing(entry.address)
+                    .map(|f| f.addr);
                 json!({
                     "addr": format!("0x{:x}", entry.address),
                     "analysis_name": entry.analysis_name,
-                    "function": option_hex(entry.function),
+                    "function": option_hex(function),
+                    "semantic": semantic_value(&engine, entry.address),
                 })
             })
             .collect();
@@ -69,6 +117,7 @@ impl AeonSession {
     }
 
     pub fn summary(&self) -> Value {
+        let engine = self.analysis_state.borrow();
         json!({
             "status": "loaded",
             "path": self.path,
@@ -76,31 +125,33 @@ impl AeonSession {
             "text_section_size": format!("0x{:x}", self.binary.text_section_size),
             "total_functions": self.binary.functions.len(),
             "named_functions": self.binary.functions.iter().filter(|f| f.name.is_some()).count(),
+            "blackboard": serde_json::to_value(engine.blackboard_summary()).unwrap(),
         })
     }
 
     pub fn list_functions(&self, offset: usize, limit: usize, name_filter: Option<&str>) -> Value {
         let name_filter = name_filter.unwrap_or("");
-        let filtered: Vec<&FunctionInfo> = if name_filter.is_empty() {
-            self.binary.functions.iter().collect()
-        } else {
-            self.binary
-                .functions
-                .iter()
-                .filter(|f| f.name.as_deref().map_or(false, |n| n.contains(name_filter)))
-                .collect()
-        };
+        let engine = self.analysis_state.borrow();
+
+        let filtered: Vec<&FunctionInfo> = self
+            .binary
+            .functions
+            .iter()
+            .filter(|func| function_matches_filter(func, name_filter, &engine))
+            .collect();
 
         let total = filtered.len();
         let functions: Vec<Value> = filtered
             .iter()
             .skip(offset)
             .take(limit)
-            .map(|f| {
+            .map(|func| {
                 json!({
-                    "addr": format!("0x{:x}", f.addr),
-                    "size": f.size,
-                    "name": option_str(f.name.as_deref()),
+                    "addr": format!("0x{:x}", func.addr),
+                    "size": func.size,
+                    "name": option_str(func.name.as_deref()),
+                    "resolved_name": resolved_name_value(func.addr, func.name.as_deref(), &self.binary, &engine),
+                    "semantic": semantic_value(&engine, func.addr),
                 })
             })
             .collect();
@@ -119,12 +170,15 @@ impl AeonSession {
             .binary
             .function_bytes(func)
             .ok_or("Function bytes out of range")?;
-        let listing = lift_function(bytes, addr);
+        let engine = self.analysis_state.borrow();
+        let listing = lift_function(bytes, addr, &self.binary, &engine);
 
         Ok(json!({
             "function": format!("0x{:x}", addr),
             "size": func.size,
             "name": option_str(func.name.as_deref()),
+            "resolved_name": resolved_name_value(func.addr, func.name.as_deref(), &self.binary, &engine),
+            "semantic": semantic_value(&engine, func.addr),
             "instruction_count": listing.len(),
             "listing": listing,
         }))
@@ -137,9 +191,13 @@ impl AeonSession {
             .function_bytes(func)
             .ok_or("Function bytes out of range")?;
 
-        let mut engine = AeonEngine::new();
-        engine.ingest_function(addr, bytes);
-        Ok(engine.get_function_details(addr))
+        let mut analysis = AeonEngine::new();
+        analysis.ingest_function(addr, bytes);
+        let mut details = analysis.get_function_details(addr);
+
+        let engine = self.analysis_state.borrow();
+        annotate_function_details(&mut details, func, &self.binary, &engine);
+        Ok(details)
     }
 
     pub fn get_function_cfg(&self, addr: u64) -> Result<Value, String> {
@@ -149,15 +207,18 @@ impl AeonSession {
         Ok(json!({
             "function": format!("0x{:x}", addr),
             "name": option_str(func.name.as_deref()),
-            "instruction_count": details["instruction_count"],
-            "edges": details["internal_edges"],
-            "terminal_blocks": details["terminal_blocks"],
-            "reachable_paths": details["reachable_paths_count"],
+            "resolved_name": details["resolved_name"].clone(),
+            "semantic": details["semantic"].clone(),
+            "instruction_count": details["instruction_count"].clone(),
+            "edges": details["internal_edges"].clone(),
+            "terminal_blocks": details["terminal_blocks"].clone(),
+            "reachable_paths": details["reachable_paths_count"].clone(),
         }))
     }
 
     pub fn get_xrefs(&self, target_addr: u64) -> Value {
         let target_func = self.binary.functions.iter().find(|f| f.addr == target_addr);
+        let engine = self.analysis_state.borrow();
 
         let mut calls_out = Vec::new();
         if let Some(func) = target_func {
@@ -177,16 +238,14 @@ impl AeonSession {
                             target: Expr::Imm(target),
                         } = &result.stmt
                         {
-                            let callee_name = self
-                                .binary
-                                .functions
-                                .iter()
-                                .find(|f| f.addr == *target)
-                                .and_then(|f| f.name.as_deref());
+                            let callee_name = exact_function_name(&self.binary, *target);
                             calls_out.push(json!({
                                 "from": format!("0x{:x}", pc),
+                                "from_semantic": semantic_value(&engine, pc),
                                 "to": format!("0x{:x}", target),
                                 "name": option_str(callee_name),
+                                "to_resolved_name": resolved_name_value(*target, callee_name, &self.binary, &engine),
+                                "to_semantic": semantic_value(&engine, *target),
                             }));
                         }
                     }
@@ -222,6 +281,8 @@ impl AeonSession {
                                     "from_func": format!("0x{:x}", func.addr),
                                     "from_inst": format!("0x{:x}", pc),
                                     "caller_name": option_str(func.name.as_deref()),
+                                    "caller_resolved_name": resolved_name_value(func.addr, func.name.as_deref(), &self.binary, &engine),
+                                    "caller_semantic": semantic_value(&engine, func.addr),
                                 }));
                             }
                         }
@@ -234,6 +295,9 @@ impl AeonSession {
 
         json!({
             "target": format!("0x{:x}", target_addr),
+            "name": option_str(target_func.and_then(|func| func.name.as_deref())),
+            "resolved_name": resolved_name_value(target_addr, target_func.and_then(|func| func.name.as_deref()), &self.binary, &engine),
+            "semantic": semantic_value(&engine, target_addr),
             "calls_out": calls_out,
             "calls_in": calls_in,
             "calls_out_count": calls_out.len(),
@@ -256,7 +320,8 @@ impl AeonSession {
         }
 
         let bytes = &self.binary.data[start..end];
-        Ok(data_view(addr, bytes))
+        let engine = self.analysis_state.borrow();
+        Ok(data_view(addr, bytes, &self.binary, &engine))
     }
 
     pub fn get_data(&self, addr: u64, size: usize) -> Result<Value, String> {
@@ -265,7 +330,8 @@ impl AeonSession {
             .binary
             .read_vaddr(addr, size)
             .ok_or_else(|| format!("Cannot read address 0x{:x} — not in any LOAD segment", addr))?;
-        Ok(data_view(addr, bytes))
+        let engine = self.analysis_state.borrow();
+        Ok(data_view(addr, bytes, &self.binary, &engine))
     }
 
     pub fn get_string(&self, addr: u64, max_len: usize) -> Result<Value, String> {
@@ -274,11 +340,14 @@ impl AeonSession {
             .binary
             .read_string(addr, max_len)
             .ok_or_else(|| format!("Cannot read address 0x{:x} — not in any LOAD segment", addr))?;
+        let engine = self.analysis_state.borrow();
 
         Ok(json!({
             "addr": format!("0x{:x}", addr),
             "length": string.len(),
             "string": string,
+            "resolved_name": resolved_name_value(addr, None, &self.binary, &engine),
+            "semantic": semantic_value(&engine, addr),
         }))
     }
 
@@ -319,7 +388,12 @@ impl AeonSession {
             pc += 4;
         }
 
-        let named_functions = self.binary.functions.iter().filter(|f| f.name.is_some()).count();
+        let named_functions = self
+            .binary
+            .functions
+            .iter()
+            .filter(|f| f.name.is_some())
+            .count();
 
         json!({
             "total_instructions": total,
@@ -361,7 +435,8 @@ impl AeonSession {
         }
 
         let bytes = &self.binary.data[file_start..file_end];
-        let listing = lift_function(bytes, start_addr);
+        let engine = self.analysis_state.borrow();
+        let listing = lift_function(bytes, start_addr, &self.binary, &engine);
 
         Ok(json!({
             "start_addr": format!("0x{:x}", start_addr),
@@ -382,20 +457,27 @@ impl AeonSession {
             .binary
             .function_bytes(func)
             .ok_or("Function bytes out of range")?;
-        let listing = lift_function(bytes, func.addr);
+        let engine = self.analysis_state.borrow();
+        let listing = lift_function(bytes, func.addr, &self.binary, &engine);
 
         Ok(json!({
             "query_addr": format!("0x{:x}", addr),
+            "query_semantic": semantic_value(&engine, addr),
             "function": format!("0x{:x}", func.addr),
             "size": func.size,
             "name": option_str(func.name.as_deref()),
+            "resolved_name": resolved_name_value(func.addr, func.name.as_deref(), &self.binary, &engine),
+            "semantic": semantic_value(&engine, func.addr),
             "instruction_count": listing.len(),
             "listing": listing,
         }))
     }
 
     pub fn search_rc4(&self) -> Value {
-        crate::rc4_search::search(&self.binary)
+        let mut report = crate::rc4_search::search(&self.binary);
+        let engine = self.analysis_state.borrow();
+        annotate_rc4_report(&mut report, &self.binary, &engine);
+        report
     }
 
     fn find_function(&self, addr: u64) -> Result<&FunctionInfo, String> {
@@ -405,6 +487,19 @@ impl AeonSession {
             .find(|f| f.addr == addr)
             .ok_or_else(|| format!("No function at 0x{:x}", addr))
     }
+}
+
+fn function_matches_filter(func: &FunctionInfo, filter: &str, engine: &AeonEngine) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+
+    func.name
+        .as_deref()
+        .map_or(false, |name| name.contains(filter))
+        || engine
+            .symbol_name(func.addr)
+            .map_or(false, |symbol| symbol.contains(filter))
 }
 
 fn option_str(value: Option<&str>) -> Value {
@@ -421,6 +516,41 @@ fn option_hex(value: Option<u64>) -> Value {
     }
 }
 
+fn semantic_to_value(value: Option<SemanticContext>) -> Value {
+    match value {
+        Some(value) => serde_json::to_value(value).unwrap(),
+        None => Value::Null,
+    }
+}
+
+fn semantic_value(engine: &AeonEngine, addr: u64) -> Value {
+    semantic_to_value(engine.semantic_context(addr))
+}
+
+fn exact_function_name<'a>(binary: &'a LoadedBinary, addr: u64) -> Option<&'a str> {
+    binary
+        .functions
+        .iter()
+        .find(|func| func.addr == addr)
+        .and_then(|func| func.name.as_deref())
+}
+
+fn resolved_name_value(
+    addr: u64,
+    fallback_name: Option<&str>,
+    binary: &LoadedBinary,
+    engine: &AeonEngine,
+) -> Value {
+    match engine
+        .symbol_name(addr)
+        .or(fallback_name)
+        .or_else(|| exact_function_name(binary, addr))
+    {
+        Some(value) => Value::String(value.to_string()),
+        None => Value::Null,
+    }
+}
+
 fn percent(count: u64, total: u64, decimals: usize) -> String {
     if total == 0 {
         return format!("{:.*}%", decimals, 0.0);
@@ -428,11 +558,17 @@ fn percent(count: u64, total: u64, decimals: usize) -> String {
     format!("{:.*}%", decimals, count as f64 / total as f64 * 100.0)
 }
 
-fn data_view(addr: u64, bytes: &[u8]) -> Value {
+fn data_view(addr: u64, bytes: &[u8], binary: &LoadedBinary, engine: &AeonEngine) -> Value {
     let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
     let ascii: String = bytes
         .iter()
-        .map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' })
+        .map(|&b| {
+            if b.is_ascii_graphic() || b == b' ' {
+                b as char
+            } else {
+                '.'
+            }
+        })
         .collect();
 
     json!({
@@ -440,10 +576,17 @@ fn data_view(addr: u64, bytes: &[u8]) -> Value {
         "size": bytes.len(),
         "hex": hex,
         "ascii": ascii,
+        "resolved_name": resolved_name_value(addr, None, binary, engine),
+        "semantic": semantic_value(engine, addr),
     })
 }
 
-fn lift_function(raw_bytes: &[u8], start_addr: u64) -> Vec<Value> {
+fn lift_function(
+    raw_bytes: &[u8],
+    start_addr: u64,
+    binary: &LoadedBinary,
+    engine: &AeonEngine,
+) -> Vec<Value> {
     let mut listing = Vec::new();
     let mut offset = 0usize;
     let mut pc = start_addr;
@@ -456,21 +599,29 @@ fn lift_function(raw_bytes: &[u8], start_addr: u64) -> Vec<Value> {
             None
         };
 
-        let entry = if let Ok(insn) = bad64::decode(word, pc) {
+        let mut entry = if let Ok(insn) = bad64::decode(word, pc) {
             let result = lifter::lift(&insn, pc, next_pc);
-            json!({
+            let mut entry = json!({
                 "addr": format!("0x{:x}", pc),
                 "asm": result.disasm,
                 "il": format!("{:?}", result.stmt),
                 "edges": result.edges.iter().map(|edge| format!("0x{:x}", edge)).collect::<Vec<_>>(),
-            })
+            });
+            annotate_instruction_entry(&mut entry, pc, &result.stmt, binary, engine);
+            entry
         } else {
-            json!({
+            let mut entry = json!({
                 "addr": format!("0x{:x}", pc),
                 "asm": "(invalid)",
                 "il": "Nop",
-            })
+            });
+            annotate_instruction_address(&mut entry, "addr", pc, None, binary, engine);
+            entry
         };
+
+        if entry.get("semantic").is_none() {
+            annotate_instruction_address(&mut entry, "addr", pc, None, binary, engine);
+        }
 
         listing.push(entry);
         offset += 4;
@@ -478,4 +629,134 @@ fn lift_function(raw_bytes: &[u8], start_addr: u64) -> Vec<Value> {
     }
 
     listing
+}
+
+fn annotate_instruction_entry(
+    entry: &mut Value,
+    addr: u64,
+    stmt: &Stmt,
+    binary: &LoadedBinary,
+    engine: &AeonEngine,
+) {
+    annotate_instruction_address(entry, "addr", addr, None, binary, engine);
+
+    if let Some(call_target) = call_target(stmt) {
+        let call_target_name = exact_function_name(binary, call_target);
+        if let Some(object) = entry.as_object_mut() {
+            object.insert(
+                "call_target".to_string(),
+                Value::String(format!("0x{:x}", call_target)),
+            );
+            object.insert("call_target_name".to_string(), option_str(call_target_name));
+            object.insert(
+                "call_target_resolved_name".to_string(),
+                resolved_name_value(call_target, call_target_name, binary, engine),
+            );
+            object.insert(
+                "call_target_semantic".to_string(),
+                semantic_value(engine, call_target),
+            );
+        }
+    }
+}
+
+fn call_target(stmt: &Stmt) -> Option<u64> {
+    match stmt {
+        Stmt::Call {
+            target: Expr::Imm(target),
+        } => Some(*target),
+        _ => None,
+    }
+}
+
+fn annotate_function_details(
+    details: &mut Value,
+    func: &FunctionInfo,
+    binary: &LoadedBinary,
+    engine: &AeonEngine,
+) {
+    if let Some(object) = details.as_object_mut() {
+        object.insert("name".to_string(), option_str(func.name.as_deref()));
+        object.insert(
+            "resolved_name".to_string(),
+            resolved_name_value(func.addr, func.name.as_deref(), binary, engine),
+        );
+        object.insert("semantic".to_string(), semantic_value(engine, func.addr));
+    }
+
+    if let Some(entries) = details.get_mut("il_listing").and_then(Value::as_array_mut) {
+        annotate_listing(entries, "address", binary, engine);
+    }
+}
+
+fn annotate_rc4_report(report: &mut Value, binary: &LoadedBinary, engine: &AeonEngine) {
+    let Some(candidates) = report.get_mut("candidates").and_then(Value::as_array_mut) else {
+        return;
+    };
+
+    for candidate in candidates {
+        let Some(addr) = candidate
+            .get("address")
+            .and_then(Value::as_str)
+            .and_then(parse_hex_value)
+        else {
+            continue;
+        };
+
+        if let Some(object) = candidate.as_object_mut() {
+            object.insert(
+                "resolved_name".to_string(),
+                resolved_name_value(addr, exact_function_name(binary, addr), binary, engine),
+            );
+            object.insert("semantic".to_string(), semantic_value(engine, addr));
+        }
+
+        if let Some(entries) = candidate
+            .get_mut("il_listing")
+            .and_then(Value::as_array_mut)
+        {
+            annotate_listing(entries, "addr", binary, engine);
+        }
+    }
+}
+
+fn annotate_listing(
+    entries: &mut [Value],
+    addr_key: &str,
+    binary: &LoadedBinary,
+    engine: &AeonEngine,
+) {
+    for entry in entries {
+        let Some(addr) = entry
+            .get(addr_key)
+            .and_then(Value::as_str)
+            .and_then(parse_hex_value)
+        else {
+            continue;
+        };
+
+        annotate_instruction_address(entry, addr_key, addr, None, binary, engine);
+    }
+}
+
+fn annotate_instruction_address(
+    entry: &mut Value,
+    _addr_key: &str,
+    addr: u64,
+    fallback_name: Option<&str>,
+    binary: &LoadedBinary,
+    engine: &AeonEngine,
+) {
+    if let Some(object) = entry.as_object_mut() {
+        object.insert(
+            "resolved_name".to_string(),
+            resolved_name_value(addr, fallback_name, binary, engine),
+        );
+        object.insert("semantic".to_string(), semantic_value(engine, addr));
+    }
+}
+
+fn parse_hex_value(value: &str) -> Option<u64> {
+    let trimmed = value.trim_start_matches("0x").trim_start_matches("0X");
+    u64::from_str_radix(trimmed, 16).ok()
 }

@@ -26,6 +26,9 @@ impl AeonFrontend {
             "load_binary" => self.tool_load_binary(args),
             "list_functions" => self.tool_list_functions(args),
             "set_analysis_name" => self.tool_set_analysis_name(args),
+            "rename_symbol" => self.tool_rename_symbol(args),
+            "define_struct" => self.tool_define_struct(args),
+            "add_hypothesis" => self.tool_add_hypothesis(args),
             "search_analysis_names" => self.tool_search_analysis_names(args),
             "get_function_il" => self.tool_get_function_il(args),
             "get_function_cfg" => self.tool_get_function_cfg(args),
@@ -62,8 +65,14 @@ impl AeonFrontend {
 
     fn tool_list_functions(&self, args: &Value) -> Result<Value, String> {
         let session = self.require_session()?;
-        let offset = args.get("offset").and_then(|value| value.as_u64()).unwrap_or(0) as usize;
-        let limit = args.get("limit").and_then(|value| value.as_u64()).unwrap_or(100) as usize;
+        let offset = args
+            .get("offset")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize;
+        let limit = args
+            .get("limit")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(100) as usize;
         let name_filter = args
             .get("name_filter")
             .and_then(|value| value.as_str())
@@ -79,6 +88,36 @@ impl AeonFrontend {
             .and_then(|value| value.as_str())
             .ok_or("Missing required parameter: name")?;
         Ok(session.set_analysis_name(addr, name))
+    }
+
+    fn tool_rename_symbol(&self, args: &Value) -> Result<Value, String> {
+        let session = self.require_session()?;
+        let addr = parse_addr_arg(args)?;
+        let name = args
+            .get("name")
+            .and_then(|value| value.as_str())
+            .ok_or("Missing required parameter: name")?;
+        Ok(session.rename_symbol(addr, name))
+    }
+
+    fn tool_define_struct(&self, args: &Value) -> Result<Value, String> {
+        let session = self.require_session()?;
+        let addr = parse_addr_arg(args)?;
+        let definition = args
+            .get("definition")
+            .and_then(|value| value.as_str())
+            .ok_or("Missing required parameter: definition")?;
+        Ok(session.define_struct(addr, definition))
+    }
+
+    fn tool_add_hypothesis(&self, args: &Value) -> Result<Value, String> {
+        let session = self.require_session()?;
+        let addr = parse_addr_arg(args)?;
+        let note = args
+            .get("note")
+            .and_then(|value| value.as_str())
+            .ok_or("Missing required parameter: note")?;
+        Ok(session.add_hypothesis(addr, note))
     }
 
     fn tool_search_analysis_names(&self, args: &Value) -> Result<Value, String> {
@@ -111,7 +150,10 @@ impl AeonFrontend {
     fn tool_get_bytes(&self, args: &Value) -> Result<Value, String> {
         let session = self.require_session()?;
         let addr = parse_addr_arg(args)?;
-        let size = args.get("size").and_then(|value| value.as_u64()).unwrap_or(64) as usize;
+        let size = args
+            .get("size")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(64) as usize;
         session.get_bytes(addr, size)
     }
 
@@ -136,8 +178,8 @@ impl AeonFrontend {
             .and_then(|value| value.as_str())
             .ok_or("Missing required parameter: stop_addr")?;
 
-        let start_addr = parse_hex(start_str)
-            .ok_or_else(|| format!("Invalid hex address: {}", start_str))?;
+        let start_addr =
+            parse_hex(start_str).ok_or_else(|| format!("Invalid hex address: {}", start_str))?;
         let stop_addr =
             parse_hex(stop_str).ok_or_else(|| format!("Invalid hex address: {}", stop_str))?;
         session.get_asm(start_addr, stop_addr)
@@ -162,7 +204,10 @@ impl AeonFrontend {
     fn tool_get_data(&self, args: &Value) -> Result<Value, String> {
         let session = self.require_session()?;
         let addr = parse_addr_arg(args)?;
-        let size = args.get("size").and_then(|value| value.as_u64()).unwrap_or(64) as usize;
+        let size = args
+            .get("size")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(64) as usize;
         session.get_data(addr, size)
     }
 }
@@ -185,11 +230,32 @@ pub fn tools_list() -> Value {
                 }})),
 
             tool_schema("set_analysis_name",
-                "Attach or overwrite an analysis name on an address.",
+                "Backwards-compatible alias for rename_symbol. Attaches or overwrites a semantic symbol on an address.",
                 json!({"type": "object", "properties": {
                     "addr": {"type": "string", "description": "Virtual address in hex"},
                     "name": {"type": "string", "description": "Analysis name to assign to the address"}
                 }, "required": ["addr", "name"]})),
+
+            tool_schema("rename_symbol",
+                "Attach or overwrite a semantic symbol name on an address.",
+                json!({"type": "object", "properties": {
+                    "addr": {"type": "string", "description": "Virtual address in hex"},
+                    "name": {"type": "string", "description": "Semantic symbol name to assign to the address"}
+                }, "required": ["addr", "name"]})),
+
+            tool_schema("define_struct",
+                "Attach or overwrite a structure definition on an address.",
+                json!({"type": "object", "properties": {
+                    "addr": {"type": "string", "description": "Virtual address in hex"},
+                    "definition": {"type": "string", "description": "Structure definition text"}
+                }, "required": ["addr", "definition"]})),
+
+            tool_schema("add_hypothesis",
+                "Record a semantic hypothesis on an address. Duplicate notes are ignored.",
+                json!({"type": "object", "properties": {
+                    "addr": {"type": "string", "description": "Virtual address in hex"},
+                    "note": {"type": "string", "description": "Hypothesis or analyst note"}
+                }, "required": ["addr", "note"]})),
 
             tool_schema("search_analysis_names",
                 "Search analysis names attached to addresses using a regex pattern.",
@@ -260,6 +326,31 @@ pub fn tools_list() -> Value {
     })
 }
 
+pub fn tools_markdown_table() -> String {
+    let mut lines = vec![
+        "| Tool | Description |".to_string(),
+        "|------|-------------|".to_string(),
+    ];
+
+    if let Some(tools) = tools_list().get("tools").and_then(Value::as_array) {
+        for tool in tools {
+            let Some(name) = tool.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(description) = tool.get("description").and_then(Value::as_str) else {
+                continue;
+            };
+            lines.push(format!(
+                "| `{}` | {} |",
+                escape_markdown_cell(name),
+                escape_markdown_cell(description)
+            ));
+        }
+    }
+
+    lines.join("\n")
+}
+
 fn tool_schema(name: &str, description: &str, input_schema: Value) -> Value {
     json!({
         "name": name,
@@ -279,4 +370,40 @@ fn parse_addr_arg(args: &Value) -> Result<u64, String> {
 fn parse_hex(s: &str) -> Option<u64> {
     let s = s.trim_start_matches("0x").trim_start_matches("0X");
     u64::from_str_radix(s, 16).ok()
+}
+
+fn escape_markdown_cell(value: &str) -> String {
+    value.replace('|', "\\|")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::tools_markdown_table;
+
+    const README_BEGIN: &str = "<!-- BEGIN GENERATED TOOL SURFACE -->";
+    const README_END: &str = "<!-- END GENERATED TOOL SURFACE -->";
+
+    #[test]
+    fn readme_tool_surface_matches_generated_table() {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let readme_path = manifest_dir.join("../../README.md");
+        let readme = std::fs::read_to_string(&readme_path).expect("failed to read README.md");
+
+        let start = readme
+            .find(README_BEGIN)
+            .expect("missing tool surface start marker");
+        let after_start = start + README_BEGIN.len();
+        let rest = &readme[after_start..];
+        let end_rel = rest.find(README_END).expect("missing tool surface end marker");
+        let actual = rest[..end_rel].trim();
+        let expected = tools_markdown_table();
+
+        assert_eq!(
+            actual,
+            expected,
+            "README tool surface is out of date; regenerate it from tools_markdown_table()"
+        );
+    }
 }

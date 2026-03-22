@@ -1,9 +1,17 @@
 {
   "mcpServers": {
     "aeon": {
-      "command": "/home/sdancer/aeon/target/release/aeon-mcp",
-      "args": [],
-      "description": "Reverse engineering toolkit for ARM64 ELF binaries. Use this to load binaries, list functions, disassemble/lift code to IL, inspect control flow graphs, trace cross-references, read raw bytes, compute lift coverage, and detect cryptographic patterns (RC4). Start by calling load_binary with a path, then explore with the other tools."
+      "command": "cargo",
+      "args": [
+        "run",
+        "--quiet",
+        "--release",
+        "-p",
+        "aeon-frontend",
+        "--bin",
+        "aeon-mcp"
+      ],
+      "description": "Agent-native ARM64 ELF analysis server. Use this to load binaries, inspect functions, CFGs, xrefs, bytes, strings, raw data, and semantic blackboard state. Start by calling load_binary with a path, then query the loaded binary with the other tools."
     }
   }
 }

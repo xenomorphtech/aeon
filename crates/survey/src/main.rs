@@ -1,22 +1,33 @@
 use std::collections::HashMap;
-use std::fs;
+
+use aeon::elf::load_elf;
+use serde_json::json;
+
+struct Args {
+    binary_path: String,
+    limit: Option<usize>,
+    json_output: bool,
+}
 
 fn main() {
-    const FILE_OFFSET: usize = 0x017c9000;
-    const SIZE: usize = 0x06b3bb98;
+    let args = match parse_args() {
+        Ok(args) => args,
+        Err(message) => {
+            eprintln!("{}", message);
+            std::process::exit(1);
+        }
+    };
 
-    let data = fs::read("/home/sdancer/aeon/libUnreal.so")
-        .expect("failed to read libUnreal.so");
+    let binary = match load_elf(&args.binary_path) {
+        Ok(binary) => binary,
+        Err(error) => {
+            eprintln!("Failed to load ELF: {}", error);
+            std::process::exit(1);
+        }
+    };
 
-    let end = FILE_OFFSET + SIZE;
-    assert!(
-        end <= data.len(),
-        "binary too small: need {} bytes, have {}",
-        end,
-        data.len()
-    );
-
-    let text = &data[FILE_OFFSET..end];
+    let text = binary.text_bytes();
+    let base_addr = binary.text_section_addr;
 
     let mut counts: HashMap<String, u64> = HashMap::new();
     let mut decode_errors: u64 = 0;
@@ -25,33 +36,98 @@ fn main() {
     for i in 0..words {
         let off = i * 4;
         let word = u32::from_le_bytes(text[off..off + 4].try_into().unwrap());
-        // bad64::decode takes (word, address); use a dummy vaddr
-        let vaddr: u64 = 0x017cd000 + off as u64;
+        let vaddr = base_addr + off as u64;
         match bad64::decode(word, vaddr) {
             Ok(insn) => {
                 let name = format!("{:?}", insn.op());
                 *counts.entry(name).or_insert(0) += 1;
             }
-            Err(_) => {
-                decode_errors += 1;
-            }
+            Err(_) => decode_errors += 1,
         }
     }
 
-    // Sort by count descending, then name ascending for ties
     let mut sorted: Vec<(String, u64)> = counts.into_iter().collect();
     sorted.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
-    println!("ARM64 opcode survey of libUnreal.so .text section");
-    println!("  File offset : 0x{:08x}", FILE_OFFSET);
-    println!("  Size        : 0x{:08x} ({} bytes)", SIZE, SIZE);
+    if args.json_output {
+        let counts = sorted
+            .iter()
+            .take(args.limit.unwrap_or(sorted.len()))
+            .map(|(opcode, count)| {
+                json!({
+                    "opcode": opcode,
+                    "count": count,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let output = json!({
+            "path": args.binary_path,
+            "text_section_addr": format!("0x{:x}", binary.text_section_addr),
+            "text_section_size": format!("0x{:x}", binary.text_section_size),
+            "total_words": words,
+            "decode_errors": decode_errors,
+            "unique_opcodes": sorted.len(),
+            "counts": counts,
+        });
+        println!("{}", serde_json::to_string_pretty(&output).unwrap());
+        return;
+    }
+
+    println!("ARM64 opcode survey");
+    println!("  Binary      : {}", args.binary_path);
+    println!("  .text addr  : 0x{:x}", binary.text_section_addr);
+    println!(
+        "  .text size  : 0x{:x} ({} bytes)",
+        binary.text_section_size, binary.text_section_size
+    );
     println!("  Total words : {}", words);
     println!("  Decode errors (undefined/data): {}", decode_errors);
     println!("  Unique opcodes: {}", sorted.len());
     println!();
     println!("{:<40} {:>12}", "OPCODE", "COUNT");
     println!("{}", "-".repeat(54));
-    for (op, cnt) in &sorted {
-        println!("{:<40} {:>12}", op, cnt);
+
+    let limit = args.limit.unwrap_or(sorted.len());
+    for (opcode, count) in sorted.iter().take(limit) {
+        println!("{:<40} {:>12}", opcode, count);
     }
+}
+
+fn parse_args() -> Result<Args, String> {
+    let mut binary_path = None;
+    let mut limit = None;
+    let mut json_output = false;
+
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-h" | "--help" | "help" => return Err(usage()),
+            "--json" => json_output = true,
+            "--limit" => {
+                let value = args.next().ok_or_else(usage)?;
+                let parsed = value
+                    .parse::<usize>()
+                    .map_err(|_| format!("invalid value for --limit: {}", value))?;
+                limit = Some(parsed);
+            }
+            _ if binary_path.is_none() => binary_path = Some(arg),
+            _ => return Err(usage()),
+        }
+    }
+
+    let binary_path = binary_path.ok_or_else(usage)?;
+    Ok(Args {
+        binary_path,
+        limit,
+        json_output,
+    })
+}
+
+fn usage() -> String {
+    [
+        "Usage:",
+        "  survey <binary> [--limit <count>] [--json]",
+    ]
+    .join("\n")
 }

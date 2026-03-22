@@ -4,4 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+aeon = { path = "../aeon" }
 bad64 = "0.6"
+serde_json = "1.0"

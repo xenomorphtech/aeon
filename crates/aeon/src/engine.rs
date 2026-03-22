@@ -1,26 +1,47 @@
-use bevy_ecs::{entity::Entity, world::World};
+use std::collections::HashMap;
+
+use bevy_ecs::world::World;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::il::Stmt;
-use crate::components::{
-    Address, AnalysisName, BelongsToFunction, CfgEdges, LiftedIL, RawInstruction,
-};
 use crate::analysis::AeonAnalysis;
+use crate::components::{Address, BelongsToFunction, CfgEdges, LiftedIL, RawInstruction};
 use crate::elf::LoadedBinary;
+use crate::il::Stmt;
 use crate::lifter;
 
 pub struct AeonEngine {
     pub world: World,
     pub binary: Option<LoadedBinary>,
+    semantic: HashMap<u64, SemanticContext>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct SemanticContext {
+    pub symbol: Option<String>,
+    pub struct_definition: Option<String>,
+    pub hypotheses: Vec<String>,
+}
+
+impl SemanticContext {
+    fn is_empty(&self) -> bool {
+        self.symbol.is_none() && self.struct_definition.is_none() && self.hypotheses.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct BlackboardSummary {
+    pub entries: usize,
+    pub renamed_symbols: usize,
+    pub defined_structs: usize,
+    pub hypotheses: usize,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AnalysisNameMatch {
     pub address: u64,
     pub analysis_name: String,
-    pub function: Option<u64>,
 }
 
 impl AeonEngine {
@@ -28,6 +49,7 @@ impl AeonEngine {
         AeonEngine {
             world: World::new(),
             binary: None,
+            semantic: HashMap::new(),
         }
     }
 
@@ -50,7 +72,6 @@ impl AeonEngine {
             None => return false,
         };
 
-        // Find the function
         let func = match binary.functions.iter().find(|f| f.addr == func_addr) {
             Some(f) => f,
             None => return false,
@@ -67,7 +88,6 @@ impl AeonEngine {
 
     /// Ingest raw function bytes into ECS
     pub fn ingest_function(&mut self, func_addr: u64, raw_bytes: &[u8]) {
-        // Decode all instructions first
         let mut decoded = Vec::new();
         let mut offset = 0usize;
         let mut pc = func_addr;
@@ -106,33 +126,78 @@ impl AeonEngine {
         }
     }
 
-    /// Attach or overwrite an analysis name on an address entity.
-    pub fn set_analysis_name(&mut self, addr: u64, name: impl Into<String>) {
-        let entity = self.find_address_entity(addr).unwrap_or_else(|| {
-            self.world.spawn((Address(addr),)).id()
-        });
-        self.world
-            .entity_mut(entity)
-            .insert(AnalysisName(name.into()));
+    pub fn set_analysis_name(&mut self, addr: u64, name: impl Into<String>) -> SemanticContext {
+        self.rename_symbol(addr, name)
     }
 
-    /// Search analysis names attached to addresses using a regex.
+    pub fn rename_symbol(&mut self, addr: u64, name: impl Into<String>) -> SemanticContext {
+        let entry = self.semantic.entry(addr).or_default();
+        entry.symbol = Some(name.into());
+        entry.clone()
+    }
+
+    pub fn define_struct(&mut self, addr: u64, definition: impl Into<String>) -> SemanticContext {
+        let entry = self.semantic.entry(addr).or_default();
+        entry.struct_definition = Some(definition.into());
+        entry.clone()
+    }
+
+    pub fn add_hypothesis(&mut self, addr: u64, note: impl Into<String>) -> SemanticContext {
+        let note = note.into();
+        let entry = self.semantic.entry(addr).or_default();
+        if !entry.hypotheses.iter().any(|existing| existing == &note) {
+            entry.hypotheses.push(note);
+        }
+        entry.clone()
+    }
+
+    pub fn semantic_context(&self, addr: u64) -> Option<SemanticContext> {
+        self.semantic
+            .get(&addr)
+            .filter(|context| !context.is_empty())
+            .cloned()
+    }
+
+    pub fn symbol_name(&self, addr: u64) -> Option<&str> {
+        self.semantic
+            .get(&addr)
+            .and_then(|context| context.symbol.as_deref())
+    }
+
+    pub fn blackboard_summary(&self) -> BlackboardSummary {
+        let mut summary = BlackboardSummary::default();
+
+        for context in self.semantic.values().filter(|context| !context.is_empty()) {
+            summary.entries += 1;
+            if context.symbol.is_some() {
+                summary.renamed_symbols += 1;
+            }
+            if context.struct_definition.is_some() {
+                summary.defined_structs += 1;
+            }
+            summary.hypotheses += context.hypotheses.len();
+        }
+
+        summary
+    }
+
+    /// Search renamed symbols attached to addresses using a regex.
     pub fn search_analysis_names(
-        &mut self,
+        &self,
         pattern: &str,
     ) -> Result<Vec<AnalysisNameMatch>, regex::Error> {
         let regex = Regex::new(pattern)?;
         let mut matches = Vec::new();
 
-        let mut query = self
-            .world
-            .query::<(&Address, &AnalysisName, Option<&BelongsToFunction>)>();
-        for (addr, analysis_name, belongs) in query.iter(&self.world) {
-            if regex.is_match(&analysis_name.0) {
+        for (&addr, context) in &self.semantic {
+            let Some(name) = context.symbol.as_deref() else {
+                continue;
+            };
+
+            if regex.is_match(name) {
                 matches.push(AnalysisNameMatch {
-                    address: addr.0,
-                    analysis_name: analysis_name.0.clone(),
-                    function: belongs.map(|belongs| belongs.0),
+                    address: addr,
+                    analysis_name: name.to_string(),
                 });
             }
         }
@@ -151,7 +216,11 @@ impl AeonEngine {
         let mut instructions: Vec<(u64, String, Stmt)> = Vec::new();
 
         let mut query_state = self.world.query::<(
-            &Address, &RawInstruction, &LiftedIL, &BelongsToFunction, Option<&CfgEdges>,
+            &Address,
+            &RawInstruction,
+            &LiftedIL,
+            &BelongsToFunction,
+            Option<&CfgEdges>,
         )>();
 
         for (addr, raw, lifted, belongs, cfg_edges) in query_state.iter(&self.world) {
@@ -169,20 +238,30 @@ impl AeonEngine {
         analysis.run();
         instructions.sort_by_key(|(addr, _, _)| *addr);
 
-        let il_listing: Vec<Value> = instructions.iter().map(|(addr, disasm, stmt)| {
-            json!({
-                "address": format!("0x{:x}", addr),
-                "disassembly": disasm,
-                "il": format!("{:?}", stmt),
+        let il_listing: Vec<Value> = instructions
+            .iter()
+            .map(|(addr, disasm, stmt)| {
+                json!({
+                    "address": format!("0x{:x}", addr),
+                    "disassembly": disasm,
+                    "il": format!("{:?}", stmt),
+                })
             })
-        }).collect();
+            .collect();
 
-        let internal_edges: Vec<Value> = analysis.internal_edge.iter().map(|(_, src, dst)| {
-            json!({ "src": format!("0x{:x}", src), "dst": format!("0x{:x}", dst) })
-        }).collect();
+        let internal_edges: Vec<Value> = analysis
+            .internal_edge
+            .iter()
+            .map(|(_, src, dst)| {
+                json!({ "src": format!("0x{:x}", src), "dst": format!("0x{:x}", dst) })
+            })
+            .collect();
 
-        let terminals: Vec<String> = analysis.terminal.iter()
-            .map(|(_, addr)| format!("0x{:x}", addr)).collect();
+        let terminals: Vec<String> = analysis
+            .terminal
+            .iter()
+            .map(|(_, addr)| format!("0x{:x}", addr))
+            .collect();
 
         json!({
             "function": format!("0x{:x}", target_func),
@@ -209,7 +288,6 @@ impl AeonEngine {
         let mut proper_il: u64 = 0;
         let mut intrinsic_count: u64 = 0;
         let mut nop_count: u64 = 0;
-        let _other: u64 = 0;
 
         let mut offset = 0usize;
         let mut pc = base_addr;
@@ -224,10 +302,11 @@ impl AeonEngine {
                     match &result.stmt {
                         Stmt::Nop => nop_count += 1,
                         Stmt::Intrinsic { .. } => intrinsic_count += 1,
-                        Stmt::Assign { src: crate::il::Expr::Intrinsic { .. }, .. } => intrinsic_count += 1,
-                        Stmt::Pair(_, _) => {
-                            proper_il += 1;
-                        }
+                        Stmt::Assign {
+                            src: crate::il::Expr::Intrinsic { .. },
+                            ..
+                        } => intrinsic_count += 1,
+                        Stmt::Pair(_, _) => proper_il += 1,
                         _ => proper_il += 1,
                     }
                 }
@@ -256,26 +335,15 @@ impl AeonEngine {
             "text_section_size": format!("0x{:x}", binary.text_section_size),
         })
     }
-
-    fn find_address_entity(&mut self, addr: u64) -> Option<Entity> {
-        let mut query = self.world.query::<(Entity, &Address)>();
-        query
-            .iter(&self.world)
-            .find_map(|(entity, address)| (address.0 == addr).then_some(entity))
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AeonEngine, AnalysisNameMatch};
-    use crate::components::{Address, BelongsToFunction};
+    use super::{AeonEngine, AnalysisNameMatch, SemanticContext};
 
     #[test]
-    fn analysis_name_search_matches_regex_and_reports_function() {
+    fn analysis_name_search_matches_regex() {
         let mut engine = AeonEngine::new();
-        engine
-            .world
-            .spawn((Address(0x1010), BelongsToFunction(0x1000)));
         engine.set_analysis_name(0x1010, "rc4_candidate");
         engine.set_analysis_name(0x2020, "aes_round");
 
@@ -286,8 +354,39 @@ mod tests {
             vec![AnalysisNameMatch {
                 address: 0x1010,
                 analysis_name: "rc4_candidate".to_string(),
-                function: Some(0x1000),
             }]
         );
+    }
+
+    #[test]
+    fn semantic_context_accumulates_mutations_without_duplicate_hypotheses() {
+        let mut engine = AeonEngine::new();
+        engine.rename_symbol(0x1000, "load_plugin_manifest");
+        engine.define_struct(0x1000, "NetworkPacket { size: u32, data: char* }");
+        engine.add_hypothesis(
+            0x1000,
+            "This looks like a custom stream cipher initialization block",
+        );
+        engine.add_hypothesis(
+            0x1000,
+            "This looks like a custom stream cipher initialization block",
+        );
+
+        assert_eq!(
+            engine.semantic_context(0x1000),
+            Some(SemanticContext {
+                symbol: Some("load_plugin_manifest".to_string()),
+                struct_definition: Some("NetworkPacket { size: u32, data: char* }".to_string()),
+                hypotheses: vec![
+                    "This looks like a custom stream cipher initialization block".to_string(),
+                ],
+            })
+        );
+
+        let summary = engine.blackboard_summary();
+        assert_eq!(summary.entries, 1);
+        assert_eq!(summary.renamed_symbols, 1);
+        assert_eq!(summary.defined_structs, 1);
+        assert_eq!(summary.hypotheses, 1);
     }
 }
