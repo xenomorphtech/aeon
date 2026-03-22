@@ -21,6 +21,7 @@ dependencies = [
 name = "aeon-eval"
 version = "0.1.0"
 dependencies = [
+ "aeon",
  "serde",
  "serde_json",
 ]

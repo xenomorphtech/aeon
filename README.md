@@ -41,6 +41,7 @@ cargo build --release
 This produces:
 
 - `target/release/aeon`
+- `target/release/aeon-eval`
 - `target/release/aeon-mcp`
 - `target/release/aeon-http`
 - `target/release/survey`
@@ -130,6 +131,14 @@ survey samples/hello_aarch64.elf --limit 20
 survey samples/hello_aarch64.elf --json
 ```
 
+### Eval
+
+`aeon-eval` runs reproducible capability checks and emits evidence-bearing JSON:
+
+```bash
+aeon-eval constructor-layout libUnreal.so 0x05e66990
+```
+
 ## Tool Surface
 
 These tools are exposed by the MCP and HTTP frontends:
@@ -180,6 +189,7 @@ ELF binary
 | `crates/aeon/src/elf.rs` | ELF parsing and function discovery |
 | `crates/aeon/src/lifter.rs` | ARM64 to AeonIL lifting |
 | `crates/aeon/src/il.rs` | Compatibility re-export of `aeonil` |
+| `crates/aeon/src/object_layout.rs` | Constructor object-layout recovery for pointer fields |
 | `crates/aeon/src/components.rs` | ECS components for lifted facts |
 | `crates/aeon/src/analysis.rs` | Datalog rules for CFG and reachability |
 | `crates/aeon/src/rc4_search.rs` | Behavioral RC4 detection |

@@ -47,6 +47,7 @@ pub struct TaskSpec {
 pub enum TaskKind {
     FindConfigLoader,
     RecoverPacketShape,
+    RecoverConstructorObjectLayout,
     ProveReachability,
     ExtractDecryptedStrings,
     IdentifyCustomCryptoLoop,
@@ -119,6 +120,7 @@ pub enum EvidenceKind {
     Address,
     Function,
     String,
+    ObjectPointerLayout,
     StructDefinition,
     DataFlowSlice,
     DatalogQuery,
@@ -166,10 +168,84 @@ impl EvaluationRun {
     }
 }
 
+pub fn evaluate_constructor_object_layout(
+    binary_path: &str,
+    addr: u64,
+) -> Result<EvaluationRun, Box<dyn std::error::Error>> {
+    let session = aeon::AeonSession::load(binary_path)?;
+    let layout = session
+        .analyze_constructor_object_layout(addr)
+        .map_err(std::io::Error::other)?;
+    let layout_value = serde_json::to_value(&layout)?;
+
+    let outcome = if layout.final_pointer_fields.is_empty() {
+        RunOutcome::Failed
+    } else {
+        RunOutcome::Passed
+    };
+
+    let claim_statement = if layout.final_pointer_fields.is_empty() {
+        format!(
+            "No object-rooted pointer fields were recovered from constructor 0x{:x}.",
+            layout.function_addr
+        )
+    } else {
+        format!(
+            "Constructor 0x{:x} lays out {} pointer fields on its object.",
+            layout.function_addr,
+            layout.final_pointer_fields.len()
+        )
+    };
+
+    Ok(EvaluationRun {
+        run_id: format!("constructor-layout:{}:0x{:x}", binary_path, addr),
+        task_id: format!("recover-constructor-object-layout:0x{:x}", addr),
+        agent: AgentDescriptor {
+            name: "aeon-eval".to_string(),
+            model: None,
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        },
+        outcome,
+        claims: vec![Claim {
+            id: "claim-constructor-layout".to_string(),
+            statement: claim_statement,
+            confidence: Some(if layout.final_pointer_fields.is_empty() {
+                0.2
+            } else {
+                0.95
+            }),
+            evidence_ids: vec!["ev-constructor-layout".to_string()],
+            metadata: serde_json::json!({
+                "query_addr": format!("0x{:x}", layout.query_addr),
+                "function_addr": format!("0x{:x}", layout.function_addr),
+                "field_offsets": layout.final_pointer_fields.iter().map(|field| format!("0x{:x}", field.field_offset)).collect::<Vec<_>>(),
+            }),
+        }],
+        evidence: vec![EvidenceItem {
+            id: "ev-constructor-layout".to_string(),
+            kind: EvidenceKind::ObjectPointerLayout,
+            label: format!("constructor_layout@0x{:x}", layout.function_addr),
+            value: layout_value,
+            provenance: vec![ProvenanceRef {
+                tool: "analyze_constructor_object_layout".to_string(),
+                locator: format!("{}:0x{:x}", binary_path, addr),
+            }],
+        }],
+        metrics: RunMetrics {
+            duration_ms: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+            tool_calls: 1,
+            metadata: Value::Null,
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::path::PathBuf;
 
     #[test]
     fn claims_with_missing_evidence_reports_dangling_references() {
@@ -238,5 +314,32 @@ mod tests {
         let encoded = serde_json::to_string(&task).unwrap();
         let decoded: TaskSpec = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, task);
+    }
+
+    #[test]
+    fn constructor_layout_eval_produces_object_layout_evidence() {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let binary_path = manifest_dir.join("../../libUnreal.so");
+        if !binary_path.exists() {
+            return;
+        }
+
+        let run = evaluate_constructor_object_layout(binary_path.to_str().unwrap(), 0x05e66990)
+            .expect("constructor layout evaluation should succeed");
+
+        assert_eq!(run.outcome, RunOutcome::Passed);
+        assert_eq!(run.evidence.len(), 1);
+        assert_eq!(run.evidence[0].kind, EvidenceKind::ObjectPointerLayout);
+
+        let offsets = run.evidence[0]
+            .value
+            .get("final_pointer_fields")
+            .and_then(Value::as_array)
+            .expect("layout should include final_pointer_fields")
+            .iter()
+            .filter_map(|field| field.get("field_offset").and_then(Value::as_u64))
+            .collect::<Vec<_>>();
+
+        assert_eq!(offsets, vec![0, 32, 280, 296]);
     }
 }

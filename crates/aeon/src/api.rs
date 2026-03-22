@@ -6,6 +6,7 @@ use crate::elf::{self, FunctionInfo, LoadedBinary};
 use crate::engine::{AeonEngine, SemanticContext};
 use crate::il::{Expr, Stmt};
 use crate::lifter;
+use crate::object_layout::ConstructorObjectLayout;
 
 pub struct AeonSession {
     path: String,
@@ -192,6 +193,21 @@ impl AeonSession {
 
     pub fn get_function_il(&self, addr: u64) -> Result<Value, String> {
         self.get_il(addr)
+    }
+
+    pub fn analyze_constructor_object_layout(
+        &self,
+        addr: u64,
+    ) -> Result<ConstructorObjectLayout, String> {
+        let func = self
+            .binary
+            .function_containing(addr)
+            .ok_or_else(|| format!("No function containing 0x{:x}", addr))?;
+        Ok(crate::object_layout::analyze_constructor_object_layout(
+            &self.binary,
+            func,
+            addr,
+        ))
     }
 
     pub fn get_function_details(&self, addr: u64) -> Result<Value, String> {
