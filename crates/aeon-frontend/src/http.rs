@@ -106,9 +106,7 @@ fn respond_json(request: Request, status: u16, body: Value) {
     let response_body = serde_json::to_string_pretty(&body).unwrap();
     let response = Response::from_string(response_body)
         .with_status_code(StatusCode(status))
-        .with_header(
-            Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-        );
+        .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
 
     let _ = request.respond(response);
 }

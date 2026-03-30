@@ -60,11 +60,11 @@ ascent! {
 // ═══════════════════════════════════════════════════════════════════════
 
 struct DataflowFacts {
-    byte_loads: Vec<(u64, u64)>,       // (inst_addr, dest_var = inst_addr)
-    byte_stores: Vec<(u64, u64)>,      // (inst_addr, value_var)
-    xors: Vec<(u64, u64, u64)>,        // (inst_addr, src1_var, src2_var)
-    flows_to: Vec<(u64, u64)>,         // (producer_var, consumer_inst)
-    in_loop: Vec<u64>,                 // inst addrs inside loops
+    byte_loads: Vec<(u64, u64)>,  // (inst_addr, dest_var = inst_addr)
+    byte_stores: Vec<(u64, u64)>, // (inst_addr, value_var)
+    xors: Vec<(u64, u64, u64)>,   // (inst_addr, src1_var, src2_var)
+    flows_to: Vec<(u64, u64)>,    // (producer_var, consumer_inst)
+    in_loop: Vec<u64>,            // inst addrs inside loops
     has_256_bound: bool,
     has_mod256: bool,
 }
@@ -87,7 +87,11 @@ fn extract_dataflow(raw_bytes: &[u8], func_addr: u64) -> DataflowFacts {
 
     while offset + 4 <= raw_bytes.len() {
         let word = u32::from_le_bytes(raw_bytes[offset..offset + 4].try_into().unwrap());
-        let next_pc = if offset + 8 <= raw_bytes.len() { Some(pc + 4) } else { None };
+        let next_pc = if offset + 8 <= raw_bytes.len() {
+            Some(pc + 4)
+        } else {
+            None
+        };
 
         if let Ok(insn) = bad64::decode(word, pc) {
             lifted.push((pc, lifter::lift(&insn, pc, next_pc)));
@@ -122,12 +126,7 @@ fn extract_dataflow(raw_bytes: &[u8], func_addr: u64) -> DataflowFacts {
 }
 
 /// Process a single statement: extract reads → flows_to, classify, update def_map
-fn process_stmt(
-    stmt: &Stmt,
-    pc: u64,
-    def_map: &mut HashMap<u64, u64>,
-    facts: &mut DataflowFacts,
-) {
+fn process_stmt(stmt: &Stmt, pc: u64, def_map: &mut HashMap<u64, u64>, facts: &mut DataflowFacts) {
     match stmt {
         Stmt::Assign { dst, src } => {
             // Collect all register reads from src → flows_to
@@ -184,17 +183,15 @@ fn process_stmt(
             process_stmt(b, pc + 1, def_map, facts); // +1 to distinguish sub-stmts
         }
 
-        Stmt::CondBranch { cond, .. } => {
-            match cond {
-                BranchCond::Zero(e) | BranchCond::NotZero(e) => {
-                    collect_reads(e, pc, def_map, facts);
-                }
-                BranchCond::BitZero(e, _) | BranchCond::BitNotZero(e, _) => {
-                    collect_reads(e, pc, def_map, facts);
-                }
-                _ => {}
+        Stmt::CondBranch { cond, .. } => match cond {
+            BranchCond::Zero(e) | BranchCond::NotZero(e) => {
+                collect_reads(e, pc, def_map, facts);
             }
-        }
+            BranchCond::BitZero(e, _) | BranchCond::BitNotZero(e, _) => {
+                collect_reads(e, pc, def_map, facts);
+            }
+            _ => {}
+        },
 
         Stmt::Intrinsic { operands, .. } => {
             for op in operands {
@@ -220,32 +217,55 @@ fn collect_reads(
                 facts.flows_to.push((producer, consumer_pc));
             }
         }
-        Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b) | Expr::Div(a, b) |
-        Expr::UDiv(a, b) | Expr::And(a, b) | Expr::Or(a, b) | Expr::Xor(a, b) |
-        Expr::Shl(a, b) | Expr::Lsr(a, b) | Expr::Asr(a, b) | Expr::Ror(a, b) |
-        Expr::FAdd(a, b) | Expr::FSub(a, b) | Expr::FMul(a, b) | Expr::FDiv(a, b) |
-        Expr::FMax(a, b) | Expr::FMin(a, b) => {
+        Expr::Add(a, b)
+        | Expr::Sub(a, b)
+        | Expr::Mul(a, b)
+        | Expr::Div(a, b)
+        | Expr::UDiv(a, b)
+        | Expr::And(a, b)
+        | Expr::Or(a, b)
+        | Expr::Xor(a, b)
+        | Expr::Shl(a, b)
+        | Expr::Lsr(a, b)
+        | Expr::Asr(a, b)
+        | Expr::Ror(a, b)
+        | Expr::FAdd(a, b)
+        | Expr::FSub(a, b)
+        | Expr::FMul(a, b)
+        | Expr::FDiv(a, b)
+        | Expr::FMax(a, b)
+        | Expr::FMin(a, b) => {
             collect_reads(a, consumer_pc, def_map, facts);
             collect_reads(b, consumer_pc, def_map, facts);
         }
-        Expr::Neg(a) | Expr::Not(a) | Expr::Abs(a) |
-        Expr::FNeg(a) | Expr::FAbs(a) | Expr::FSqrt(a) | Expr::FCvt(a) |
-        Expr::IntToFloat(a) | Expr::FloatToInt(a) |
-        Expr::Clz(a) | Expr::Cls(a) | Expr::Rev(a) | Expr::Rbit(a) => {
+        Expr::Neg(a)
+        | Expr::Not(a)
+        | Expr::Abs(a)
+        | Expr::FNeg(a)
+        | Expr::FAbs(a)
+        | Expr::FSqrt(a)
+        | Expr::FCvt(a)
+        | Expr::IntToFloat(a)
+        | Expr::FloatToInt(a)
+        | Expr::Clz(a)
+        | Expr::Cls(a)
+        | Expr::Rev(a)
+        | Expr::Rbit(a) => {
             collect_reads(a, consumer_pc, def_map, facts);
         }
         Expr::Load { addr, .. } => {
             collect_reads(addr, consumer_pc, def_map, facts);
         }
-        Expr::SignExtend { src, .. } | Expr::ZeroExtend { src, .. } |
-        Expr::Extract { src, .. } => {
+        Expr::SignExtend { src, .. } | Expr::ZeroExtend { src, .. } | Expr::Extract { src, .. } => {
             collect_reads(src, consumer_pc, def_map, facts);
         }
         Expr::Insert { dst, src, .. } => {
             collect_reads(dst, consumer_pc, def_map, facts);
             collect_reads(src, consumer_pc, def_map, facts);
         }
-        Expr::CondSelect { if_true, if_false, .. } => {
+        Expr::CondSelect {
+            if_true, if_false, ..
+        } => {
             collect_reads(if_true, consumer_pc, def_map, facts);
             collect_reads(if_false, consumer_pc, def_map, facts);
         }
@@ -261,7 +281,9 @@ fn collect_reads(
 /// Scan expression for 256 constant and AND 0xff
 fn scan_constants(expr: &Expr, facts: &mut DataflowFacts) {
     match expr {
-        Expr::Imm(256) => { facts.has_256_bound = true; }
+        Expr::Imm(256) => {
+            facts.has_256_bound = true;
+        }
         Expr::And(a, b) => {
             if matches!(a.as_ref(), Expr::Imm(0xff)) || matches!(b.as_ref(), Expr::Imm(0xff)) {
                 facts.has_mod256 = true;
@@ -273,12 +295,18 @@ fn scan_constants(expr: &Expr, facts: &mut DataflowFacts) {
             scan_constants(a, facts);
             scan_constants(b, facts);
         }
-        Expr::Add(a, b) | Expr::Mul(a, b) | Expr::Or(a, b) | Expr::Xor(a, b) |
-        Expr::Shl(a, b) | Expr::Lsr(a, b) => {
+        Expr::Add(a, b)
+        | Expr::Mul(a, b)
+        | Expr::Or(a, b)
+        | Expr::Xor(a, b)
+        | Expr::Shl(a, b)
+        | Expr::Lsr(a, b) => {
             scan_constants(a, facts);
             scan_constants(b, facts);
         }
-        Expr::Load { addr, .. } => { scan_constants(addr, facts); }
+        Expr::Load { addr, .. } => {
+            scan_constants(addr, facts);
+        }
         Expr::SignExtend { src, .. } | Expr::ZeroExtend { src, .. } => {
             scan_constants(src, facts);
         }
@@ -305,9 +333,7 @@ fn primary_reg(expr: &Expr) -> Option<Reg> {
 fn reg_canon(r: &Reg) -> u64 {
     match r {
         Reg::X(n) | Reg::W(n) => *n as u64,
-        Reg::V(n) | Reg::Q(n) | Reg::D(n) | Reg::S(n) | Reg::H(n) | Reg::VByte(n) => {
-            32 + *n as u64
-        }
+        Reg::V(n) | Reg::Q(n) | Reg::D(n) | Reg::S(n) | Reg::H(n) | Reg::VByte(n) => 32 + *n as u64,
         Reg::SP => 64,
         Reg::XZR => 65,
         Reg::Flags => 66,
@@ -378,21 +404,33 @@ pub fn search(binary: &LoadedBinary) -> Value {
 
         // ── Build result for this verified candidate ─────────────
         let has_ks_xor = !hunter.keystream_xor_detected.is_empty();
-        let kind = if has_ks_xor { "RC4_PRGA (swap + keystream XOR)" }
-                   else if facts.has_256_bound && facts.has_mod256 { "RC4_KSA (swap + 256 loop + mod256)" }
-                   else { "swap_pattern (unconfirmed)" };
+        let kind = if has_ks_xor {
+            "RC4_PRGA (swap + keystream XOR)"
+        } else if facts.has_256_bound && facts.has_mod256 {
+            "RC4_KSA (swap + 256 loop + mod256)"
+        } else {
+            "swap_pattern (unconfirmed)"
+        };
 
-        let swaps: Vec<Value> = hunter.swap_detected.iter().take(3).map(|(l1, l2, s1, s2)| {
-            json!({
-                "load1": format!("0x{:x}", l1),
-                "load2": format!("0x{:x}", l2),
-                "store1": format!("0x{:x}", s1),
-                "store2": format!("0x{:x}", s2),
+        let swaps: Vec<Value> = hunter
+            .swap_detected
+            .iter()
+            .take(3)
+            .map(|(l1, l2, s1, s2)| {
+                json!({
+                    "load1": format!("0x{:x}", l1),
+                    "load2": format!("0x{:x}", l2),
+                    "store1": format!("0x{:x}", s1),
+                    "store2": format!("0x{:x}", s2),
+                })
             })
-        }).collect();
+            .collect();
 
-        let xor_sites: Vec<String> = hunter.keystream_xor_detected.iter()
-            .map(|(a,)| format!("0x{:x}", a)).collect();
+        let xor_sites: Vec<String> = hunter
+            .keystream_xor_detected
+            .iter()
+            .map(|(a,)| format!("0x{:x}", a))
+            .collect();
 
         // Full IL listing for the candidate
         let listing = disassemble_function(raw_bytes, func.addr);
@@ -432,7 +470,11 @@ fn disassemble_function(raw_bytes: &[u8], func_addr: u64) -> Vec<Value> {
 
     while offset + 4 <= raw_bytes.len() {
         let word = u32::from_le_bytes(raw_bytes[offset..offset + 4].try_into().unwrap());
-        let next_pc = if offset + 8 <= raw_bytes.len() { Some(pc + 4) } else { None };
+        let next_pc = if offset + 8 <= raw_bytes.len() {
+            Some(pc + 4)
+        } else {
+            None
+        };
 
         let entry = if let Ok(insn) = bad64::decode(word, pc) {
             let result = lifter::lift(&insn, pc, next_pc);

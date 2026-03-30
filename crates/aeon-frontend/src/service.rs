@@ -34,6 +34,10 @@ impl AeonFrontend {
             "get_function_il" => self.tool_get_function_il(args),
             "get_function_cfg" => self.tool_get_function_cfg(args),
             "get_xrefs" => self.tool_get_xrefs(args),
+            "scan_pointers" => self.tool_scan_pointers(),
+            "scan_vtables" => self.tool_scan_vtables(),
+            "get_function_pointers" => self.tool_get_function_pointers(args),
+            "find_call_paths" => self.tool_find_call_paths(args),
             "get_bytes" => self.tool_get_bytes(args),
             "search_rc4" => self.tool_search_rc4(),
             "get_coverage" => self.tool_get_coverage(),
@@ -150,6 +154,67 @@ impl AeonFrontend {
         let session = self.require_session()?;
         let addr = parse_addr_arg(args)?;
         Ok(session.get_xrefs(addr))
+    }
+
+    fn tool_scan_pointers(&self) -> Result<Value, String> {
+        let session = self.require_session()?;
+        Ok(session.scan_pointers())
+    }
+
+    fn tool_scan_vtables(&self) -> Result<Value, String> {
+        let session = self.require_session()?;
+        Ok(session.scan_vtables())
+    }
+
+    fn tool_get_function_pointers(&self, args: &Value) -> Result<Value, String> {
+        let session = self.require_session()?;
+        let addr = match args.get("addr").and_then(|value| value.as_str()) {
+            Some(value) => Some(
+                parse_hex(value).ok_or_else(|| format!("Invalid hex address: {}", value))?,
+            ),
+            None => None,
+        };
+        let offset = args
+            .get("offset")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize;
+        let limit = args
+            .get("limit")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(50) as usize;
+        session.scan_function_pointers(addr, offset, limit)
+    }
+
+    fn tool_find_call_paths(&self, args: &Value) -> Result<Value, String> {
+        let session = self.require_session()?;
+        let start_str = args
+            .get("start_addr")
+            .and_then(|value| value.as_str())
+            .ok_or("Missing required parameter: start_addr")?;
+        let goal_str = args
+            .get("goal_addr")
+            .and_then(|value| value.as_str())
+            .ok_or("Missing required parameter: goal_addr")?;
+        let start_addr =
+            parse_hex(start_str).ok_or_else(|| format!("Invalid hex address: {}", start_str))?;
+        let goal_addr =
+            parse_hex(goal_str).ok_or_else(|| format!("Invalid hex address: {}", goal_str))?;
+        let max_depth = args
+            .get("max_depth")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(6) as usize;
+        let include_all_paths = parse_bool_arg(args, "include_all_paths", false)?;
+        let max_paths = args
+            .get("max_paths")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(32) as usize;
+        session.find_call_paths(
+            start_addr,
+            goal_addr,
+            max_depth,
+            include_all_paths,
+            max_paths,
+        )
     }
 
     fn tool_get_bytes(&self, args: &Value) -> Result<Value, String> {
@@ -294,6 +359,32 @@ pub fn tools_list() -> Value {
                     "addr": {"type": "string", "description": "Function address in hex"}
                 }, "required": ["addr"]})),
 
+            tool_schema("scan_pointers",
+                "Scan non-executable mapped sections for pointer-sized values that reference other locations in the binary, classifying data-to-data and data-to-code edges.",
+                json!({"type": "object", "properties": {}})),
+
+            tool_schema("scan_vtables",
+                "Detect candidate C++ vtables in .rodata/.data-style sections by finding arrays of function pointers and grouping related tables.",
+                json!({"type": "object", "properties": {}})),
+
+            tool_schema("get_function_pointers",
+                "Enumerate pointer-valued operands and resolved code/data references for one function or a paginated slice of functions.",
+                json!({"type": "object", "properties": {
+                    "addr": {"type": "string", "description": "Optional function address in hex; when present, analyzes the containing function"},
+                    "offset": {"type": "integer", "description": "Start index when scanning multiple functions", "default": 0},
+                    "limit": {"type": "integer", "description": "Max functions to analyze when addr is omitted", "default": 50}
+                }})),
+
+            tool_schema("find_call_paths",
+                "Find shortest and optionally all bounded call-graph paths between two functions using direct calls and vtable-resolved indirect calls.",
+                json!({"type": "object", "properties": {
+                    "start_addr": {"type": "string", "description": "Start function address in hex"},
+                    "goal_addr": {"type": "string", "description": "Goal function address in hex"},
+                    "max_depth": {"type": "integer", "description": "Maximum call depth to explore", "default": 6},
+                    "include_all_paths": {"type": "boolean", "description": "Include all simple paths up to max_depth", "default": false},
+                    "max_paths": {"type": "integer", "description": "Maximum number of paths to return when include_all_paths is true", "default": 32}
+                }, "required": ["start_addr", "goal_addr"]})),
+
             tool_schema("get_bytes",
                 "Read raw bytes from the binary at a virtual address. Returns hex-encoded string.",
                 json!({"type": "object", "properties": {
@@ -420,13 +511,14 @@ mod tests {
             .expect("missing tool surface start marker");
         let after_start = start + README_BEGIN.len();
         let rest = &readme[after_start..];
-        let end_rel = rest.find(README_END).expect("missing tool surface end marker");
+        let end_rel = rest
+            .find(README_END)
+            .expect("missing tool surface end marker");
         let actual = rest[..end_rel].trim();
         let expected = tools_markdown_table();
 
         assert_eq!(
-            actual,
-            expected,
+            actual, expected,
             "README tool surface is out of date; regenerate it from tools_markdown_table()"
         );
     }

@@ -21,6 +21,9 @@ The repository includes a small sample ARM64 ELF at `samples/hello_aarch64.elf` 
 - **ECS-backed program model** - stores instruction facts and relationships in `bevy_ecs`
 - **Datalog analysis** - computes CFG edges, reachability, terminal blocks, and cross-references with `ascent`
 - **Behavioral crypto search** - detects RC4 KSA and PRGA patterns structurally rather than by signature
+- **Pointer and vtable recovery** - scans mapped data for internal pointers, detects candidate C++ vtables, and groups related tables
+- **Function reference recovery** - resolves direct and PC-relative pointer operands to map per-function code and data references
+- **Call-path search** - builds a direct-plus-vtable call graph and finds shortest or bounded paths between functions
 - **Raw memory inspection** - reads bytes, data regions, and null-terminated strings from virtual addresses
 - **Agent-facing transport layers** - exposes the same session through CLI, MCP over stdio, and a stateful HTTP API
 
@@ -50,7 +53,7 @@ This produces:
 
 ### CLI
 
-The CLI is intentionally small and machine-friendly. It prints JSON and supports three direct modes:
+The CLI is intentionally small and machine-friendly. It prints JSON and supports direct analysis modes for inspection, pointer recovery, and path search:
 
 ```bash
 # Search for RC4 implementations
@@ -61,6 +64,18 @@ aeon coverage samples/hello_aarch64.elf
 
 # Inspect the function containing a specific address
 aeon func samples/hello_aarch64.elf 0x7d8
+
+# Scan mapped data sections for internal pointers
+aeon pointers libUnreal.so
+
+# Detect candidate vtables
+aeon vtables libUnreal.so
+
+# Enumerate pointer references in a function
+aeon func-pointers libUnreal.so 0x5e66990
+
+# Search call-graph paths between two functions
+aeon call-path libUnreal.so 0x5e66990 0x5e66990 --all
 ```
 
 ### MCP Server
@@ -159,6 +174,10 @@ Generated from `crates/aeon-frontend/src/service.rs` via `cargo run -p aeon-fron
 | `get_function_il` | Backwards-compatible alias for get_il. |
 | `get_function_cfg` | Get the Control Flow Graph for a function. Returns adjacency list, terminal blocks, and reachability from Datalog analysis. |
 | `get_xrefs` | Get cross-references for an address: outgoing calls from the function, and incoming calls from other functions. |
+| `scan_pointers` | Scan non-executable mapped sections for pointer-sized values that reference other locations in the binary, classifying data-to-data and data-to-code edges. |
+| `scan_vtables` | Detect candidate C++ vtables in .rodata/.data-style sections by finding arrays of function pointers and grouping related tables. |
+| `get_function_pointers` | Enumerate pointer-valued operands and resolved code/data references for one function or a paginated slice of functions. |
+| `find_call_paths` | Find shortest and optionally all bounded call-graph paths between two functions using direct calls and vtable-resolved indirect calls. |
 | `get_bytes` | Read raw bytes from the binary at a virtual address. Returns hex-encoded string. |
 | `search_rc4` | Search for RC4 cipher implementations using Datalog behavioral subgraph isomorphism. Detects KSA (swap+256+mod256) and PRGA (swap+keystream XOR) patterns. |
 | `get_coverage` | Get IL lift coverage statistics: proper IL vs intrinsic vs nop vs decode errors. |

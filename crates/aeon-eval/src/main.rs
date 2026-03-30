@@ -63,9 +63,5 @@ fn parse_hex_addr(value: &str) -> Result<u64, String> {
 }
 
 fn usage() -> String {
-    [
-        "Usage:",
-        "  aeon-eval constructor-layout <binary> <addr>",
-    ]
-    .join("\n")
+    ["Usage:", "  aeon-eval constructor-layout <binary> <addr>"].join("\n")
 }

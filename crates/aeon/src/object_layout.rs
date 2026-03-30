@@ -44,8 +44,7 @@ pub fn analyze_constructor_object_layout(
     query_addr: u64,
 ) -> ConstructorObjectLayout {
     let mut active_functions = HashSet::new();
-    let pointer_writes =
-        collect_pointer_writes(binary, func, true, 0, &mut active_functions);
+    let pointer_writes = collect_pointer_writes(binary, func, true, 0, &mut active_functions);
 
     let mut final_fields = BTreeMap::new();
     for field in &pointer_writes {
@@ -82,9 +81,13 @@ fn process_stmt(
             let resolved_value = resolve_expr(value, env, &mut HashSet::new(), 12);
 
             if let Some(field_offset) = extract_object_offset(&resolved_addr) {
-                if let Some(field) =
-                    object_pointer_field(instruction_addr, field_offset, *size, &resolved_value, binary)
-                {
+                if let Some(field) = object_pointer_field(
+                    instruction_addr,
+                    field_offset,
+                    *size,
+                    &resolved_value,
+                    binary,
+                ) {
                     pointer_writes.push(field);
                 }
             }
@@ -194,7 +197,11 @@ fn propagate_constructor_call(
         return;
     };
 
-    let Some(callee) = binary.functions.iter().find(|func| func.addr == target_addr) else {
+    let Some(callee) = binary
+        .functions
+        .iter()
+        .find(|func| func.addr == target_addr)
+    else {
         return;
     };
 
@@ -362,9 +369,7 @@ fn resolve_expr(
         ),
         Expr::FNeg(inner) => Expr::FNeg(Box::new(resolve_expr(inner, env, visited, depth - 1))),
         Expr::FAbs(inner) => Expr::FAbs(Box::new(resolve_expr(inner, env, visited, depth - 1))),
-        Expr::FSqrt(inner) => {
-            Expr::FSqrt(Box::new(resolve_expr(inner, env, visited, depth - 1)))
-        }
+        Expr::FSqrt(inner) => Expr::FSqrt(Box::new(resolve_expr(inner, env, visited, depth - 1))),
         Expr::FMax(lhs, rhs) => Expr::FMax(
             Box::new(resolve_expr(lhs, env, visited, depth - 1)),
             Box::new(resolve_expr(rhs, env, visited, depth - 1)),
@@ -400,18 +405,18 @@ fn resolve_expr(
                 .map(|operand| resolve_expr(operand, env, visited, depth - 1))
                 .collect(),
         },
-        Expr::Imm(_)
-        | Expr::FImm(_)
-        | Expr::AdrpImm(_)
-        | Expr::AdrImm(_)
-        | Expr::MrsRead(_) => expr.clone(),
+        Expr::Imm(_) | Expr::FImm(_) | Expr::AdrpImm(_) | Expr::AdrImm(_) | Expr::MrsRead(_) => {
+            expr.clone()
+        }
     }
 }
 
 fn extract_object_offset(expr: &Expr) -> Option<u64> {
     match expr {
         Expr::Reg(Reg::X(0)) => Some(0),
-        Expr::Intrinsic { name, operands } if name == "__aeon_object_base" && operands.is_empty() => {
+        Expr::Intrinsic { name, operands }
+            if name == "__aeon_object_base" && operands.is_empty() =>
+        {
             Some(0)
         }
         Expr::Add(lhs, rhs) => {
@@ -506,10 +511,7 @@ fn string_preview(binary: &LoadedBinary, addr: u64) -> Option<String> {
     if value.len() < 3 {
         return None;
     }
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_graphic() || ch == ' ')
-    {
+    if value.chars().all(|ch| ch.is_ascii_graphic() || ch == ' ') {
         Some(value)
     } else {
         None
@@ -555,12 +557,10 @@ mod tests {
             .collect();
 
         assert_eq!(offsets, vec![0, 32, 280, 296]);
-        assert!(
-            layout
-                .final_pointer_fields
-                .iter()
-                .all(|field| field.value_addr != 0)
-        );
+        assert!(layout
+            .final_pointer_fields
+            .iter()
+            .all(|field| field.value_addr != 0));
 
         let propagated = layout
             .final_pointer_fields

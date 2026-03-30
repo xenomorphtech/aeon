@@ -26,7 +26,12 @@ pub fn run() {
         let request: Value = match serde_json::from_str(&line) {
             Ok(value) => value,
             Err(err) => {
-                write_error(&mut stdout, Value::Null, -32700, &format!("Parse error: {}", err));
+                write_error(
+                    &mut stdout,
+                    Value::Null,
+                    -32700,
+                    &format!("Parse error: {}", err),
+                );
                 continue;
             }
         };
@@ -36,7 +41,10 @@ pub fn run() {
             continue;
         }
 
-        let method = request.get("method").and_then(|value| value.as_str()).unwrap_or("");
+        let method = request
+            .get("method")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
         let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
 
         match dispatch(method, &params, &mut frontend) {
@@ -55,7 +63,10 @@ fn dispatch(
         "initialize" => Ok(handle_initialize()),
         "tools/list" => Ok(tools_list()),
         "tools/call" => {
-            let name = params.get("name").and_then(|value| value.as_str()).unwrap_or("");
+            let name = params
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
             let args = params
                 .get("arguments")
                 .cloned()

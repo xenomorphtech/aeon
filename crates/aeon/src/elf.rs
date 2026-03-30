@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 
+#[derive(Debug, Clone)]
 pub struct FunctionInfo {
     pub addr: u64,
     pub size: u64,
     pub name: Option<String>,
 }
 
+#[derive(Debug, Clone)]
 pub struct Segment {
     pub file_offset: u64,
     pub vaddr: u64,
@@ -13,6 +15,19 @@ pub struct Segment {
     pub mem_size: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct SectionInfo {
+    pub name: String,
+    pub address: u64,
+    pub size: u64,
+    pub file_offset: u64,
+    pub file_size: u64,
+    pub is_alloc: bool,
+    pub is_writable: bool,
+    pub is_executable: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct LoadedBinary {
     pub data: Vec<u8>,
     pub text_section_file_offset: u64,
@@ -20,6 +35,7 @@ pub struct LoadedBinary {
     pub text_section_size: u64,
     pub functions: Vec<FunctionInfo>,
     pub segments: Vec<Segment>,
+    pub sections: Vec<SectionInfo>,
 }
 
 impl LoadedBinary {
@@ -38,7 +54,9 @@ impl LoadedBinary {
     /// Find the function containing a given address (binary search, O(log n))
     pub fn function_containing(&self, addr: u64) -> Option<&FunctionInfo> {
         let idx = self.functions.partition_point(|f| f.addr <= addr);
-        if idx == 0 { return None; }
+        if idx == 0 {
+            return None;
+        }
         let func = &self.functions[idx - 1];
         if addr < func.addr + func.size {
             Some(func)
@@ -58,6 +76,20 @@ impl LoadedBinary {
             }
         }
         None
+    }
+
+    /// Check whether a virtual address falls within any mapped LOAD segment.
+    pub fn contains_vaddr(&self, vaddr: u64) -> bool {
+        self.segments
+            .iter()
+            .any(|seg| vaddr >= seg.vaddr && vaddr < seg.vaddr + seg.mem_size)
+    }
+
+    /// Find the section containing a virtual address.
+    pub fn section_containing(&self, vaddr: u64) -> Option<&SectionInfo> {
+        self.sections
+            .iter()
+            .find(|section| vaddr >= section.address && vaddr < section.address + section.size)
     }
 
     /// Read raw bytes at a virtual address, up to `len` bytes
@@ -85,8 +117,8 @@ impl LoadedBinary {
 }
 
 pub fn load_elf(path: &str) -> Result<LoadedBinary, Box<dyn std::error::Error>> {
-    use object::{Object, ObjectSection, ObjectSymbol, SymbolKind};
     use object::read::elf::{ElfFile64, FileHeader, ProgramHeader};
+    use object::{Object, ObjectSection, ObjectSymbol, SectionFlags, SymbolKind};
 
     let data = std::fs::read(path)?;
 
@@ -94,7 +126,8 @@ pub fn load_elf(path: &str) -> Result<LoadedBinary, Box<dyn std::error::Error>> 
     let segments = {
         let elf = ElfFile64::<object::LittleEndian>::parse(&data[..])?;
         let endian = elf.endian();
-        elf.elf_header().program_headers(endian, &*data)?
+        elf.elf_header()
+            .program_headers(endian, &*data)?
             .iter()
             .filter(|ph| ph.p_type(endian) == object::elf::PT_LOAD)
             .map(|ph| Segment {
@@ -106,16 +139,14 @@ pub fn load_elf(path: &str) -> Result<LoadedBinary, Box<dyn std::error::Error>> 
             .collect::<Vec<_>>()
     };
 
-    let (text_file_offset, text_addr, text_size, mut functions) = {
+    let (text_file_offset, text_addr, text_size, mut functions, mut sections) = {
         let obj = object::File::parse(&data[..])?;
 
         // .text section
         let text = obj
             .section_by_name(".text")
             .ok_or("no .text section found")?;
-        let (text_file_offset, _) = text
-            .file_range()
-            .ok_or("no file range for .text")?;
+        let (text_file_offset, _) = text.file_range().ok_or("no file range for .text")?;
         let text_addr = text.address();
         let text_size = text.size();
 
@@ -127,6 +158,30 @@ pub fn load_elf(path: &str) -> Result<LoadedBinary, Box<dyn std::error::Error>> 
                 functions = parse_eh_frame(eh_frame_data, eh_frame_addr, text_addr);
             }
         }
+
+        let mut sections = obj
+            .sections()
+            .filter_map(|section| {
+                let name = section.name().ok()?.to_string();
+                let (file_offset, file_size) = section.file_range().unwrap_or((0, 0));
+                let flags = match section.flags() {
+                    SectionFlags::Elf { sh_flags } => sh_flags,
+                    _ => 0,
+                };
+
+                Some(SectionInfo {
+                    name,
+                    address: section.address(),
+                    size: section.size(),
+                    file_offset,
+                    file_size,
+                    is_alloc: flags & object::elf::SHF_ALLOC as u64 != 0,
+                    is_writable: flags & object::elf::SHF_WRITE as u64 != 0,
+                    is_executable: flags & object::elf::SHF_EXECINSTR as u64 != 0,
+                })
+            })
+            .collect::<Vec<_>>();
+        sections.sort_by_key(|section| section.address);
 
         // Map symbol names from .dynsym
         let mut sym_map: HashMap<u64, String> = HashMap::new();
@@ -143,10 +198,11 @@ pub fn load_elf(path: &str) -> Result<LoadedBinary, Box<dyn std::error::Error>> 
             }
         }
 
-        (text_file_offset, text_addr, text_size, functions)
+        (text_file_offset, text_addr, text_size, functions, sections)
     };
 
     functions.sort_by_key(|f| f.addr);
+    sections.sort_by_key(|section| section.address);
 
     Ok(LoadedBinary {
         data,
@@ -155,6 +211,7 @@ pub fn load_elf(path: &str) -> Result<LoadedBinary, Box<dyn std::error::Error>> 
         text_section_size: text_size,
         functions,
         segments,
+        sections,
     })
 }
 

@@ -30,7 +30,10 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
             let src = expr_op(operands, 1);
             ft(&mut edges, next_pc);
             let dst_expr = Expr::Reg(dst.clone());
-            Stmt::Assign { dst, src: e_intrinsic("movk", vec![dst_expr, src]) }
+            Stmt::Assign {
+                dst,
+                src: e_intrinsic("movk", vec![dst_expr, src]),
+            }
         }
         Op::FMOV => {
             let dst = reg_op(operands, 0);
@@ -48,27 +51,51 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
             let dst = reg_op(operands, 0);
             let src = expr_op(operands, 1);
             ft(&mut edges, next_pc);
-            Stmt::Assign { dst, src: e_not(src) }
+            Stmt::Assign {
+                dst,
+                src: e_not(src),
+            }
         }
         Op::ADRP => {
             let dst = reg_op(operands, 0);
             let addr = label_val(operands, 1);
             ft(&mut edges, next_pc);
-            Stmt::Assign { dst, src: Expr::AdrpImm(addr) }
+            Stmt::Assign {
+                dst,
+                src: Expr::AdrpImm(addr),
+            }
         }
         Op::ADR => {
             let dst = reg_op(operands, 0);
             let addr = label_val(operands, 1);
             ft(&mut edges, next_pc);
-            Stmt::Assign { dst, src: Expr::AdrImm(addr) }
+            Stmt::Assign {
+                dst,
+                src: Expr::AdrImm(addr),
+            }
         }
 
         // ── Extensions ─────────────────────────────────────────────
-        Op::SXTW => { ft(&mut edges, next_pc); lift_unary(operands, |s| e_sign_extend(s, 32)) }
-        Op::SXTH => { ft(&mut edges, next_pc); lift_unary(operands, |s| e_sign_extend(s, 16)) }
-        Op::SXTB => { ft(&mut edges, next_pc); lift_unary(operands, |s| e_sign_extend(s, 8)) }
-        Op::UXTB => { ft(&mut edges, next_pc); lift_unary(operands, |s| e_zero_extend(s, 8)) }
-        Op::UXTH => { ft(&mut edges, next_pc); lift_unary(operands, |s| e_zero_extend(s, 16)) }
+        Op::SXTW => {
+            ft(&mut edges, next_pc);
+            lift_unary(operands, |s| e_sign_extend(s, 32))
+        }
+        Op::SXTH => {
+            ft(&mut edges, next_pc);
+            lift_unary(operands, |s| e_sign_extend(s, 16))
+        }
+        Op::SXTB => {
+            ft(&mut edges, next_pc);
+            lift_unary(operands, |s| e_sign_extend(s, 8))
+        }
+        Op::UXTB => {
+            ft(&mut edges, next_pc);
+            lift_unary(operands, |s| e_zero_extend(s, 8))
+        }
+        Op::UXTH => {
+            ft(&mut edges, next_pc);
+            lift_unary(operands, |s| e_zero_extend(s, 16))
+        }
 
         // ── Loads (basic) ──────────────────────────────────────────
         Op::LDR | Op::LDUR | Op::LDAR | Op::LDTR | Op::LDLAR => {
@@ -186,14 +213,38 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         }
 
         // ── Arithmetic ─────────────────────────────────────────────
-        Op::ADD => { ft(&mut edges, next_pc); lift_binary(operands, e_add) }
-        Op::ADDS => { ft(&mut edges, next_pc); lift_binary(operands, e_add) }
-        Op::SUB => { ft(&mut edges, next_pc); lift_binary(operands, e_sub) }
-        Op::SUBS => { ft(&mut edges, next_pc); lift_binary(operands, e_sub) }
-        Op::MUL => { ft(&mut edges, next_pc); lift_binary(operands, e_mul) }
-        Op::SDIV => { ft(&mut edges, next_pc); lift_binary(operands, e_div) }
-        Op::UDIV => { ft(&mut edges, next_pc); lift_binary(operands, e_udiv) }
-        Op::NEG | Op::NEGS => { ft(&mut edges, next_pc); lift_unary(operands, e_neg) }
+        Op::ADD => {
+            ft(&mut edges, next_pc);
+            lift_binary(operands, e_add)
+        }
+        Op::ADDS => {
+            ft(&mut edges, next_pc);
+            lift_binary(operands, e_add)
+        }
+        Op::SUB => {
+            ft(&mut edges, next_pc);
+            lift_binary(operands, e_sub)
+        }
+        Op::SUBS => {
+            ft(&mut edges, next_pc);
+            lift_binary(operands, e_sub)
+        }
+        Op::MUL => {
+            ft(&mut edges, next_pc);
+            lift_binary(operands, e_mul)
+        }
+        Op::SDIV => {
+            ft(&mut edges, next_pc);
+            lift_binary(operands, e_div)
+        }
+        Op::UDIV => {
+            ft(&mut edges, next_pc);
+            lift_binary(operands, e_udiv)
+        }
+        Op::NEG | Op::NEGS => {
+            ft(&mut edges, next_pc);
+            lift_unary(operands, e_neg)
+        }
 
         Op::MADD => {
             // MADD Xd, Xn, Xm, Xa → Xd = Xa + Xn * Xm
@@ -202,7 +253,10 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
             let n = expr_op(operands, 1);
             let m = expr_op(operands, 2);
             let a = expr_op(operands, 3);
-            Stmt::Assign { dst, src: e_add(a, e_mul(n, m)) }
+            Stmt::Assign {
+                dst,
+                src: e_add(a, e_mul(n, m)),
+            }
         }
         Op::MSUB => {
             // MSUB Xd, Xn, Xm, Xa → Xd = Xa - Xn * Xm
@@ -211,7 +265,10 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
             let n = expr_op(operands, 1);
             let m = expr_op(operands, 2);
             let a = expr_op(operands, 3);
-            Stmt::Assign { dst, src: e_sub(a, e_mul(n, m)) }
+            Stmt::Assign {
+                dst,
+                src: e_sub(a, e_mul(n, m)),
+            }
         }
         Op::MNEG => {
             // MNEG Xd, Xn, Xm → Xd = -(Xn * Xm)
@@ -219,7 +276,10 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
             let dst = reg_op(operands, 0);
             let n = expr_op(operands, 1);
             let m = expr_op(operands, 2);
-            Stmt::Assign { dst, src: e_neg(e_mul(n, m)) }
+            Stmt::Assign {
+                dst,
+                src: e_neg(e_mul(n, m)),
+            }
         }
         Op::SMADDL => {
             ft(&mut edges, next_pc);
@@ -227,14 +287,20 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
             let n = expr_op(operands, 1);
             let m = expr_op(operands, 2);
             let a = expr_op(operands, 3);
-            Stmt::Assign { dst, src: e_add(a, e_mul(e_sign_extend(n, 32), e_sign_extend(m, 32))) }
+            Stmt::Assign {
+                dst,
+                src: e_add(a, e_mul(e_sign_extend(n, 32), e_sign_extend(m, 32))),
+            }
         }
         Op::SMULL => {
             ft(&mut edges, next_pc);
             let dst = reg_op(operands, 0);
             let n = expr_op(operands, 1);
             let m = expr_op(operands, 2);
-            Stmt::Assign { dst, src: e_mul(e_sign_extend(n, 32), e_sign_extend(m, 32)) }
+            Stmt::Assign {
+                dst,
+                src: e_mul(e_sign_extend(n, 32), e_sign_extend(m, 32)),
+            }
         }
         Op::UMADDL => {
             ft(&mut edges, next_pc);
@@ -242,22 +308,35 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
             let n = expr_op(operands, 1);
             let m = expr_op(operands, 2);
             let a = expr_op(operands, 3);
-            Stmt::Assign { dst, src: e_add(a, e_mul(e_zero_extend(n, 32), e_zero_extend(m, 32))) }
+            Stmt::Assign {
+                dst,
+                src: e_add(a, e_mul(e_zero_extend(n, 32), e_zero_extend(m, 32))),
+            }
         }
         Op::UMULL => {
             ft(&mut edges, next_pc);
             let dst = reg_op(operands, 0);
             let n = expr_op(operands, 1);
             let m = expr_op(operands, 2);
-            Stmt::Assign { dst, src: e_mul(e_zero_extend(n, 32), e_zero_extend(m, 32)) }
+            Stmt::Assign {
+                dst,
+                src: e_mul(e_zero_extend(n, 32), e_zero_extend(m, 32)),
+            }
         }
         Op::SMULH | Op::UMULH => {
             ft(&mut edges, next_pc);
             let dst = reg_op(operands, 0);
             let n = expr_op(operands, 1);
             let m = expr_op(operands, 2);
-            let name = if insn.op() == Op::SMULH { "smulh" } else { "umulh" };
-            Stmt::Assign { dst, src: e_intrinsic(name, vec![n, m]) }
+            let name = if insn.op() == Op::SMULH {
+                "smulh"
+            } else {
+                "umulh"
+            };
+            Stmt::Assign {
+                dst,
+                src: e_intrinsic(name, vec![n, m]),
+            }
         }
         Op::SMSUBL | Op::UMSUBL => {
             ft(&mut edges, next_pc);
@@ -265,46 +344,91 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
             let n = expr_op(operands, 1);
             let m = expr_op(operands, 2);
             let a = expr_op(operands, 3);
-            Stmt::Assign { dst, src: e_sub(a, e_mul(n, m)) }
+            Stmt::Assign {
+                dst,
+                src: e_sub(a, e_mul(n, m)),
+            }
         }
 
         // Carry ops
-        Op::ADC | Op::ADCS => { ft(&mut edges, next_pc); lift_binary_intrinsic(operands, "adc") }
-        Op::SBC | Op::SBCS => { ft(&mut edges, next_pc); lift_binary_intrinsic(operands, "sbc") }
-        Op::NGC | Op::NGCS => { ft(&mut edges, next_pc); lift_unary_intrinsic(operands, "ngc") }
+        Op::ADC | Op::ADCS => {
+            ft(&mut edges, next_pc);
+            lift_binary_intrinsic(operands, "adc")
+        }
+        Op::SBC | Op::SBCS => {
+            ft(&mut edges, next_pc);
+            lift_binary_intrinsic(operands, "sbc")
+        }
+        Op::NGC | Op::NGCS => {
+            ft(&mut edges, next_pc);
+            lift_unary_intrinsic(operands, "ngc")
+        }
 
         // ── Logic ──────────────────────────────────────────────────
-        Op::AND | Op::ANDS => { ft(&mut edges, next_pc); lift_binary(operands, e_and) }
-        Op::ORR => { ft(&mut edges, next_pc); lift_binary(operands, e_or) }
-        Op::EOR => { ft(&mut edges, next_pc); lift_binary(operands, e_xor) }
+        Op::AND | Op::ANDS => {
+            ft(&mut edges, next_pc);
+            lift_binary(operands, e_and)
+        }
+        Op::ORR => {
+            ft(&mut edges, next_pc);
+            lift_binary(operands, e_or)
+        }
+        Op::EOR => {
+            ft(&mut edges, next_pc);
+            lift_binary(operands, e_xor)
+        }
         Op::BIC | Op::BICS => {
             ft(&mut edges, next_pc);
             let dst = reg_op(operands, 0);
             let a = expr_op(operands, 1);
             let b = expr_op(operands, 2);
-            Stmt::Assign { dst, src: e_and(a, e_not(b)) }
+            Stmt::Assign {
+                dst,
+                src: e_and(a, e_not(b)),
+            }
         }
         Op::ORN => {
             ft(&mut edges, next_pc);
             let dst = reg_op(operands, 0);
             let a = expr_op(operands, 1);
             let b = expr_op(operands, 2);
-            Stmt::Assign { dst, src: e_or(a, e_not(b)) }
+            Stmt::Assign {
+                dst,
+                src: e_or(a, e_not(b)),
+            }
         }
         Op::EON => {
             ft(&mut edges, next_pc);
             let dst = reg_op(operands, 0);
             let a = expr_op(operands, 1);
             let b = expr_op(operands, 2);
-            Stmt::Assign { dst, src: e_xor(a, e_not(b)) }
+            Stmt::Assign {
+                dst,
+                src: e_xor(a, e_not(b)),
+            }
         }
-        Op::MVN => { ft(&mut edges, next_pc); lift_unary(operands, e_not) }
+        Op::MVN => {
+            ft(&mut edges, next_pc);
+            lift_unary(operands, e_not)
+        }
 
         // ── Shifts ─────────────────────────────────────────────────
-        Op::LSL => { ft(&mut edges, next_pc); lift_binary(operands, e_shl) }
-        Op::LSR => { ft(&mut edges, next_pc); lift_binary(operands, e_lsr) }
-        Op::ASR => { ft(&mut edges, next_pc); lift_binary(operands, e_asr) }
-        Op::ROR => { ft(&mut edges, next_pc); lift_binary(operands, e_ror) }
+        Op::LSL => {
+            ft(&mut edges, next_pc);
+            lift_binary(operands, e_shl)
+        }
+        Op::LSR => {
+            ft(&mut edges, next_pc);
+            lift_binary(operands, e_lsr)
+        }
+        Op::ASR => {
+            ft(&mut edges, next_pc);
+            lift_binary(operands, e_asr)
+        }
+        Op::ROR => {
+            ft(&mut edges, next_pc);
+            lift_binary(operands, e_ror)
+        }
 
         // ── Bitfield ───────────────────────────────────────────────
         Op::BFI | Op::BFXIL | Op::SBFIZ | Op::SBFX | Op::UBFX | Op::UBFIZ => {
@@ -318,13 +442,34 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         }
 
         // ── Bit manipulation ───────────────────────────────────────
-        Op::CLZ => { ft(&mut edges, next_pc); lift_unary(operands, e_clz) }
-        Op::CLS => { ft(&mut edges, next_pc); lift_unary(operands, e_cls) }
-        Op::RBIT => { ft(&mut edges, next_pc); lift_unary(operands, e_rbit) }
-        Op::REV | Op::REV64 => { ft(&mut edges, next_pc); lift_unary(operands, e_rev) }
-        Op::REV16 => { ft(&mut edges, next_pc); lift_unary_intrinsic(operands, "rev16") }
-        Op::REV32 => { ft(&mut edges, next_pc); lift_unary_intrinsic(operands, "rev32") }
-        Op::CNT => { ft(&mut edges, next_pc); lift_unary_intrinsic(operands, "cnt") }
+        Op::CLZ => {
+            ft(&mut edges, next_pc);
+            lift_unary(operands, e_clz)
+        }
+        Op::CLS => {
+            ft(&mut edges, next_pc);
+            lift_unary(operands, e_cls)
+        }
+        Op::RBIT => {
+            ft(&mut edges, next_pc);
+            lift_unary(operands, e_rbit)
+        }
+        Op::REV | Op::REV64 => {
+            ft(&mut edges, next_pc);
+            lift_unary(operands, e_rev)
+        }
+        Op::REV16 => {
+            ft(&mut edges, next_pc);
+            lift_unary_intrinsic(operands, "rev16")
+        }
+        Op::REV32 => {
+            ft(&mut edges, next_pc);
+            lift_unary_intrinsic(operands, "rev32")
+        }
+        Op::CNT => {
+            ft(&mut edges, next_pc);
+            lift_unary_intrinsic(operands, "cnt")
+        }
 
         // ── Compare ────────────────────────────────────────────────
         Op::CMP => {
@@ -347,7 +492,14 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         }
         Op::CCMP | Op::CCMN => {
             ft(&mut edges, next_pc);
-            lift_intrinsic_all(operands, if insn.op() == Op::CCMP { "ccmp" } else { "ccmn" })
+            lift_intrinsic_all(
+                operands,
+                if insn.op() == Op::CCMP {
+                    "ccmp"
+                } else {
+                    "ccmn"
+                },
+            )
         }
 
         // ── Conditional select ─────────────────────────────────────
@@ -357,7 +509,9 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         }
         Op::CSINC | Op::CINC => {
             ft(&mut edges, next_pc);
-            lift_csel(operands, |t, f, c| e_cond_select(c, t, e_add(f, Expr::Imm(1))))
+            lift_csel(operands, |t, f, c| {
+                e_cond_select(c, t, e_add(f, Expr::Imm(1)))
+            })
         }
         Op::CSINV | Op::CINV => {
             ft(&mut edges, next_pc);
@@ -371,13 +525,19 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
             ft(&mut edges, next_pc);
             let dst = reg_op(operands, 0);
             let cond = cond_op(operands, 1);
-            Stmt::Assign { dst, src: e_cond_select(cond, Expr::Imm(1), Expr::Imm(0)) }
+            Stmt::Assign {
+                dst,
+                src: e_cond_select(cond, Expr::Imm(1), Expr::Imm(0)),
+            }
         }
         Op::CSETM => {
             ft(&mut edges, next_pc);
             let dst = reg_op(operands, 0);
             let cond = cond_op(operands, 1);
-            Stmt::Assign { dst, src: e_cond_select(cond, Expr::Imm(u64::MAX), Expr::Imm(0)) }
+            Stmt::Assign {
+                dst,
+                src: e_cond_select(cond, Expr::Imm(u64::MAX), Expr::Imm(0)),
+            }
         }
         Op::FCSEL => {
             ft(&mut edges, next_pc);
@@ -393,7 +553,10 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
             } else {
                 "unknown".to_string()
             };
-            Stmt::Assign { dst, src: Expr::MrsRead(sysreg_name) }
+            Stmt::Assign {
+                dst,
+                src: Expr::MrsRead(sysreg_name),
+            }
         }
         Op::MSR => {
             ft(&mut edges, next_pc);
@@ -404,7 +567,9 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         Op::B => {
             let target = label_val(operands, 0);
             edges.push(target);
-            Stmt::Branch { target: Expr::Imm(target) }
+            Stmt::Branch {
+                target: Expr::Imm(target),
+            }
         }
         Op::BR => {
             let target = expr_op(operands, 0);
@@ -413,7 +578,9 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         Op::BL => {
             let target = label_val(operands, 0);
             ft(&mut edges, next_pc);
-            Stmt::Call { target: Expr::Imm(target) }
+            Stmt::Call {
+                target: Expr::Imm(target),
+            }
         }
         Op::BLR => {
             let target = expr_op(operands, 0);
@@ -423,14 +590,28 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         Op::RET => Stmt::Ret,
 
         // Conditional branches (B.cond)
-        Op::B_EQ | Op::B_NE | Op::B_CS | Op::B_CC |
-        Op::B_MI | Op::B_PL | Op::B_VS | Op::B_VC |
-        Op::B_HI | Op::B_LS | Op::B_GE | Op::B_LT |
-        Op::B_GT | Op::B_LE | Op::B_AL | Op::B_NV => {
+        Op::B_EQ
+        | Op::B_NE
+        | Op::B_CS
+        | Op::B_CC
+        | Op::B_MI
+        | Op::B_PL
+        | Op::B_VS
+        | Op::B_VC
+        | Op::B_HI
+        | Op::B_LS
+        | Op::B_GE
+        | Op::B_LT
+        | Op::B_GT
+        | Op::B_LE
+        | Op::B_AL
+        | Op::B_NV => {
             let cond = cond_from_branch_op(insn.op());
             let target = label_val(operands, 0);
             edges.push(target);
-            if let Some(npc) = next_pc { edges.push(npc); }
+            if let Some(npc) = next_pc {
+                edges.push(npc);
+            }
             Stmt::CondBranch {
                 cond: BranchCond::Flag(cond),
                 target: Expr::Imm(target),
@@ -443,7 +624,9 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
             let reg = expr_op(operands, 0);
             let target = label_val(operands, 1);
             edges.push(target);
-            if let Some(npc) = next_pc { edges.push(npc); }
+            if let Some(npc) = next_pc {
+                edges.push(npc);
+            }
             Stmt::CondBranch {
                 cond: BranchCond::Zero(reg),
                 target: Expr::Imm(target),
@@ -454,7 +637,9 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
             let reg = expr_op(operands, 0);
             let target = label_val(operands, 1);
             edges.push(target);
-            if let Some(npc) = next_pc { edges.push(npc); }
+            if let Some(npc) = next_pc {
+                edges.push(npc);
+            }
             Stmt::CondBranch {
                 cond: BranchCond::NotZero(reg),
                 target: Expr::Imm(target),
@@ -468,7 +653,9 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
             let bit = imm_val(operands, 1) as u8;
             let target = label_val(operands, 2);
             edges.push(target);
-            if let Some(npc) = next_pc { edges.push(npc); }
+            if let Some(npc) = next_pc {
+                edges.push(npc);
+            }
             Stmt::CondBranch {
                 cond: BranchCond::BitZero(reg, bit),
                 target: Expr::Imm(target),
@@ -480,7 +667,9 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
             let bit = imm_val(operands, 1) as u8;
             let target = label_val(operands, 2);
             edges.push(target);
-            if let Some(npc) = next_pc { edges.push(npc); }
+            if let Some(npc) = next_pc {
+                edges.push(npc);
+            }
             Stmt::CondBranch {
                 cond: BranchCond::BitNotZero(reg, bit),
                 target: Expr::Imm(target),
@@ -489,19 +678,43 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         }
 
         // ── Floating point arithmetic ──────────────────────────────
-        Op::FADD => { ft(&mut edges, next_pc); lift_binary(operands, e_fadd) }
-        Op::FSUB => { ft(&mut edges, next_pc); lift_binary(operands, e_fsub) }
-        Op::FMUL => { ft(&mut edges, next_pc); lift_binary(operands, e_fmul) }
-        Op::FDIV => { ft(&mut edges, next_pc); lift_binary(operands, e_fdiv) }
-        Op::FNEG => { ft(&mut edges, next_pc); lift_unary(operands, e_fneg) }
-        Op::FABS => { ft(&mut edges, next_pc); lift_unary(operands, e_fabs) }
-        Op::FSQRT => { ft(&mut edges, next_pc); lift_unary(operands, e_fsqrt) }
+        Op::FADD => {
+            ft(&mut edges, next_pc);
+            lift_binary(operands, e_fadd)
+        }
+        Op::FSUB => {
+            ft(&mut edges, next_pc);
+            lift_binary(operands, e_fsub)
+        }
+        Op::FMUL => {
+            ft(&mut edges, next_pc);
+            lift_binary(operands, e_fmul)
+        }
+        Op::FDIV => {
+            ft(&mut edges, next_pc);
+            lift_binary(operands, e_fdiv)
+        }
+        Op::FNEG => {
+            ft(&mut edges, next_pc);
+            lift_unary(operands, e_fneg)
+        }
+        Op::FABS => {
+            ft(&mut edges, next_pc);
+            lift_unary(operands, e_fabs)
+        }
+        Op::FSQRT => {
+            ft(&mut edges, next_pc);
+            lift_unary(operands, e_fsqrt)
+        }
         Op::FNMUL => {
             ft(&mut edges, next_pc);
             let dst = reg_op(operands, 0);
             let a = expr_op(operands, 1);
             let b = expr_op(operands, 2);
-            Stmt::Assign { dst, src: e_fneg(e_fmul(a, b)) }
+            Stmt::Assign {
+                dst,
+                src: e_fneg(e_fmul(a, b)),
+            }
         }
 
         // FP multiply-accumulate
@@ -511,7 +724,10 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
             let n = expr_op(operands, 1);
             let m = expr_op(operands, 2);
             let a = expr_op(operands, 3);
-            Stmt::Assign { dst, src: e_fadd(a, e_fmul(n, m)) }
+            Stmt::Assign {
+                dst,
+                src: e_fadd(a, e_fmul(n, m)),
+            }
         }
         Op::FMSUB => {
             ft(&mut edges, next_pc);
@@ -519,18 +735,32 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
             let n = expr_op(operands, 1);
             let m = expr_op(operands, 2);
             let a = expr_op(operands, 3);
-            Stmt::Assign { dst, src: e_fsub(a, e_fmul(n, m)) }
+            Stmt::Assign {
+                dst,
+                src: e_fsub(a, e_fmul(n, m)),
+            }
         }
         Op::FNMADD | Op::FNMSUB => {
             ft(&mut edges, next_pc);
-            lift_intrinsic_all(operands, if insn.op() == Op::FNMADD { "fnmadd" } else { "fnmsub" })
+            lift_intrinsic_all(
+                operands,
+                if insn.op() == Op::FNMADD {
+                    "fnmadd"
+                } else {
+                    "fnmsub"
+                },
+            )
         }
 
         // FP compare
         Op::FCMP | Op::FCMPE => {
             ft(&mut edges, next_pc);
             let a = expr_op(operands, 0);
-            let b = if operands.len() > 1 { expr_op(operands, 1) } else { Expr::FImm(0.0) };
+            let b = if operands.len() > 1 {
+                expr_op(operands, 1)
+            } else {
+                Expr::FImm(0.0)
+            };
             Stmt::SetFlags { expr: e_fsub(a, b) }
         }
         Op::FCCMP | Op::FCCMPE => {
@@ -539,25 +769,52 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         }
 
         // FP min/max
-        Op::FMAXNM => { ft(&mut edges, next_pc); lift_binary(operands, e_fmax) }
-        Op::FMINNM => { ft(&mut edges, next_pc); lift_binary(operands, e_fmin) }
-        Op::FMAX => { ft(&mut edges, next_pc); lift_binary(operands, e_fmax) }
-        Op::FMIN => { ft(&mut edges, next_pc); lift_binary(operands, e_fmin) }
+        Op::FMAXNM => {
+            ft(&mut edges, next_pc);
+            lift_binary(operands, e_fmax)
+        }
+        Op::FMINNM => {
+            ft(&mut edges, next_pc);
+            lift_binary(operands, e_fmin)
+        }
+        Op::FMAX => {
+            ft(&mut edges, next_pc);
+            lift_binary(operands, e_fmax)
+        }
+        Op::FMIN => {
+            ft(&mut edges, next_pc);
+            lift_binary(operands, e_fmin)
+        }
 
         // FP conversions
-        Op::FCVT => { ft(&mut edges, next_pc); lift_unary(operands, e_fcvt) }
-        Op::SCVTF => { ft(&mut edges, next_pc); lift_unary(operands, e_int_to_float) }
-        Op::UCVTF => { ft(&mut edges, next_pc); lift_unary(operands, e_int_to_float) }
-        Op::FCVTZS | Op::FCVTZU | Op::FCVTMS | Op::FCVTMU |
-        Op::FCVTPS | Op::FCVTPU | Op::FCVTAS | Op::FCVTAU |
-        Op::FCVTNS | Op::FCVTNU => {
+        Op::FCVT => {
+            ft(&mut edges, next_pc);
+            lift_unary(operands, e_fcvt)
+        }
+        Op::SCVTF => {
+            ft(&mut edges, next_pc);
+            lift_unary(operands, e_int_to_float)
+        }
+        Op::UCVTF => {
+            ft(&mut edges, next_pc);
+            lift_unary(operands, e_int_to_float)
+        }
+        Op::FCVTZS
+        | Op::FCVTZU
+        | Op::FCVTMS
+        | Op::FCVTMU
+        | Op::FCVTPS
+        | Op::FCVTPU
+        | Op::FCVTAS
+        | Op::FCVTAU
+        | Op::FCVTNS
+        | Op::FCVTNU => {
             ft(&mut edges, next_pc);
             lift_unary(operands, e_float_to_int)
         }
 
         // FP rounding
-        Op::FRINTZ | Op::FRINTM | Op::FRINTP | Op::FRINTN |
-        Op::FRINTA | Op::FRINTX => {
+        Op::FRINTZ | Op::FRINTM | Op::FRINTP | Op::FRINTN | Op::FRINTA | Op::FRINTX => {
             ft(&mut edges, next_pc);
             let name = format!("{:?}", insn.op()).to_lowercase();
             lift_unary_intrinsic(operands, &name)
@@ -571,85 +828,236 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         }
 
         // ── SIMD / NEON (as intrinsics with proper operand extraction) ─
-        Op::DUP | Op::UMOV | Op::SMOV | Op::INS |
-        Op::EXT | Op::ZIP1 | Op::ZIP2 | Op::UZP1 | Op::UZP2 |
-        Op::TRN1 | Op::TRN2 | Op::TBL | Op::TBX |
-        Op::BSL | Op::BIT | Op::BIF |
-        Op::ADDV | Op::UMAXV | Op::UMINV | Op::SMAXV | Op::SMINV |
-        Op::UADDLV | Op::SADDLV | Op::FADDP |
-        Op::SMAX | Op::SMIN | Op::UMAX | Op::UMIN |
-        Op::SMAXP | Op::SMINP | Op::UMAXP | Op::UMINP |
-        Op::SHL | Op::USHR | Op::SSHR | Op::SLI |
-        Op::SSRA | Op::USRA | Op::SRSHR | Op::SRSRA | Op::URSHR | Op::URSRA |
-        Op::ADDP | Op::ADDHN | Op::ADDHN2 | Op::SUBHN | Op::SUBHN2 |
-        Op::XTN | Op::XTN2 |
-        Op::SXTL | Op::SXTL2 | Op::UXTL | Op::UXTL2 |
-        Op::SHLL | Op::SHLL2 | Op::SHRN | Op::SHRN2 |
-        Op::SSHLL | Op::SSHLL2 | Op::USHLL | Op::USHLL2 |
-        Op::FCVTN | Op::FCVTN2 | Op::FCVTL | Op::FCVTL2 |
-        Op::SQXTUN | Op::SQXTUN2 | Op::SQXTN | Op::SQXTN2 |
-        Op::SQDMULH | Op::SQRDMULH |
-        Op::CMEQ | Op::CMGT | Op::CMGE | Op::CMHI | Op::CMHS |
-        Op::CMLT | Op::CMLE | Op::CMTST |
-        Op::FCMGT | Op::FCMGE | Op::FCMLT | Op::FCMLE | Op::FCMEQ |
-        Op::ABS | Op::FABD |
-        Op::FMLA | Op::FMLS | Op::MLA | Op::MLS |
-        Op::SABD | Op::UABD | Op::UABDL | Op::UABDL2 |
-        Op::SADDW | Op::SADDW2 | Op::UADDW | Op::UADDW2 |
-        Op::SADDL | Op::SADDL2 | Op::UADDL | Op::UADDL2 |
-        Op::SSUBL | Op::SSUBL2 | Op::USUBL | Op::USUBL2 |
-        Op::UMLAL | Op::UMLAL2 | Op::SMLAL | Op::SMLAL2 |
-        Op::PMULL | Op::PMULL2 |
-        Op::FMAXNMP | Op::FMINNMP | Op::FMINP |
-        Op::FMULX |
-        Op::SQSHRUN | Op::SQSHRUN2 | Op::SQRSHRUN |
-        Op::SQRDMLAH | Op::SQRDMLSH |
-        Op::UQRSHL | Op::SQRSHL | Op::SRSHL | Op::URSHL |
-        Op::SSHL | Op::USHL |
-        Op::SQDMULL | Op::SQDMULL2 |
-        Op::SQDMLAL | Op::SQDMLAL2 | Op::SQDMLSL | Op::SQDMLSL2 |
-        Op::RADDHN | Op::RADDHN2 |
-        Op::UADALP | Op::SADDLP | Op::UADDLP |
-        Op::SHADD | Op::URHADD | Op::SRHADD |
-        Op::UHADD | Op::UHSUB |
-        Op::SQSHL | Op::UQSHL | Op::SQSUB | Op::UQSUB | Op::UQADD | Op::SQADD |
-        Op::FCMLA | Op::FCADD |
-        Op::SQRSHRN2 | Op::UQRSHRN |
-        Op::USQADD |
-        Op::FMAXV | Op::FMINV => {
+        Op::DUP
+        | Op::UMOV
+        | Op::SMOV
+        | Op::INS
+        | Op::EXT
+        | Op::ZIP1
+        | Op::ZIP2
+        | Op::UZP1
+        | Op::UZP2
+        | Op::TRN1
+        | Op::TRN2
+        | Op::TBL
+        | Op::TBX
+        | Op::BSL
+        | Op::BIT
+        | Op::BIF
+        | Op::ADDV
+        | Op::UMAXV
+        | Op::UMINV
+        | Op::SMAXV
+        | Op::SMINV
+        | Op::UADDLV
+        | Op::SADDLV
+        | Op::FADDP
+        | Op::SMAX
+        | Op::SMIN
+        | Op::UMAX
+        | Op::UMIN
+        | Op::SMAXP
+        | Op::SMINP
+        | Op::UMAXP
+        | Op::UMINP
+        | Op::SHL
+        | Op::USHR
+        | Op::SSHR
+        | Op::SLI
+        | Op::SSRA
+        | Op::USRA
+        | Op::SRSHR
+        | Op::SRSRA
+        | Op::URSHR
+        | Op::URSRA
+        | Op::ADDP
+        | Op::ADDHN
+        | Op::ADDHN2
+        | Op::SUBHN
+        | Op::SUBHN2
+        | Op::XTN
+        | Op::XTN2
+        | Op::SXTL
+        | Op::SXTL2
+        | Op::UXTL
+        | Op::UXTL2
+        | Op::SHLL
+        | Op::SHLL2
+        | Op::SHRN
+        | Op::SHRN2
+        | Op::SSHLL
+        | Op::SSHLL2
+        | Op::USHLL
+        | Op::USHLL2
+        | Op::FCVTN
+        | Op::FCVTN2
+        | Op::FCVTL
+        | Op::FCVTL2
+        | Op::SQXTUN
+        | Op::SQXTUN2
+        | Op::SQXTN
+        | Op::SQXTN2
+        | Op::SQDMULH
+        | Op::SQRDMULH
+        | Op::CMEQ
+        | Op::CMGT
+        | Op::CMGE
+        | Op::CMHI
+        | Op::CMHS
+        | Op::CMLT
+        | Op::CMLE
+        | Op::CMTST
+        | Op::FCMGT
+        | Op::FCMGE
+        | Op::FCMLT
+        | Op::FCMLE
+        | Op::FCMEQ
+        | Op::ABS
+        | Op::FABD
+        | Op::FMLA
+        | Op::FMLS
+        | Op::MLA
+        | Op::MLS
+        | Op::SABD
+        | Op::UABD
+        | Op::UABDL
+        | Op::UABDL2
+        | Op::SADDW
+        | Op::SADDW2
+        | Op::UADDW
+        | Op::UADDW2
+        | Op::SADDL
+        | Op::SADDL2
+        | Op::UADDL
+        | Op::UADDL2
+        | Op::SSUBL
+        | Op::SSUBL2
+        | Op::USUBL
+        | Op::USUBL2
+        | Op::UMLAL
+        | Op::UMLAL2
+        | Op::SMLAL
+        | Op::SMLAL2
+        | Op::PMULL
+        | Op::PMULL2
+        | Op::FMAXNMP
+        | Op::FMINNMP
+        | Op::FMINP
+        | Op::FMULX
+        | Op::SQSHRUN
+        | Op::SQSHRUN2
+        | Op::SQRSHRUN
+        | Op::SQRDMLAH
+        | Op::SQRDMLSH
+        | Op::UQRSHL
+        | Op::SQRSHL
+        | Op::SRSHL
+        | Op::URSHL
+        | Op::SSHL
+        | Op::USHL
+        | Op::SQDMULL
+        | Op::SQDMULL2
+        | Op::SQDMLAL
+        | Op::SQDMLAL2
+        | Op::SQDMLSL
+        | Op::SQDMLSL2
+        | Op::RADDHN
+        | Op::RADDHN2
+        | Op::UADALP
+        | Op::SADDLP
+        | Op::UADDLP
+        | Op::SHADD
+        | Op::URHADD
+        | Op::SRHADD
+        | Op::UHADD
+        | Op::UHSUB
+        | Op::SQSHL
+        | Op::UQSHL
+        | Op::SQSUB
+        | Op::UQSUB
+        | Op::UQADD
+        | Op::SQADD
+        | Op::FCMLA
+        | Op::FCADD
+        | Op::SQRSHRN2
+        | Op::UQRSHRN
+        | Op::USQADD
+        | Op::FMAXV
+        | Op::FMINV => {
             ft(&mut edges, next_pc);
             let name = format!("{:?}", insn.op()).to_lowercase();
             lift_intrinsic_all(operands, &name)
         }
 
         // SIMD loads/stores
-        Op::LD1 | Op::LD2 | Op::LD3 | Op::LD4 |
-        Op::LD1R | Op::LD2R | Op::LD3R | Op::LD4R |
-        Op::ST1 | Op::ST2 | Op::ST3 | Op::ST4 => {
+        Op::LD1
+        | Op::LD2
+        | Op::LD3
+        | Op::LD4
+        | Op::LD1R
+        | Op::LD2R
+        | Op::LD3R
+        | Op::LD4R
+        | Op::ST1
+        | Op::ST2
+        | Op::ST3
+        | Op::ST4 => {
             ft(&mut edges, next_pc);
             let name = format!("{:?}", insn.op()).to_lowercase();
             lift_intrinsic_all(operands, &name)
         }
 
         // ── Atomics ────────────────────────────────────────────────
-        Op::LDADD | Op::LDADDA | Op::LDADDAL | Op::LDADDL |
-        Op::LDCLRL | Op::LDCLRAL |
-        Op::LDSETAL | Op::LDSETA | Op::LDSETL | Op::LDSET |
-        Op::SWP | Op::SWPA | Op::SWPAL | Op::SWPL |
-        Op::CAS | Op::CASA | Op::CASAL | Op::CASL |
-        Op::LDAXP | Op::LDXP | Op::STLXP | Op::STXP => {
+        Op::LDADD
+        | Op::LDADDA
+        | Op::LDADDAL
+        | Op::LDADDL
+        | Op::LDCLRL
+        | Op::LDCLRAL
+        | Op::LDSETAL
+        | Op::LDSETA
+        | Op::LDSETL
+        | Op::LDSET
+        | Op::SWP
+        | Op::SWPA
+        | Op::SWPAL
+        | Op::SWPL
+        | Op::CAS
+        | Op::CASA
+        | Op::CASAL
+        | Op::CASL
+        | Op::LDAXP
+        | Op::LDXP
+        | Op::STLXP
+        | Op::STXP => {
             ft(&mut edges, next_pc);
             let name = format!("{:?}", insn.op()).to_lowercase();
             lift_intrinsic_all(operands, &name)
         }
 
         // ── Crypto ─────────────────────────────────────────────────
-        Op::AESE | Op::AESD | Op::AESMC | Op::AESIMC |
-        Op::SHA1H | Op::SHA1C | Op::SHA1M | Op::SHA1P |
-        Op::SHA1SU0 | Op::SHA1SU1 |
-        Op::SHA256H | Op::SHA256H2 | Op::SHA256SU0 | Op::SHA256SU1 |
-        Op::SHA512H | Op::SHA512H2 | Op::SHA512SU0 | Op::SHA512SU1 |
-        Op::EOR3 | Op::XAR | Op::BCAX | Op::RAX1 => {
+        Op::AESE
+        | Op::AESD
+        | Op::AESMC
+        | Op::AESIMC
+        | Op::SHA1H
+        | Op::SHA1C
+        | Op::SHA1M
+        | Op::SHA1P
+        | Op::SHA1SU0
+        | Op::SHA1SU1
+        | Op::SHA256H
+        | Op::SHA256H2
+        | Op::SHA256SU0
+        | Op::SHA256SU1
+        | Op::SHA512H
+        | Op::SHA512H2
+        | Op::SHA512SU0
+        | Op::SHA512SU1
+        | Op::EOR3
+        | Op::XAR
+        | Op::BCAX
+        | Op::RAX1 => {
             ft(&mut edges, next_pc);
             let name = format!("{:?}", insn.op()).to_lowercase();
             lift_intrinsic_all(operands, &name)
@@ -676,9 +1084,7 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
             ft(&mut edges, next_pc);
             Stmt::Nop
         }
-        Op::BRK | Op::UDF => {
-            Stmt::Trap
-        }
+        Op::BRK | Op::UDF => Stmt::Trap,
         Op::SVC | Op::HVC | Op::SMC => {
             ft(&mut edges, next_pc);
             lift_intrinsic_all(operands, &format!("{:?}", insn.op()).to_lowercase())
@@ -689,8 +1095,15 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         }
 
         // ── MTE (Memory Tagging) ──────────────────────────────────
-        Op::ADDG | Op::SUBG | Op::STG | Op::STZG | Op::ST2G | Op::STZ2G |
-        Op::LDG | Op::STGP | Op::SUBPS => {
+        Op::ADDG
+        | Op::SUBG
+        | Op::STG
+        | Op::STZG
+        | Op::ST2G
+        | Op::STZ2G
+        | Op::LDG
+        | Op::STGP
+        | Op::SUBPS => {
             ft(&mut edges, next_pc);
             let name = format!("{:?}", insn.op()).to_lowercase();
             lift_intrinsic_all(operands, &name)
@@ -704,7 +1117,11 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         }
     };
 
-    LiftResult { disasm, stmt, edges }
+    LiftResult {
+        disasm,
+        stmt,
+        edges,
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -715,7 +1132,10 @@ fn lift_binary(operands: &[Operand], make: fn(Expr, Expr) -> Expr) -> Stmt {
     let dst = reg_op(operands, 0);
     let a = expr_op(operands, 1);
     let b = expr_op(operands, 2);
-    Stmt::Assign { dst, src: make(a, b) }
+    Stmt::Assign {
+        dst,
+        src: make(a, b),
+    }
 }
 
 fn lift_unary(operands: &[Operand], make: fn(Expr) -> Expr) -> Stmt {
@@ -728,24 +1148,41 @@ fn lift_binary_intrinsic(operands: &[Operand], name: &str) -> Stmt {
     let dst = reg_op(operands, 0);
     let a = expr_op(operands, 1);
     let b = expr_op(operands, 2);
-    Stmt::Assign { dst, src: e_intrinsic(name, vec![a, b]) }
+    Stmt::Assign {
+        dst,
+        src: e_intrinsic(name, vec![a, b]),
+    }
 }
 
 fn lift_unary_intrinsic(operands: &[Operand], name: &str) -> Stmt {
     let dst = reg_op(operands, 0);
     let a = expr_op(operands, 1);
-    Stmt::Assign { dst, src: e_intrinsic(name, vec![a]) }
+    Stmt::Assign {
+        dst,
+        src: e_intrinsic(name, vec![a]),
+    }
 }
 
 fn lift_intrinsic_all(operands: &[Operand], name: &str) -> Stmt {
     let ops: Vec<Expr> = operands.iter().map(|o| expr_from_operand(o)).collect();
-    Stmt::Intrinsic { name: name.to_string(), operands: ops }
+    Stmt::Intrinsic {
+        name: name.to_string(),
+        operands: ops,
+    }
 }
 
 fn lift_load(operands: &[Operand], explicit_size: u8, signed: bool) -> Stmt {
     let dst = reg_op(operands, 0);
-    let size = if explicit_size == 0 { reg_size(&dst) } else { explicit_size };
-    let addr = if operands.len() > 1 { mem_to_addr(&operands[1]) } else { Expr::Imm(0) };
+    let size = if explicit_size == 0 {
+        operand_reg_size(operands, 0)
+    } else {
+        explicit_size
+    };
+    let addr = if operands.len() > 1 {
+        mem_to_addr(&operands[1])
+    } else {
+        Expr::Imm(0)
+    };
     let load_expr = e_load(addr, size);
     let src = if signed {
         e_sign_extend(load_expr, size * 8)
@@ -758,28 +1195,57 @@ fn lift_load(operands: &[Operand], explicit_size: u8, signed: bool) -> Stmt {
 fn lift_load_pair(operands: &[Operand], signed: bool) -> Stmt {
     let dst1 = reg_op(operands, 0);
     let dst2 = reg_op(operands, 1);
-    let size = if signed { 4 } else { reg_size(&dst1) };
-    let addr = if operands.len() > 2 { mem_to_addr(&operands[2]) } else { Expr::Imm(0) };
+    let size = if signed {
+        4
+    } else {
+        operand_reg_size(operands, 0)
+    };
+    let addr = if operands.len() > 2 {
+        mem_to_addr(&operands[2])
+    } else {
+        Expr::Imm(0)
+    };
     let load1 = e_load(addr.clone(), size);
     let load2 = e_load(e_add(addr, Expr::Imm(size as u64)), size);
-    let src1 = if signed { e_sign_extend(load1, 32) } else { load1 };
-    let src2 = if signed { e_sign_extend(load2, 32) } else { load2 };
+    let src1 = if signed {
+        e_sign_extend(load1, 32)
+    } else {
+        load1
+    };
+    let src2 = if signed {
+        e_sign_extend(load2, 32)
+    } else {
+        load2
+    };
     Stmt::Pair(
-        Box::new(Stmt::Assign { dst: dst1, src: src1 }),
-        Box::new(Stmt::Assign { dst: dst2, src: src2 }),
+        Box::new(Stmt::Assign {
+            dst: dst1,
+            src: src1,
+        }),
+        Box::new(Stmt::Assign {
+            dst: dst2,
+            src: src2,
+        }),
     )
 }
 
 fn lift_store(operands: &[Operand], explicit_size: u8) -> Stmt {
     let value_expr = expr_op(operands, 0);
     let size = if explicit_size == 0 {
-        let r = reg_op(operands, 0);
-        reg_size(&r)
+        operand_reg_size(operands, 0)
     } else {
         explicit_size
     };
-    let addr = if operands.len() > 1 { mem_to_addr(&operands[1]) } else { Expr::Imm(0) };
-    Stmt::Store { addr, value: value_expr, size }
+    let addr = if operands.len() > 1 {
+        mem_to_addr(&operands[1])
+    } else {
+        Expr::Imm(0)
+    };
+    Stmt::Store {
+        addr,
+        value: value_expr,
+        size,
+    }
 }
 
 fn lift_store_exclusive(operands: &[Operand], explicit_size: u8) -> Stmt {
@@ -787,13 +1253,16 @@ fn lift_store_exclusive(operands: &[Operand], explicit_size: u8) -> Stmt {
     if operands.len() >= 3 {
         let value_expr = expr_op(operands, 1);
         let size = if explicit_size == 0 {
-            let r = reg_op(operands, 1);
-            reg_size(&r)
+            operand_reg_size(operands, 1)
         } else {
             explicit_size
         };
         let addr = mem_to_addr(&operands[2]);
-        Stmt::Store { addr, value: value_expr, size }
+        Stmt::Store {
+            addr,
+            value: value_expr,
+            size,
+        }
     } else {
         lift_store(operands, explicit_size)
     }
@@ -802,18 +1271,34 @@ fn lift_store_exclusive(operands: &[Operand], explicit_size: u8) -> Stmt {
 fn lift_store_pair(operands: &[Operand]) -> Stmt {
     let val1 = expr_op(operands, 0);
     let val2 = expr_op(operands, 1);
-    let size = reg_size(&reg_op(operands, 0));
-    let addr = if operands.len() > 2 { mem_to_addr(&operands[2]) } else { Expr::Imm(0) };
+    let size = operand_reg_size(operands, 0);
+    let addr = if operands.len() > 2 {
+        mem_to_addr(&operands[2])
+    } else {
+        Expr::Imm(0)
+    };
     Stmt::Pair(
-        Box::new(Stmt::Store { addr: addr.clone(), value: val1, size }),
-        Box::new(Stmt::Store { addr: e_add(addr, Expr::Imm(size as u64)), value: val2, size }),
+        Box::new(Stmt::Store {
+            addr: addr.clone(),
+            value: val1,
+            size,
+        }),
+        Box::new(Stmt::Store {
+            addr: e_add(addr, Expr::Imm(size as u64)),
+            value: val2,
+            size,
+        }),
     )
 }
 
 fn lift_csel(operands: &[Operand], make: fn(Expr, Expr, Condition) -> Expr) -> Stmt {
     let dst = reg_op(operands, 0);
     let t = expr_op(operands, 1);
-    let f = if operands.len() > 2 { expr_op(operands, 2) } else { t.clone() };
+    let f = if operands.len() > 2 {
+        expr_op(operands, 2)
+    } else {
+        t.clone()
+    };
     let cond = if operands.len() > 3 {
         cond_op(operands, 3)
     } else if operands.len() > 2 {
@@ -821,7 +1306,10 @@ fn lift_csel(operands: &[Operand], make: fn(Expr, Expr, Condition) -> Expr) -> S
     } else {
         Condition::AL
     };
-    Stmt::Assign { dst, src: make(t, f, cond) }
+    Stmt::Assign {
+        dst,
+        src: make(t, f, cond),
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -835,13 +1323,44 @@ fn ft(edges: &mut Vec<u64>, next_pc: Option<u64>) {
 }
 
 fn reg_op(operands: &[Operand], idx: usize) -> Reg {
-    operands.get(idx)
+    operands
+        .get(idx)
         .and_then(|o| operand_to_reg(o))
         .unwrap_or(Reg::XZR)
 }
 
+fn operand_reg_size(operands: &[Operand], idx: usize) -> u8 {
+    operands
+        .get(idx)
+        .and_then(size_from_operand)
+        .unwrap_or_else(|| reg_size(&reg_op(operands, idx)))
+}
+
+fn size_from_operand(op: &Operand) -> Option<u8> {
+    let reg = match op {
+        Operand::Reg { reg, .. } | Operand::ShiftReg { reg, .. } => *reg,
+        _ => return None,
+    };
+
+    let reg_name = format!("{}", reg);
+    let size = match reg_name.as_str() {
+        "sp" => 8,
+        _ if reg_name.starts_with('w') => 4,
+        _ if reg_name.starts_with('x') => 8,
+        _ if reg_name.starts_with('d') => 8,
+        _ if reg_name.starts_with('s') => 4,
+        _ if reg_name.starts_with('h') => 2,
+        _ if reg_name.starts_with('b') => 1,
+        _ if reg_name.starts_with('v') || reg_name.starts_with('q') => 16,
+        _ => reg_from_bad64(reg).map(|r| reg_size(&r)).unwrap_or(8),
+    };
+
+    Some(size)
+}
+
 fn expr_op(operands: &[Operand], idx: usize) -> Expr {
-    operands.get(idx)
+    operands
+        .get(idx)
         .map(|o| expr_from_operand(o))
         .unwrap_or(Expr::Imm(0))
 }
@@ -896,42 +1415,52 @@ fn operand_to_reg(op: &Operand) -> Option<Reg> {
 
 fn expr_from_operand(op: &Operand) -> Expr {
     match op {
-        Operand::Reg { reg, .. } => {
-            reg_from_bad64(*reg).map(Expr::Reg).unwrap_or(Expr::Imm(0))
-        }
+        Operand::Reg { reg, .. } => reg_from_bad64(*reg).map(Expr::Reg).unwrap_or(Expr::Imm(0)),
         Operand::ShiftReg { reg, shift } => {
             let base = reg_from_bad64(*reg).map(Expr::Reg).unwrap_or(Expr::Imm(0));
             apply_shift(base, *shift)
         }
         Operand::Imm64 { imm, shift } => {
             let val = Expr::Imm(imm_to_u64(imm));
-            if let Some(s) = shift { apply_shift(val, *s) } else { val }
+            if let Some(s) = shift {
+                apply_shift(val, *s)
+            } else {
+                val
+            }
         }
         Operand::Imm32 { imm, shift } => {
             let val = Expr::Imm(imm_to_u64(imm));
-            if let Some(s) = shift { apply_shift(val, *s) } else { val }
+            if let Some(s) = shift {
+                apply_shift(val, *s)
+            } else {
+                val
+            }
         }
-        Operand::FImm32(bits) => {
-            Expr::FImm(f32::from_le_bytes(bits.to_le_bytes()) as f64)
-        }
+        Operand::FImm32(bits) => Expr::FImm(f32::from_le_bytes(bits.to_le_bytes()) as f64),
         Operand::Label(imm) => Expr::Imm(imm_to_u64(imm)),
         Operand::Cond(c) => Expr::Imm(cond_from_bad64(*c) as u64),
 
         // Memory operands → produce the address expression
-        Operand::MemReg(_) | Operand::MemOffset { .. } | Operand::MemPreIdx { .. } |
-        Operand::MemPostIdxImm { .. } | Operand::MemPostIdxReg(_) | Operand::MemExt { .. } => {
-            mem_to_addr(op)
-        }
+        Operand::MemReg(_)
+        | Operand::MemOffset { .. }
+        | Operand::MemPreIdx { .. }
+        | Operand::MemPostIdxImm { .. }
+        | Operand::MemPostIdxReg(_)
+        | Operand::MemExt { .. } => mem_to_addr(op),
 
         Operand::SysReg(sr) => Expr::Intrinsic {
             name: format!("{}", sr),
             operands: vec![],
         },
         Operand::MultiReg { regs, .. } => {
-            let reg_exprs: Vec<Expr> = regs.iter()
+            let reg_exprs: Vec<Expr> = regs
+                .iter()
                 .filter_map(|r| r.and_then(|rr| reg_from_bad64(rr).map(Expr::Reg)))
                 .collect();
-            Expr::Intrinsic { name: "multi_reg".to_string(), operands: reg_exprs }
+            Expr::Intrinsic {
+                name: "multi_reg".to_string(),
+                operands: reg_exprs,
+            }
         }
         _ => Expr::Imm(0),
     }
@@ -939,29 +1468,39 @@ fn expr_from_operand(op: &Operand) -> Expr {
 
 fn mem_to_addr(op: &Operand) -> Expr {
     match op {
-        Operand::MemReg(reg) => {
-            reg_from_bad64(*reg).map(Expr::Reg).unwrap_or(Expr::Imm(0))
-        }
+        Operand::MemReg(reg) => reg_from_bad64(*reg).map(Expr::Reg).unwrap_or(Expr::Imm(0)),
         Operand::MemOffset { reg, offset, .. } => {
             let base = reg_from_bad64(*reg).map(Expr::Reg).unwrap_or(Expr::Imm(0));
             let off_val = imm_to_u64(offset);
-            if off_val == 0 { base } else { e_add(base, Expr::Imm(off_val)) }
+            if off_val == 0 {
+                base
+            } else {
+                e_add(base, Expr::Imm(off_val))
+            }
         }
         Operand::MemPreIdx { reg, imm } => {
             let base = reg_from_bad64(*reg).map(Expr::Reg).unwrap_or(Expr::Imm(0));
             let off_val = imm_to_u64(imm);
-            if off_val == 0 { base } else { e_add(base, Expr::Imm(off_val)) }
+            if off_val == 0 {
+                base
+            } else {
+                e_add(base, Expr::Imm(off_val))
+            }
         }
         Operand::MemPostIdxImm { reg, .. } => {
             // Post-index: effective address is just the base register
             reg_from_bad64(*reg).map(Expr::Reg).unwrap_or(Expr::Imm(0))
         }
-        Operand::MemPostIdxReg(regs) => {
-            reg_from_bad64(regs[0]).map(Expr::Reg).unwrap_or(Expr::Imm(0))
-        }
+        Operand::MemPostIdxReg(regs) => reg_from_bad64(regs[0])
+            .map(Expr::Reg)
+            .unwrap_or(Expr::Imm(0)),
         Operand::MemExt { regs, shift, .. } => {
-            let base = reg_from_bad64(regs[0]).map(Expr::Reg).unwrap_or(Expr::Imm(0));
-            let mut idx = reg_from_bad64(regs[1]).map(Expr::Reg).unwrap_or(Expr::Imm(0));
+            let base = reg_from_bad64(regs[0])
+                .map(Expr::Reg)
+                .unwrap_or(Expr::Imm(0));
+            let mut idx = reg_from_bad64(regs[1])
+                .map(Expr::Reg)
+                .unwrap_or(Expr::Imm(0));
             if let Some(s) = shift {
                 idx = apply_shift(idx, *s);
             }
@@ -980,33 +1519,65 @@ fn apply_shift(expr: Expr, shift: Shift) -> Expr {
         Shift::ROR(n) => e_ror(expr, Expr::Imm(n as u64)),
         Shift::SXTW(n) => {
             let ext = e_sign_extend(expr, 32);
-            if n == 0 { ext } else { e_shl(ext, Expr::Imm(n as u64)) }
+            if n == 0 {
+                ext
+            } else {
+                e_shl(ext, Expr::Imm(n as u64))
+            }
         }
         Shift::SXTX(n) => {
-            if n == 0 { expr } else { e_shl(expr, Expr::Imm(n as u64)) }
+            if n == 0 {
+                expr
+            } else {
+                e_shl(expr, Expr::Imm(n as u64))
+            }
         }
         Shift::SXTB(n) => {
             let ext = e_sign_extend(expr, 8);
-            if n == 0 { ext } else { e_shl(ext, Expr::Imm(n as u64)) }
+            if n == 0 {
+                ext
+            } else {
+                e_shl(ext, Expr::Imm(n as u64))
+            }
         }
         Shift::SXTH(n) => {
             let ext = e_sign_extend(expr, 16);
-            if n == 0 { ext } else { e_shl(ext, Expr::Imm(n as u64)) }
+            if n == 0 {
+                ext
+            } else {
+                e_shl(ext, Expr::Imm(n as u64))
+            }
         }
         Shift::UXTW(n) => {
             let ext = e_zero_extend(expr, 32);
-            if n == 0 { ext } else { e_shl(ext, Expr::Imm(n as u64)) }
+            if n == 0 {
+                ext
+            } else {
+                e_shl(ext, Expr::Imm(n as u64))
+            }
         }
         Shift::UXTX(n) => {
-            if n == 0 { expr } else { e_shl(expr, Expr::Imm(n as u64)) }
+            if n == 0 {
+                expr
+            } else {
+                e_shl(expr, Expr::Imm(n as u64))
+            }
         }
         Shift::UXTB(n) => {
             let ext = e_zero_extend(expr, 8);
-            if n == 0 { ext } else { e_shl(ext, Expr::Imm(n as u64)) }
+            if n == 0 {
+                ext
+            } else {
+                e_shl(ext, Expr::Imm(n as u64))
+            }
         }
         Shift::UXTH(n) => {
             let ext = e_zero_extend(expr, 16);
-            if n == 0 { ext } else { e_shl(ext, Expr::Imm(n as u64)) }
+            if n == 0 {
+                ext
+            } else {
+                e_shl(ext, Expr::Imm(n as u64))
+            }
         }
         Shift::MSL(n) => e_intrinsic("msl", vec![expr, Expr::Imm(n as u64)]),
     }
@@ -1020,38 +1591,68 @@ fn reg_from_bad64(r: bad64::Reg) -> Option<Reg> {
     use bad64::Reg as BR;
     match r {
         // General purpose — fast path
-        BR::X0 => Some(Reg::X(0)),   BR::X1 => Some(Reg::X(1)),
-        BR::X2 => Some(Reg::X(2)),   BR::X3 => Some(Reg::X(3)),
-        BR::X4 => Some(Reg::X(4)),   BR::X5 => Some(Reg::X(5)),
-        BR::X6 => Some(Reg::X(6)),   BR::X7 => Some(Reg::X(7)),
-        BR::X8 => Some(Reg::X(8)),   BR::X9 => Some(Reg::X(9)),
-        BR::X10 => Some(Reg::X(10)), BR::X11 => Some(Reg::X(11)),
-        BR::X12 => Some(Reg::X(12)), BR::X13 => Some(Reg::X(13)),
-        BR::X14 => Some(Reg::X(14)), BR::X15 => Some(Reg::X(15)),
-        BR::X16 => Some(Reg::X(16)), BR::X17 => Some(Reg::X(17)),
-        BR::X18 => Some(Reg::X(18)), BR::X19 => Some(Reg::X(19)),
-        BR::X20 => Some(Reg::X(20)), BR::X21 => Some(Reg::X(21)),
-        BR::X22 => Some(Reg::X(22)), BR::X23 => Some(Reg::X(23)),
-        BR::X24 => Some(Reg::X(24)), BR::X25 => Some(Reg::X(25)),
-        BR::X26 => Some(Reg::X(26)), BR::X27 => Some(Reg::X(27)),
-        BR::X28 => Some(Reg::X(28)), BR::X29 => Some(Reg::X(29)),
+        BR::X0 => Some(Reg::X(0)),
+        BR::X1 => Some(Reg::X(1)),
+        BR::X2 => Some(Reg::X(2)),
+        BR::X3 => Some(Reg::X(3)),
+        BR::X4 => Some(Reg::X(4)),
+        BR::X5 => Some(Reg::X(5)),
+        BR::X6 => Some(Reg::X(6)),
+        BR::X7 => Some(Reg::X(7)),
+        BR::X8 => Some(Reg::X(8)),
+        BR::X9 => Some(Reg::X(9)),
+        BR::X10 => Some(Reg::X(10)),
+        BR::X11 => Some(Reg::X(11)),
+        BR::X12 => Some(Reg::X(12)),
+        BR::X13 => Some(Reg::X(13)),
+        BR::X14 => Some(Reg::X(14)),
+        BR::X15 => Some(Reg::X(15)),
+        BR::X16 => Some(Reg::X(16)),
+        BR::X17 => Some(Reg::X(17)),
+        BR::X18 => Some(Reg::X(18)),
+        BR::X19 => Some(Reg::X(19)),
+        BR::X20 => Some(Reg::X(20)),
+        BR::X21 => Some(Reg::X(21)),
+        BR::X22 => Some(Reg::X(22)),
+        BR::X23 => Some(Reg::X(23)),
+        BR::X24 => Some(Reg::X(24)),
+        BR::X25 => Some(Reg::X(25)),
+        BR::X26 => Some(Reg::X(26)),
+        BR::X27 => Some(Reg::X(27)),
+        BR::X28 => Some(Reg::X(28)),
+        BR::X29 => Some(Reg::X(29)),
         BR::X30 => Some(Reg::X(30)),
 
-        BR::W0 => Some(Reg::W(0)),   BR::W1 => Some(Reg::W(1)),
-        BR::W2 => Some(Reg::W(2)),   BR::W3 => Some(Reg::W(3)),
-        BR::W4 => Some(Reg::W(4)),   BR::W5 => Some(Reg::W(5)),
-        BR::W6 => Some(Reg::W(6)),   BR::W7 => Some(Reg::W(7)),
-        BR::W8 => Some(Reg::W(8)),   BR::W9 => Some(Reg::W(9)),
-        BR::W10 => Some(Reg::W(10)), BR::W11 => Some(Reg::W(11)),
-        BR::W12 => Some(Reg::W(12)), BR::W13 => Some(Reg::W(13)),
-        BR::W14 => Some(Reg::W(14)), BR::W15 => Some(Reg::W(15)),
-        BR::W16 => Some(Reg::W(16)), BR::W17 => Some(Reg::W(17)),
-        BR::W18 => Some(Reg::W(18)), BR::W19 => Some(Reg::W(19)),
-        BR::W20 => Some(Reg::W(20)), BR::W21 => Some(Reg::W(21)),
-        BR::W22 => Some(Reg::W(22)), BR::W23 => Some(Reg::W(23)),
-        BR::W24 => Some(Reg::W(24)), BR::W25 => Some(Reg::W(25)),
-        BR::W26 => Some(Reg::W(26)), BR::W27 => Some(Reg::W(27)),
-        BR::W28 => Some(Reg::W(28)), BR::W29 => Some(Reg::W(29)),
+        BR::W0 => Some(Reg::W(0)),
+        BR::W1 => Some(Reg::W(1)),
+        BR::W2 => Some(Reg::W(2)),
+        BR::W3 => Some(Reg::W(3)),
+        BR::W4 => Some(Reg::W(4)),
+        BR::W5 => Some(Reg::W(5)),
+        BR::W6 => Some(Reg::W(6)),
+        BR::W7 => Some(Reg::W(7)),
+        BR::W8 => Some(Reg::W(8)),
+        BR::W9 => Some(Reg::W(9)),
+        BR::W10 => Some(Reg::W(10)),
+        BR::W11 => Some(Reg::W(11)),
+        BR::W12 => Some(Reg::W(12)),
+        BR::W13 => Some(Reg::W(13)),
+        BR::W14 => Some(Reg::W(14)),
+        BR::W15 => Some(Reg::W(15)),
+        BR::W16 => Some(Reg::W(16)),
+        BR::W17 => Some(Reg::W(17)),
+        BR::W18 => Some(Reg::W(18)),
+        BR::W19 => Some(Reg::W(19)),
+        BR::W20 => Some(Reg::W(20)),
+        BR::W21 => Some(Reg::W(21)),
+        BR::W22 => Some(Reg::W(22)),
+        BR::W23 => Some(Reg::W(23)),
+        BR::W24 => Some(Reg::W(24)),
+        BR::W25 => Some(Reg::W(25)),
+        BR::W26 => Some(Reg::W(26)),
+        BR::W27 => Some(Reg::W(27)),
+        BR::W28 => Some(Reg::W(28)),
+        BR::W29 => Some(Reg::W(29)),
         BR::W30 => Some(Reg::W(30)),
 
         BR::SP => Some(Reg::SP),
@@ -1066,7 +1667,9 @@ fn reg_from_bad64(r: bad64::Reg) -> Option<Reg> {
 
 fn reg_from_string(s: &str) -> Option<Reg> {
     let bytes = s.as_bytes();
-    if bytes.is_empty() { return None; }
+    if bytes.is_empty() {
+        return None;
+    }
 
     let (prefix, rest) = if bytes.len() > 1 {
         (bytes[0], &s[1..])
@@ -1080,11 +1683,17 @@ fn reg_from_string(s: &str) -> Option<Reg> {
         b'd' => rest.parse().ok().filter(|&n: &u8| n < 32).map(Reg::D),
         b's' => {
             // Avoid matching "sp"
-            if rest == "p" { return Some(Reg::SP); }
+            if rest == "p" {
+                return Some(Reg::SP);
+            }
             rest.parse().ok().filter(|&n: &u8| n < 32).map(Reg::S)
         }
         b'h' => rest.parse().ok().filter(|&n: &u8| n < 32).map(Reg::H),
-        b'b' => rest.parse().ok().filter(|&n: &u8| n < 32).map(|n| Reg::VByte(n)),
+        b'b' => rest
+            .parse()
+            .ok()
+            .filter(|&n: &u8| n < 32)
+            .map(|n| Reg::VByte(n)),
         _ => None,
     }
 }
@@ -1116,14 +1725,22 @@ fn cond_from_bad64(c: bad64::Condition) -> Condition {
 
 fn cond_from_branch_op(op: Op) -> Condition {
     match op {
-        Op::B_EQ => Condition::EQ, Op::B_NE => Condition::NE,
-        Op::B_CS => Condition::CS, Op::B_CC => Condition::CC,
-        Op::B_MI => Condition::MI, Op::B_PL => Condition::PL,
-        Op::B_VS => Condition::VS, Op::B_VC => Condition::VC,
-        Op::B_HI => Condition::HI, Op::B_LS => Condition::LS,
-        Op::B_GE => Condition::GE, Op::B_LT => Condition::LT,
-        Op::B_GT => Condition::GT, Op::B_LE => Condition::LE,
-        Op::B_AL => Condition::AL, Op::B_NV => Condition::NV,
+        Op::B_EQ => Condition::EQ,
+        Op::B_NE => Condition::NE,
+        Op::B_CS => Condition::CS,
+        Op::B_CC => Condition::CC,
+        Op::B_MI => Condition::MI,
+        Op::B_PL => Condition::PL,
+        Op::B_VS => Condition::VS,
+        Op::B_VC => Condition::VC,
+        Op::B_HI => Condition::HI,
+        Op::B_LS => Condition::LS,
+        Op::B_GE => Condition::GE,
+        Op::B_LT => Condition::LT,
+        Op::B_GT => Condition::GT,
+        Op::B_LE => Condition::LE,
+        Op::B_AL => Condition::AL,
+        Op::B_NV => Condition::NV,
         _ => Condition::AL,
     }
 }
@@ -1136,5 +1753,195 @@ impl<'a> std::fmt::Display for DisplayOperand<'a> {
             Operand::SysReg(sr) => write!(f, "{}", sr),
             _ => write!(f, "?"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lift_word(word: u32, pc: u64) -> LiftResult {
+        let insn = bad64::decode(word, pc).expect("instruction should decode");
+        lift(&insn, pc, Some(pc + 4))
+    }
+
+    #[test]
+    fn lifts_char_respawn_cbnz() {
+        let pc = 0x07a34a78;
+        let result = lift_word(0x3500_02c8, pc);
+
+        assert_eq!(
+            result.stmt,
+            Stmt::CondBranch {
+                cond: BranchCond::NotZero(Expr::Reg(Reg::W(8))),
+                target: Expr::Imm(0x07a34ad0),
+                fallthrough: pc + 4,
+            }
+        );
+        assert_eq!(result.edges, vec![0x07a34ad0, pc + 4]);
+    }
+
+    #[test]
+    fn lifts_char_respawn_cmp_w8_imm1() {
+        let pc = 0x07a34a80;
+        let result = lift_word(0x7100_051f, pc);
+
+        assert_eq!(
+            result.stmt,
+            Stmt::SetFlags {
+                expr: e_sub(Expr::Reg(Reg::W(8)), Expr::Imm(1)),
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_char_respawn_b_ne() {
+        let pc = 0x07a34a84;
+        let result = lift_word(0x5400_0201, pc);
+
+        assert_eq!(
+            result.stmt,
+            Stmt::CondBranch {
+                cond: BranchCond::Flag(Condition::NE),
+                target: Expr::Imm(0x07a34ac4),
+                fallthrough: pc + 4,
+            }
+        );
+        assert_eq!(result.edges, vec![0x07a34ac4, pc + 4]);
+    }
+
+    #[test]
+    fn lifts_char_respawn_cmp_x8_x9() {
+        let pc = 0x07a34a9c;
+        let result = lift_word(0xeb09_011f, pc);
+
+        assert_eq!(
+            result.stmt,
+            Stmt::SetFlags {
+                expr: e_sub(Expr::Reg(Reg::X(8)), Expr::Reg(Reg::X(9))),
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_char_respawn_cset_hs() {
+        let pc = 0x07a34aa0;
+        let result = lift_word(0x1a9f_37ea, pc);
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Assign {
+                dst: Reg::W(10),
+                src: e_cond_select(Condition::CS, Expr::Imm(1), Expr::Imm(0)),
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_char_respawn_lsl_w10_2() {
+        let pc = 0x07a34aa4;
+        let result = lift_word(0x531e_754a, pc);
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Assign {
+                dst: Reg::W(10),
+                src: e_shl(Expr::Reg(Reg::W(10)), Expr::Imm(2)),
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_char_respawn_b_hs() {
+        let pc = 0x07a34aac;
+        let result = lift_word(0x5400_0142, pc);
+
+        assert_eq!(
+            result.stmt,
+            Stmt::CondBranch {
+                cond: BranchCond::Flag(Condition::CS),
+                target: Expr::Imm(0x07a34ad4),
+                fallthrough: pc + 4,
+            }
+        );
+        assert_eq!(result.edges, vec![0x07a34ad4, pc + 4]);
+    }
+
+    #[test]
+    fn lifts_char_respawn_cmp_x10_x9() {
+        let pc = 0x07a34ab4;
+        let result = lift_word(0xeb09_015f, pc);
+
+        assert_eq!(
+            result.stmt,
+            Stmt::SetFlags {
+                expr: e_sub(Expr::Reg(Reg::X(10)), Expr::Reg(Reg::X(9))),
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_char_respawn_b_ls() {
+        let pc = 0x07a34ab8;
+        let result = lift_word(0x5400_0129, pc);
+
+        assert_eq!(
+            result.stmt,
+            Stmt::CondBranch {
+                cond: BranchCond::Flag(Condition::LS),
+                target: Expr::Imm(0x07a34adc),
+                fallthrough: pc + 4,
+            }
+        );
+        assert_eq!(result.edges, vec![0x07a34adc, pc + 4]);
+    }
+
+    #[test]
+    fn lifts_char_respawn_b_to_store_site() {
+        let pc = 0x07a34ac0;
+        let result = lift_word(0x1400_0004, pc);
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Branch {
+                target: Expr::Imm(0x07a34ad0),
+            }
+        );
+        assert_eq!(result.edges, vec![0x07a34ad0]);
+    }
+
+    #[test]
+    fn lifts_char_respawn_b_to_store_site_from_second_path() {
+        let pc = 0x07a34ac8;
+        let result = lift_word(0x1400_0002, pc);
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Branch {
+                target: Expr::Imm(0x07a34ad0),
+            }
+        );
+        assert_eq!(result.edges, vec![0x07a34ad0]);
+    }
+
+    #[test]
+    fn lifts_char_respawn_store_wzr_as_32bit_store() {
+        let pc = 0x07a34ad4;
+        let result = lift_word(0xb900_081f, pc);
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Store {
+                addr: e_add(Expr::Reg(Reg::X(0)), Expr::Imm(8)),
+                value: Expr::Reg(Reg::XZR),
+                size: 4,
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
     }
 }

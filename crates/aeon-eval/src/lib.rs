@@ -305,9 +305,7 @@ mod tests {
             corpus_entry_id: "fixture-hello".to_string(),
             kind: TaskKind::FindConfigLoader,
             prompt: "Find the configuration loading routine.".to_string(),
-            expected_outcome: ExpectedOutcome::ContainsStrings(vec![
-                "config.json".to_string(),
-            ]),
+            expected_outcome: ExpectedOutcome::ContainsStrings(vec!["config.json".to_string()]),
             metadata: json!({"difficulty": "smoke"}),
         };
 

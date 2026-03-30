@@ -125,9 +125,5 @@ fn parse_args() -> Result<Args, String> {
 }
 
 fn usage() -> String {
-    [
-        "Usage:",
-        "  survey <binary> [--limit <count>] [--json]",
-    ]
-    .join("\n")
+    ["Usage:", "  survey <binary> [--limit <count>] [--json]"].join("\n")
 }

@@ -7,6 +7,7 @@ use crate::engine::{AeonEngine, SemanticContext};
 use crate::il::{Expr, Stmt};
 use crate::lifter;
 use crate::object_layout::ConstructorObjectLayout;
+use crate::pointer_analysis;
 
 pub struct AeonSession {
     path: String,
@@ -175,7 +176,8 @@ impl AeonSession {
             .function_bytes(func)
             .ok_or("Function bytes out of range")?;
         let engine = self.analysis_state.borrow();
-        let listing = render_instruction_listing(bytes, func.addr, &self.binary, &engine, ListingMode::Il);
+        let listing =
+            render_instruction_listing(bytes, func.addr, &self.binary, &engine, ListingMode::Il);
 
         Ok(json!({
             "query_addr": format!("0x{:x}", addr),
@@ -329,6 +331,43 @@ impl AeonSession {
             "calls_out_count": calls_out.len(),
             "calls_in_count": calls_in.len(),
         })
+    }
+
+    pub fn scan_pointers(&self) -> Value {
+        serde_json::to_value(pointer_analysis::scan_pointers(&self.binary)).unwrap()
+    }
+
+    pub fn scan_vtables(&self) -> Value {
+        serde_json::to_value(pointer_analysis::scan_vtables(&self.binary)).unwrap()
+    }
+
+    pub fn scan_function_pointers(
+        &self,
+        addr: Option<u64>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Value, String> {
+        let report = pointer_analysis::scan_function_pointers(&self.binary, addr, offset, limit)?;
+        Ok(serde_json::to_value(report).unwrap())
+    }
+
+    pub fn find_call_paths(
+        &self,
+        start_addr: u64,
+        goal_addr: u64,
+        max_depth: usize,
+        include_all_paths: bool,
+        max_paths: usize,
+    ) -> Result<Value, String> {
+        let report = pointer_analysis::find_call_paths(
+            &self.binary,
+            start_addr,
+            goal_addr,
+            max_depth,
+            include_all_paths,
+            max_paths,
+        )?;
+        Ok(serde_json::to_value(report).unwrap())
     }
 
     pub fn get_bytes(&self, addr: u64, size: usize) -> Result<Value, String> {
@@ -501,8 +540,7 @@ impl AeonSession {
                 .binary
                 .function_bytes(func)
                 .ok_or("Function bytes out of range")?;
-            let listing =
-                render_instruction_listing(bytes, func.addr, &self.binary, &engine, mode);
+            let listing = render_instruction_listing(bytes, func.addr, &self.binary, &engine, mode);
             if let Some(object) = response.as_object_mut() {
                 object.insert(
                     "listing_kind".to_string(),
@@ -690,7 +728,10 @@ fn render_instruction_listing(
                     object.insert("asm".to_string(), Value::String(result.disasm.clone()));
                 }
                 if mode.include_il() {
-                    object.insert("il".to_string(), Value::String(format!("{:?}", result.stmt)));
+                    object.insert(
+                        "il".to_string(),
+                        Value::String(format!("{:?}", result.stmt)),
+                    );
                     object.insert(
                         "edges".to_string(),
                         Value::Array(

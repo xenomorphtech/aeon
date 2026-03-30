@@ -53,7 +53,10 @@ pub enum Expr {
     FImm(f64),
 
     // Memory
-    Load { addr: Box<Expr>, size: u8 },
+    Load {
+        addr: Box<Expr>,
+        size: u8,
+    },
 
     // Arithmetic
     Add(Box<Expr>, Box<Expr>),
@@ -77,11 +80,21 @@ pub enum Expr {
     Ror(Box<Expr>, Box<Expr>),
 
     // Extension
-    SignExtend { src: Box<Expr>, from_bits: u8 },
-    ZeroExtend { src: Box<Expr>, from_bits: u8 },
+    SignExtend {
+        src: Box<Expr>,
+        from_bits: u8,
+    },
+    ZeroExtend {
+        src: Box<Expr>,
+        from_bits: u8,
+    },
 
     // Bitfield
-    Extract { src: Box<Expr>, lsb: u8, width: u8 },
+    Extract {
+        src: Box<Expr>,
+        lsb: u8,
+        width: u8,
+    },
     Insert {
         dst: Box<Expr>,
         src: Box<Expr>,
@@ -124,27 +137,46 @@ pub enum Expr {
     MrsRead(String),
 
     // Catch-all for complex/SIMD/rare operations
-    Intrinsic { name: String, operands: Vec<Expr> },
+    Intrinsic {
+        name: String,
+        operands: Vec<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
-    Assign { dst: Reg, src: Expr },
-    Store { addr: Expr, value: Expr, size: u8 },
-    Branch { target: Expr },
+    Assign {
+        dst: Reg,
+        src: Expr,
+    },
+    Store {
+        addr: Expr,
+        value: Expr,
+        size: u8,
+    },
+    Branch {
+        target: Expr,
+    },
     CondBranch {
         cond: BranchCond,
         target: Expr,
         fallthrough: u64,
     },
-    Call { target: Expr },
+    Call {
+        target: Expr,
+    },
     Ret,
     Nop,
     Pair(Box<Stmt>, Box<Stmt>),
-    SetFlags { expr: Expr },
+    SetFlags {
+        expr: Expr,
+    },
     Barrier(String),
     Trap,
-    Intrinsic { name: String, operands: Vec<Expr> },
+    Intrinsic {
+        name: String,
+        operands: Vec<Expr>,
+    },
 }
 
 // Expression constructors
