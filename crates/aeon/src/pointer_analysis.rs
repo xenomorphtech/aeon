@@ -1,4 +1,6 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+use aeon_reduce::env::RegisterEnv;
 
 use bad64::{Op, Operand};
 use serde::{Serialize, Serializer};
@@ -695,7 +697,7 @@ fn analyze_function(
     vtable_index: &VTableIndex,
 ) -> FunctionAnalysis {
     let bytes = binary.function_bytes(func).unwrap_or(&[]);
-    let mut env = HashMap::new();
+    let mut env = RegisterEnv::new();
     let mut references = Vec::new();
     let mut edges = Vec::new();
     let mut known_vtables = BTreeSet::new();
@@ -773,7 +775,7 @@ fn process_stmt(
     instruction_addr: u64,
     disassembly: &str,
     stmt: &Stmt,
-    env: &mut HashMap<Reg, Expr>,
+    env: &mut RegisterEnv,
     references: &mut Vec<FunctionPointerReference>,
     edges: &mut Vec<CallGraphEdge>,
     known_vtables: &mut BTreeSet<u64>,
@@ -781,7 +783,7 @@ fn process_stmt(
 ) {
     match stmt {
         Stmt::Assign { dst, src } => {
-            let resolved = resolve_expr(src, env, &mut HashSet::new(), 12);
+            let resolved = env.resolve(src);
             if let Some(target_addr) = pointer_value(&resolved) {
                 let target = classify_target(binary, target_addr);
                 if target.kind != AddressKind::Unknown {
@@ -805,7 +807,7 @@ fn process_stmt(
                     });
                 }
             } else if let Expr::Load { addr, .. } = &resolved {
-                let resolved_addr = resolve_expr(addr, env, &mut HashSet::new(), 12);
+                let resolved_addr = env.resolve(addr);
                 if let Some(target_addr) = pointer_value(&resolved_addr) {
                     let target = classify_target(binary, target_addr);
                     if target.kind != AddressKind::Unknown {
@@ -823,10 +825,10 @@ fn process_stmt(
                     }
                 }
             }
-            assign_register(env, dst.clone(), resolved);
+            env.assign(dst.clone(), resolved);
         }
         Stmt::Store { addr, value, .. } => {
-            let resolved_addr = resolve_expr(addr, env, &mut HashSet::new(), 12);
+            let resolved_addr = env.resolve(addr);
             if let Some(target_addr) = pointer_value(&resolved_addr) {
                 let target = classify_target(binary, target_addr);
                 if target.kind != AddressKind::Unknown {
@@ -844,7 +846,7 @@ fn process_stmt(
                 }
             }
 
-            let resolved_value = resolve_expr(value, env, &mut HashSet::new(), 12);
+            let resolved_value = env.resolve(value);
             if let Some(target_addr) = pointer_value(&resolved_value) {
                 let target = classify_target(binary, target_addr);
                 if target.kind != AddressKind::Unknown {
@@ -867,7 +869,7 @@ fn process_stmt(
         }
         Stmt::Call { target } => {
             let raw_target = target.clone();
-            let resolved = resolve_expr(target, env, &mut HashSet::new(), 12);
+            let resolved = env.resolve(target);
             if let Some(target_addr) = pointer_value(&resolved) {
                 let target_info = classify_target(binary, target_addr);
                 if target_info.kind.is_executable() {
@@ -971,10 +973,10 @@ fn process_stmt(
                     candidate_targets,
                 });
             }
-            invalidate_caller_saved(env);
+            env.invalidate_caller_saved();
         }
         Stmt::Branch { target } => {
-            let resolved = resolve_expr(target, env, &mut HashSet::new(), 12);
+            let resolved = env.resolve(target);
             if let Some(target_addr) = pointer_value(&resolved) {
                 let target_info = classify_target(binary, target_addr);
                 if target_info.kind.is_executable() && target_info.function_addr != Some(func.addr) {
@@ -1332,194 +1334,6 @@ fn call_path_from_edge_indexes(edge_indexes: &[usize], edges: &[CallGraphEdge]) 
     }
 }
 
-fn assign_register(env: &mut HashMap<Reg, Expr>, dst: Reg, value: Expr) {
-    match dst {
-        Reg::X(index) => {
-            env.remove(&Reg::W(index));
-            env.insert(Reg::X(index), value);
-        }
-        Reg::W(index) => {
-            env.remove(&Reg::X(index));
-            env.insert(Reg::W(index), value);
-        }
-        register => {
-            env.insert(register, value);
-        }
-    }
-}
-
-fn invalidate_caller_saved(env: &mut HashMap<Reg, Expr>) {
-    for index in 0..=18 {
-        env.remove(&Reg::X(index));
-        env.remove(&Reg::W(index));
-    }
-    env.remove(&Reg::Flags);
-}
-
-fn resolve_expr(
-    expr: &Expr,
-    env: &HashMap<Reg, Expr>,
-    visited: &mut HashSet<Reg>,
-    depth: usize,
-) -> Expr {
-    if depth == 0 {
-        return expr.clone();
-    }
-
-    match expr {
-        Expr::Reg(reg) => {
-            if visited.contains(reg) {
-                return Expr::Reg(reg.clone());
-            }
-            let Some(mapped) = env.get(reg) else {
-                return Expr::Reg(reg.clone());
-            };
-            visited.insert(reg.clone());
-            let resolved = resolve_expr(mapped, env, visited, depth - 1);
-            visited.remove(reg);
-            resolved
-        }
-        Expr::Load { addr, size } => Expr::Load {
-            addr: Box::new(resolve_expr(addr, env, visited, depth - 1)),
-            size: *size,
-        },
-        Expr::Add(lhs, rhs) => Expr::Add(
-            Box::new(resolve_expr(lhs, env, visited, depth - 1)),
-            Box::new(resolve_expr(rhs, env, visited, depth - 1)),
-        ),
-        Expr::Sub(lhs, rhs) => Expr::Sub(
-            Box::new(resolve_expr(lhs, env, visited, depth - 1)),
-            Box::new(resolve_expr(rhs, env, visited, depth - 1)),
-        ),
-        Expr::Mul(lhs, rhs) => Expr::Mul(
-            Box::new(resolve_expr(lhs, env, visited, depth - 1)),
-            Box::new(resolve_expr(rhs, env, visited, depth - 1)),
-        ),
-        Expr::Div(lhs, rhs) => Expr::Div(
-            Box::new(resolve_expr(lhs, env, visited, depth - 1)),
-            Box::new(resolve_expr(rhs, env, visited, depth - 1)),
-        ),
-        Expr::UDiv(lhs, rhs) => Expr::UDiv(
-            Box::new(resolve_expr(lhs, env, visited, depth - 1)),
-            Box::new(resolve_expr(rhs, env, visited, depth - 1)),
-        ),
-        Expr::Neg(inner) => Expr::Neg(Box::new(resolve_expr(inner, env, visited, depth - 1))),
-        Expr::Abs(inner) => Expr::Abs(Box::new(resolve_expr(inner, env, visited, depth - 1))),
-        Expr::And(lhs, rhs) => Expr::And(
-            Box::new(resolve_expr(lhs, env, visited, depth - 1)),
-            Box::new(resolve_expr(rhs, env, visited, depth - 1)),
-        ),
-        Expr::Or(lhs, rhs) => Expr::Or(
-            Box::new(resolve_expr(lhs, env, visited, depth - 1)),
-            Box::new(resolve_expr(rhs, env, visited, depth - 1)),
-        ),
-        Expr::Xor(lhs, rhs) => Expr::Xor(
-            Box::new(resolve_expr(lhs, env, visited, depth - 1)),
-            Box::new(resolve_expr(rhs, env, visited, depth - 1)),
-        ),
-        Expr::Not(inner) => Expr::Not(Box::new(resolve_expr(inner, env, visited, depth - 1))),
-        Expr::Shl(lhs, rhs) => Expr::Shl(
-            Box::new(resolve_expr(lhs, env, visited, depth - 1)),
-            Box::new(resolve_expr(rhs, env, visited, depth - 1)),
-        ),
-        Expr::Lsr(lhs, rhs) => Expr::Lsr(
-            Box::new(resolve_expr(lhs, env, visited, depth - 1)),
-            Box::new(resolve_expr(rhs, env, visited, depth - 1)),
-        ),
-        Expr::Asr(lhs, rhs) => Expr::Asr(
-            Box::new(resolve_expr(lhs, env, visited, depth - 1)),
-            Box::new(resolve_expr(rhs, env, visited, depth - 1)),
-        ),
-        Expr::Ror(lhs, rhs) => Expr::Ror(
-            Box::new(resolve_expr(lhs, env, visited, depth - 1)),
-            Box::new(resolve_expr(rhs, env, visited, depth - 1)),
-        ),
-        Expr::SignExtend { src, from_bits } => Expr::SignExtend {
-            src: Box::new(resolve_expr(src, env, visited, depth - 1)),
-            from_bits: *from_bits,
-        },
-        Expr::ZeroExtend { src, from_bits } => Expr::ZeroExtend {
-            src: Box::new(resolve_expr(src, env, visited, depth - 1)),
-            from_bits: *from_bits,
-        },
-        Expr::Extract { src, lsb, width } => Expr::Extract {
-            src: Box::new(resolve_expr(src, env, visited, depth - 1)),
-            lsb: *lsb,
-            width: *width,
-        },
-        Expr::Insert {
-            dst,
-            src,
-            lsb,
-            width,
-        } => Expr::Insert {
-            dst: Box::new(resolve_expr(dst, env, visited, depth - 1)),
-            src: Box::new(resolve_expr(src, env, visited, depth - 1)),
-            lsb: *lsb,
-            width: *width,
-        },
-        Expr::FAdd(lhs, rhs) => Expr::FAdd(
-            Box::new(resolve_expr(lhs, env, visited, depth - 1)),
-            Box::new(resolve_expr(rhs, env, visited, depth - 1)),
-        ),
-        Expr::FSub(lhs, rhs) => Expr::FSub(
-            Box::new(resolve_expr(lhs, env, visited, depth - 1)),
-            Box::new(resolve_expr(rhs, env, visited, depth - 1)),
-        ),
-        Expr::FMul(lhs, rhs) => Expr::FMul(
-            Box::new(resolve_expr(lhs, env, visited, depth - 1)),
-            Box::new(resolve_expr(rhs, env, visited, depth - 1)),
-        ),
-        Expr::FDiv(lhs, rhs) => Expr::FDiv(
-            Box::new(resolve_expr(lhs, env, visited, depth - 1)),
-            Box::new(resolve_expr(rhs, env, visited, depth - 1)),
-        ),
-        Expr::FNeg(inner) => Expr::FNeg(Box::new(resolve_expr(inner, env, visited, depth - 1))),
-        Expr::FAbs(inner) => Expr::FAbs(Box::new(resolve_expr(inner, env, visited, depth - 1))),
-        Expr::FSqrt(inner) => {
-            Expr::FSqrt(Box::new(resolve_expr(inner, env, visited, depth - 1)))
-        }
-        Expr::FMax(lhs, rhs) => Expr::FMax(
-            Box::new(resolve_expr(lhs, env, visited, depth - 1)),
-            Box::new(resolve_expr(rhs, env, visited, depth - 1)),
-        ),
-        Expr::FMin(lhs, rhs) => Expr::FMin(
-            Box::new(resolve_expr(lhs, env, visited, depth - 1)),
-            Box::new(resolve_expr(rhs, env, visited, depth - 1)),
-        ),
-        Expr::FCvt(inner) => Expr::FCvt(Box::new(resolve_expr(inner, env, visited, depth - 1))),
-        Expr::IntToFloat(inner) => {
-            Expr::IntToFloat(Box::new(resolve_expr(inner, env, visited, depth - 1)))
-        }
-        Expr::FloatToInt(inner) => {
-            Expr::FloatToInt(Box::new(resolve_expr(inner, env, visited, depth - 1)))
-        }
-        Expr::CondSelect {
-            cond,
-            if_true,
-            if_false,
-        } => Expr::CondSelect {
-            cond: *cond,
-            if_true: Box::new(resolve_expr(if_true, env, visited, depth - 1)),
-            if_false: Box::new(resolve_expr(if_false, env, visited, depth - 1)),
-        },
-        Expr::Clz(inner) => Expr::Clz(Box::new(resolve_expr(inner, env, visited, depth - 1))),
-        Expr::Cls(inner) => Expr::Cls(Box::new(resolve_expr(inner, env, visited, depth - 1))),
-        Expr::Rev(inner) => Expr::Rev(Box::new(resolve_expr(inner, env, visited, depth - 1))),
-        Expr::Rbit(inner) => Expr::Rbit(Box::new(resolve_expr(inner, env, visited, depth - 1))),
-        Expr::Intrinsic { name, operands } => Expr::Intrinsic {
-            name: name.clone(),
-            operands: operands
-                .iter()
-                .map(|operand| resolve_expr(operand, env, visited, depth - 1))
-                .collect(),
-        },
-        Expr::Imm(_) | Expr::FImm(_) | Expr::AdrpImm(_) | Expr::AdrImm(_) | Expr::MrsRead(_) => {
-            expr.clone()
-        }
-    }
-}
-
 fn immediate_value(expr: &Expr) -> Option<u64> {
     match expr {
         Expr::Imm(value) | Expr::AdrpImm(value) | Expr::AdrImm(value) => Some(*value),
@@ -1572,6 +1386,7 @@ fn contains_pc_relative(expr: &Expr) -> bool {
         | Expr::FDiv(lhs, rhs)
         | Expr::FMax(lhs, rhs)
         | Expr::FMin(lhs, rhs) => contains_pc_relative(lhs) || contains_pc_relative(rhs),
+        Expr::Compare { lhs, rhs, .. } => contains_pc_relative(lhs) || contains_pc_relative(rhs),
         Expr::Neg(inner)
         | Expr::Abs(inner)
         | Expr::Not(inner)
@@ -1592,7 +1407,8 @@ fn contains_pc_relative(expr: &Expr) -> bool {
             if_true, if_false, ..
         } => contains_pc_relative(if_true) || contains_pc_relative(if_false),
         Expr::Intrinsic { operands, .. } => operands.iter().any(contains_pc_relative),
-        Expr::Reg(_) | Expr::Imm(_) | Expr::FImm(_) | Expr::MrsRead(_) => false,
+        Expr::Reg(_) | Expr::Imm(_) | Expr::FImm(_) | Expr::MrsRead(_)
+        | Expr::StackSlot { .. } => false,
     }
 }
 

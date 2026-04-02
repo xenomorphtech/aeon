@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 aeonil = { path = "../aeonil" }
+aeon-reduce = { path = "../aeon-reduce" }
 bevy_ecs = "0.13"
 ascent = "0.7"
 bad64 = "0.6"

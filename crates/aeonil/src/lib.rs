@@ -43,6 +43,11 @@ pub enum BranchCond {
     NotZero(Expr),
     BitZero(Expr, u8),
     BitNotZero(Expr, u8),
+    Compare {
+        cond: Condition,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -122,6 +127,11 @@ pub enum Expr {
         if_true: Box<Expr>,
         if_false: Box<Expr>,
     },
+    Compare {
+        cond: Condition,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
 
     // Misc
     Clz(Box<Expr>),
@@ -132,6 +142,12 @@ pub enum Expr {
     // Address computation
     AdrpImm(u64),
     AdrImm(u64),
+
+    // Stack slot
+    StackSlot {
+        offset: i64,
+        size: u8,
+    },
 
     // System register read
     MrsRead(String),
@@ -318,6 +334,110 @@ pub fn e_intrinsic(name: &str, ops: Vec<Expr>) -> Expr {
     Expr::Intrinsic {
         name: name.to_string(),
         operands: ops,
+    }
+}
+pub fn e_compare(cond: Condition, lhs: Expr, rhs: Expr) -> Expr {
+    Expr::Compare { cond, lhs: Box::new(lhs), rhs: Box::new(rhs) }
+}
+pub fn e_stack_slot(offset: i64, size: u8) -> Expr {
+    Expr::StackSlot { offset, size }
+}
+
+impl Expr {
+    /// Apply `f` to every immediate sub-expression, returning a new `Expr`.
+    pub fn map_subexprs<F: Fn(&Expr) -> Expr>(&self, f: F) -> Expr {
+        match self {
+            // Leaf nodes — no children
+            Expr::Reg(_)
+            | Expr::Imm(_)
+            | Expr::FImm(_)
+            | Expr::AdrpImm(_)
+            | Expr::AdrImm(_)
+            | Expr::MrsRead(_)
+            | Expr::StackSlot { .. } => self.clone(),
+
+            // Unary nodes
+            Expr::Neg(a) => Expr::Neg(Box::new(f(a))),
+            Expr::Abs(a) => Expr::Abs(Box::new(f(a))),
+            Expr::Not(a) => Expr::Not(Box::new(f(a))),
+            Expr::FNeg(a) => Expr::FNeg(Box::new(f(a))),
+            Expr::FAbs(a) => Expr::FAbs(Box::new(f(a))),
+            Expr::FSqrt(a) => Expr::FSqrt(Box::new(f(a))),
+            Expr::FCvt(a) => Expr::FCvt(Box::new(f(a))),
+            Expr::IntToFloat(a) => Expr::IntToFloat(Box::new(f(a))),
+            Expr::FloatToInt(a) => Expr::FloatToInt(Box::new(f(a))),
+            Expr::Clz(a) => Expr::Clz(Box::new(f(a))),
+            Expr::Cls(a) => Expr::Cls(Box::new(f(a))),
+            Expr::Rev(a) => Expr::Rev(Box::new(f(a))),
+            Expr::Rbit(a) => Expr::Rbit(Box::new(f(a))),
+
+            // Binary nodes
+            Expr::Add(a, b) => Expr::Add(Box::new(f(a)), Box::new(f(b))),
+            Expr::Sub(a, b) => Expr::Sub(Box::new(f(a)), Box::new(f(b))),
+            Expr::Mul(a, b) => Expr::Mul(Box::new(f(a)), Box::new(f(b))),
+            Expr::Div(a, b) => Expr::Div(Box::new(f(a)), Box::new(f(b))),
+            Expr::UDiv(a, b) => Expr::UDiv(Box::new(f(a)), Box::new(f(b))),
+            Expr::And(a, b) => Expr::And(Box::new(f(a)), Box::new(f(b))),
+            Expr::Or(a, b) => Expr::Or(Box::new(f(a)), Box::new(f(b))),
+            Expr::Xor(a, b) => Expr::Xor(Box::new(f(a)), Box::new(f(b))),
+            Expr::Shl(a, b) => Expr::Shl(Box::new(f(a)), Box::new(f(b))),
+            Expr::Lsr(a, b) => Expr::Lsr(Box::new(f(a)), Box::new(f(b))),
+            Expr::Asr(a, b) => Expr::Asr(Box::new(f(a)), Box::new(f(b))),
+            Expr::Ror(a, b) => Expr::Ror(Box::new(f(a)), Box::new(f(b))),
+            Expr::FAdd(a, b) => Expr::FAdd(Box::new(f(a)), Box::new(f(b))),
+            Expr::FSub(a, b) => Expr::FSub(Box::new(f(a)), Box::new(f(b))),
+            Expr::FMul(a, b) => Expr::FMul(Box::new(f(a)), Box::new(f(b))),
+            Expr::FDiv(a, b) => Expr::FDiv(Box::new(f(a)), Box::new(f(b))),
+            Expr::FMax(a, b) => Expr::FMax(Box::new(f(a)), Box::new(f(b))),
+            Expr::FMin(a, b) => Expr::FMin(Box::new(f(a)), Box::new(f(b))),
+            Expr::Compare { cond, lhs, rhs } => Expr::Compare {
+                cond: *cond,
+                lhs: Box::new(f(lhs)),
+                rhs: Box::new(f(rhs)),
+            },
+
+            // Extension
+            Expr::SignExtend { src, from_bits } => Expr::SignExtend {
+                src: Box::new(f(src)),
+                from_bits: *from_bits,
+            },
+            Expr::ZeroExtend { src, from_bits } => Expr::ZeroExtend {
+                src: Box::new(f(src)),
+                from_bits: *from_bits,
+            },
+
+            // Bitfield
+            Expr::Extract { src, lsb, width } => Expr::Extract {
+                src: Box::new(f(src)),
+                lsb: *lsb,
+                width: *width,
+            },
+            Expr::Insert { dst, src, lsb, width } => Expr::Insert {
+                dst: Box::new(f(dst)),
+                src: Box::new(f(src)),
+                lsb: *lsb,
+                width: *width,
+            },
+
+            // Memory
+            Expr::Load { addr, size } => Expr::Load {
+                addr: Box::new(f(addr)),
+                size: *size,
+            },
+
+            // Conditional
+            Expr::CondSelect { cond, if_true, if_false } => Expr::CondSelect {
+                cond: *cond,
+                if_true: Box::new(f(if_true)),
+                if_false: Box::new(f(if_false)),
+            },
+
+            // Intrinsic
+            Expr::Intrinsic { name, operands } => Expr::Intrinsic {
+                name: name.clone(),
+                operands: operands.iter().map(|op| f(op)).collect(),
+            },
+        }
     }
 }
 

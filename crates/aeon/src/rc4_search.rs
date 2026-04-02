@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-
 use ascent::ascent;
 use serde_json::{json, Value};
+
+use aeon_reduce::env::RegisterEnv;
 
 use crate::elf::LoadedBinary;
 use crate::il::*;
@@ -115,22 +115,22 @@ fn extract_dataflow(raw_bytes: &[u8], func_addr: u64) -> DataflowFacts {
     }
 
     // ── Pass 2: def-use chain building + fact extraction ─────────
-    let mut def_map: HashMap<u64, u64> = HashMap::new(); // canonical_reg_id → defining inst addr
+    let mut env = RegisterEnv::new();
 
     for (inst_pc, result) in &lifted {
         let pc = *inst_pc;
-        process_stmt(&result.stmt, pc, &mut def_map, &mut facts);
+        process_stmt(&result.stmt, pc, &mut env, &mut facts);
     }
 
     facts
 }
 
-/// Process a single statement: extract reads → flows_to, classify, update def_map
-fn process_stmt(stmt: &Stmt, pc: u64, def_map: &mut HashMap<u64, u64>, facts: &mut DataflowFacts) {
+/// Process a single statement: extract reads → flows_to, classify, update env
+fn process_stmt(stmt: &Stmt, pc: u64, env: &mut RegisterEnv, facts: &mut DataflowFacts) {
     match stmt {
         Stmt::Assign { dst, src } => {
             // Collect all register reads from src → flows_to
-            collect_reads(src, pc, def_map, facts);
+            collect_reads(src, pc, env, facts);
 
             // Check for constants in the expression
             scan_constants(src, facts);
@@ -143,59 +143,59 @@ fn process_stmt(stmt: &Stmt, pc: u64, def_map: &mut HashMap<u64, u64>, facts: &m
             // Classify: XOR?
             if let Expr::Xor(a, b) = src {
                 let src1 = primary_reg(a)
-                    .and_then(|r| def_map.get(&reg_canon(&r)).copied())
+                    .and_then(|r| env.def_index(&r).map(|i| i as u64))
                     .unwrap_or(0);
                 let src2 = primary_reg(b)
-                    .and_then(|r| def_map.get(&reg_canon(&r)).copied())
+                    .and_then(|r| env.def_index(&r).map(|i| i as u64))
                     .unwrap_or(0);
                 if src1 != 0 && src2 != 0 {
                     facts.xors.push((pc, src1, src2));
                 }
             }
 
-            // Update def_map: this instruction defines dst
-            def_map.insert(reg_canon(dst), pc);
+            // Update env: this instruction defines dst
+            env.mark_def(dst.clone(), pc as usize);
         }
 
         Stmt::Store { addr, value, size } => {
-            collect_reads(addr, pc, def_map, facts);
-            collect_reads(value, pc, def_map, facts);
+            collect_reads(addr, pc, env, facts);
+            collect_reads(value, pc, env, facts);
             scan_constants(addr, facts);
             scan_constants(value, facts);
 
             if *size == 1 {
-                // Byte store — extract value variable from def_map
+                // Byte store — extract value variable from env
                 if let Some(r) = primary_reg(value) {
-                    if let Some(&producer) = def_map.get(&reg_canon(&r)) {
-                        facts.byte_stores.push((pc, producer));
+                    if let Some(producer) = env.def_index(&r) {
+                        facts.byte_stores.push((pc, producer as u64));
                     }
                 }
             }
         }
 
         Stmt::SetFlags { expr } => {
-            collect_reads(expr, pc, def_map, facts);
+            collect_reads(expr, pc, env, facts);
             scan_constants(expr, facts);
         }
 
         Stmt::Pair(a, b) => {
-            process_stmt(a, pc, def_map, facts);
-            process_stmt(b, pc + 1, def_map, facts); // +1 to distinguish sub-stmts
+            process_stmt(a, pc, env, facts);
+            process_stmt(b, pc + 1, env, facts); // +1 to distinguish sub-stmts
         }
 
         Stmt::CondBranch { cond, .. } => match cond {
             BranchCond::Zero(e) | BranchCond::NotZero(e) => {
-                collect_reads(e, pc, def_map, facts);
+                collect_reads(e, pc, env, facts);
             }
             BranchCond::BitZero(e, _) | BranchCond::BitNotZero(e, _) => {
-                collect_reads(e, pc, def_map, facts);
+                collect_reads(e, pc, env, facts);
             }
             _ => {}
         },
 
         Stmt::Intrinsic { operands, .. } => {
             for op in operands {
-                collect_reads(op, pc, def_map, facts);
+                collect_reads(op, pc, env, facts);
                 scan_constants(op, facts);
             }
         }
@@ -208,13 +208,13 @@ fn process_stmt(stmt: &Stmt, pc: u64, def_map: &mut HashMap<u64, u64>, facts: &m
 fn collect_reads(
     expr: &Expr,
     consumer_pc: u64,
-    def_map: &HashMap<u64, u64>,
+    env: &RegisterEnv,
     facts: &mut DataflowFacts,
 ) {
     match expr {
         Expr::Reg(r) => {
-            if let Some(&producer) = def_map.get(&reg_canon(r)) {
-                facts.flows_to.push((producer, consumer_pc));
+            if let Some(producer) = env.def_index(r) {
+                facts.flows_to.push((producer as u64, consumer_pc));
             }
         }
         Expr::Add(a, b)
@@ -235,8 +235,8 @@ fn collect_reads(
         | Expr::FDiv(a, b)
         | Expr::FMax(a, b)
         | Expr::FMin(a, b) => {
-            collect_reads(a, consumer_pc, def_map, facts);
-            collect_reads(b, consumer_pc, def_map, facts);
+            collect_reads(a, consumer_pc, env, facts);
+            collect_reads(b, consumer_pc, env, facts);
         }
         Expr::Neg(a)
         | Expr::Not(a)
@@ -251,27 +251,27 @@ fn collect_reads(
         | Expr::Cls(a)
         | Expr::Rev(a)
         | Expr::Rbit(a) => {
-            collect_reads(a, consumer_pc, def_map, facts);
+            collect_reads(a, consumer_pc, env, facts);
         }
         Expr::Load { addr, .. } => {
-            collect_reads(addr, consumer_pc, def_map, facts);
+            collect_reads(addr, consumer_pc, env, facts);
         }
         Expr::SignExtend { src, .. } | Expr::ZeroExtend { src, .. } | Expr::Extract { src, .. } => {
-            collect_reads(src, consumer_pc, def_map, facts);
+            collect_reads(src, consumer_pc, env, facts);
         }
         Expr::Insert { dst, src, .. } => {
-            collect_reads(dst, consumer_pc, def_map, facts);
-            collect_reads(src, consumer_pc, def_map, facts);
+            collect_reads(dst, consumer_pc, env, facts);
+            collect_reads(src, consumer_pc, env, facts);
         }
         Expr::CondSelect {
             if_true, if_false, ..
         } => {
-            collect_reads(if_true, consumer_pc, def_map, facts);
-            collect_reads(if_false, consumer_pc, def_map, facts);
+            collect_reads(if_true, consumer_pc, env, facts);
+            collect_reads(if_false, consumer_pc, env, facts);
         }
         Expr::Intrinsic { operands, .. } => {
             for op in operands {
-                collect_reads(op, consumer_pc, def_map, facts);
+                collect_reads(op, consumer_pc, env, facts);
             }
         }
         _ => {} // Imm, FImm, AdrpImm, etc.
@@ -326,18 +326,6 @@ fn primary_reg(expr: &Expr) -> Option<Reg> {
     match expr {
         Expr::Reg(r) => Some(r.clone()),
         _ => None,
-    }
-}
-
-/// Map W(n)/X(n) to same canonical ID (they alias the same physical register)
-fn reg_canon(r: &Reg) -> u64 {
-    match r {
-        Reg::X(n) | Reg::W(n) => *n as u64,
-        Reg::V(n) | Reg::Q(n) | Reg::D(n) | Reg::S(n) | Reg::H(n) | Reg::VByte(n) => 32 + *n as u64,
-        Reg::SP => 64,
-        Reg::XZR => 65,
-        Reg::Flags => 66,
-        Reg::PC => 67,
     }
 }
 

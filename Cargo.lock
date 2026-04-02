@@ -6,6 +6,7 @@ version = 4
 name = "aeon"
 version = "0.1.0"
 dependencies = [
+ "aeon-reduce",
  "aeonil",
  "ascent",
  "bad64",
@@ -33,6 +34,13 @@ dependencies = [
  "aeon",
  "serde_json",
  "tiny_http",
+]
+
+[[package]]
+name = "aeon-reduce"
+version = "0.1.0"
+dependencies = [
+ "aeonil",
 ]
 
 [[package]]
