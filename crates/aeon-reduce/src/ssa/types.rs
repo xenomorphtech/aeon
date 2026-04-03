@@ -8,8 +8,8 @@ pub type BlockId = u32;
 /// Canonical hardware register location, abstracting over aliased views.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RegLocation {
-    Gpr(u8),   // General-purpose 0..31
-    Fpr(u8),   // SIMD/FP 0..31
+    Gpr(u8), // General-purpose 0..31
+    Fpr(u8), // SIMD/FP 0..31
     Sp,
     Flags,
 }
@@ -82,7 +82,10 @@ pub enum SsaExpr {
     Var(SsaVar),
     Imm(u64),
     FImm(f64),
-    Load { addr: Box<SsaExpr>, size: u8 },
+    Load {
+        addr: Box<SsaExpr>,
+        size: u8,
+    },
     Add(Box<SsaExpr>, Box<SsaExpr>),
     Sub(Box<SsaExpr>, Box<SsaExpr>),
     Mul(Box<SsaExpr>, Box<SsaExpr>),
@@ -98,10 +101,25 @@ pub enum SsaExpr {
     Lsr(Box<SsaExpr>, Box<SsaExpr>),
     Asr(Box<SsaExpr>, Box<SsaExpr>),
     Ror(Box<SsaExpr>, Box<SsaExpr>),
-    SignExtend { src: Box<SsaExpr>, from_bits: u8 },
-    ZeroExtend { src: Box<SsaExpr>, from_bits: u8 },
-    Extract { src: Box<SsaExpr>, lsb: u8, width: u8 },
-    Insert { dst: Box<SsaExpr>, src: Box<SsaExpr>, lsb: u8, width: u8 },
+    SignExtend {
+        src: Box<SsaExpr>,
+        from_bits: u8,
+    },
+    ZeroExtend {
+        src: Box<SsaExpr>,
+        from_bits: u8,
+    },
+    Extract {
+        src: Box<SsaExpr>,
+        lsb: u8,
+        width: u8,
+    },
+    Insert {
+        dst: Box<SsaExpr>,
+        src: Box<SsaExpr>,
+        lsb: u8,
+        width: u8,
+    },
     // FP ops
     FAdd(Box<SsaExpr>, Box<SsaExpr>),
     FSub(Box<SsaExpr>, Box<SsaExpr>),
@@ -120,11 +138,25 @@ pub enum SsaExpr {
     Cls(Box<SsaExpr>),
     Rev(Box<SsaExpr>),
     Rbit(Box<SsaExpr>),
-    CondSelect { cond: Condition, if_true: Box<SsaExpr>, if_false: Box<SsaExpr> },
-    Compare { cond: Condition, lhs: Box<SsaExpr>, rhs: Box<SsaExpr> },
-    StackSlot { offset: i64, size: u8 },
+    CondSelect {
+        cond: Condition,
+        if_true: Box<SsaExpr>,
+        if_false: Box<SsaExpr>,
+    },
+    Compare {
+        cond: Condition,
+        lhs: Box<SsaExpr>,
+        rhs: Box<SsaExpr>,
+    },
+    StackSlot {
+        offset: i64,
+        size: u8,
+    },
     MrsRead(String),
-    Intrinsic { name: String, operands: Vec<SsaExpr> },
+    Intrinsic {
+        name: String,
+        operands: Vec<SsaExpr>,
+    },
     Phi(Vec<(BlockId, SsaVar)>),
     AdrpImm(u64),
     AdrImm(u64),
@@ -137,22 +169,47 @@ pub enum SsaBranchCond {
     NotZero(SsaExpr),
     BitZero(SsaExpr, u8),
     BitNotZero(SsaExpr, u8),
-    Compare { cond: Condition, lhs: Box<SsaExpr>, rhs: Box<SsaExpr> },
+    Compare {
+        cond: Condition,
+        lhs: Box<SsaExpr>,
+        rhs: Box<SsaExpr>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SsaStmt {
-    Assign { dst: SsaVar, src: SsaExpr },
-    Store { addr: SsaExpr, value: SsaExpr, size: u8 },
-    Branch { target: SsaExpr },
-    CondBranch { cond: SsaBranchCond, target: SsaExpr, fallthrough: BlockId },
-    Call { target: SsaExpr },
+    Assign {
+        dst: SsaVar,
+        src: SsaExpr,
+    },
+    Store {
+        addr: SsaExpr,
+        value: SsaExpr,
+        size: u8,
+    },
+    Branch {
+        target: SsaExpr,
+    },
+    CondBranch {
+        cond: SsaBranchCond,
+        target: SsaExpr,
+        fallthrough: BlockId,
+    },
+    Call {
+        target: SsaExpr,
+    },
     Ret,
     Nop,
-    SetFlags { src: SsaVar, expr: SsaExpr },
+    SetFlags {
+        src: SsaVar,
+        expr: SsaExpr,
+    },
     Barrier(String),
     Trap,
-    Intrinsic { name: String, operands: Vec<SsaExpr> },
+    Intrinsic {
+        name: String,
+        operands: Vec<SsaExpr>,
+    },
     Pair(Box<SsaStmt>, Box<SsaStmt>),
 }
 
@@ -230,9 +287,21 @@ mod tests {
 
     #[test]
     fn ssa_var_equality() {
-        let v1 = SsaVar { loc: RegLocation::Gpr(0), version: 1, width: RegWidth::W64 };
-        let v2 = SsaVar { loc: RegLocation::Gpr(0), version: 1, width: RegWidth::W64 };
-        let v3 = SsaVar { loc: RegLocation::Gpr(0), version: 2, width: RegWidth::W64 };
+        let v1 = SsaVar {
+            loc: RegLocation::Gpr(0),
+            version: 1,
+            width: RegWidth::W64,
+        };
+        let v2 = SsaVar {
+            loc: RegLocation::Gpr(0),
+            version: 1,
+            width: RegWidth::W64,
+        };
+        let v3 = SsaVar {
+            loc: RegLocation::Gpr(0),
+            version: 2,
+            width: RegWidth::W64,
+        };
         assert_eq!(v1, v2);
         assert_ne!(v1, v3);
     }

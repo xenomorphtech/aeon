@@ -3,13 +3,13 @@
 //! full reduce + SSA + optimize sequence.
 
 use super::construct::SsaFunction;
-use super::domtree::DomTree;
-use super::use_def::UseDefMap;
-use super::sccp;
-use super::dead_branch;
 use super::copy_prop;
 use super::cse;
 use super::dce;
+use super::dead_branch;
+use super::domtree::DomTree;
+use super::sccp;
+use super::use_def::UseDefMap;
 
 const MAX_ITERATIONS: usize = 10;
 
@@ -50,13 +50,13 @@ pub fn optimize_ssa(func: &mut SsaFunction) {
 /// Full pipeline: intra-block reduce -> CFG -> SSA -> optimize.
 /// Input: flat instruction list `(address, statement, edge_targets)`.
 pub fn reduce_and_build_ssa(instructions: &[(u64, aeonil::Stmt, Vec<u64>)]) -> SsaFunction {
-    use super::cfg::build_cfg;
     use super::construct::build_ssa;
+    use crate::pipeline::reduce_function_cfg;
 
-    // 1. Build CFG from the instruction list
-    let cfg = build_cfg(instructions);
+    // 1. Build the function-level reduced CFG from the instruction list
+    let cfg = reduce_function_cfg(instructions);
 
-    // 2. Build SSA
+    // 2. Build SSA on top of the reduced CFG
     let mut ssa_func = build_ssa(&cfg);
 
     // 3. Optimize
@@ -180,10 +180,7 @@ mod tests {
                     },
                     SsaStmt::Assign {
                         dst: v2,
-                        src: SsaExpr::Add(
-                            Box::new(SsaExpr::Var(v1)),
-                            Box::new(SsaExpr::Imm(5)),
-                        ),
+                        src: SsaExpr::Add(Box::new(SsaExpr::Var(v1)), Box::new(SsaExpr::Imm(5))),
                     },
                     SsaStmt::Assign {
                         dst: v3,
@@ -208,13 +205,17 @@ mod tests {
 
         // v3 (Imm(99)) should be removed -- it is dead
         assert!(
-            !stmts.iter().any(|s| matches!(s, SsaStmt::Assign { dst, src: SsaExpr::Imm(99) } if *dst == v3)),
+            !stmts
+                .iter()
+                .any(|s| matches!(s, SsaStmt::Assign { dst, src: SsaExpr::Imm(99) } if *dst == v3)),
             "v3 = Imm(99) should have been eliminated by DCE"
         );
 
         // v2 should be folded to Imm(8)
         assert!(
-            stmts.iter().any(|s| matches!(s, SsaStmt::Assign { dst, src: SsaExpr::Imm(8) } if *dst == v2)),
+            stmts
+                .iter()
+                .any(|s| matches!(s, SsaStmt::Assign { dst, src: SsaExpr::Imm(8) } if *dst == v2)),
             "v2 should be folded to Imm(8) by SCCP"
         );
 
@@ -226,7 +227,9 @@ mod tests {
 
         // v1 should be removed (its only use was in v2 which is now Imm(8))
         assert!(
-            !stmts.iter().any(|s| matches!(s, SsaStmt::Assign { dst, src: SsaExpr::Imm(3) } if *dst == v1)),
+            !stmts
+                .iter()
+                .any(|s| matches!(s, SsaStmt::Assign { dst, src: SsaExpr::Imm(3) } if *dst == v1)),
             "v1 = Imm(3) should have been eliminated by DCE"
         );
     }
@@ -281,7 +284,9 @@ mod tests {
 
         // The copy v2 = Var(v1) should be eliminated by DCE
         assert!(
-            !stmts.iter().any(|s| matches!(s, SsaStmt::Assign { dst, src: SsaExpr::Var(_) } if *dst == v2)),
+            !stmts
+                .iter()
+                .any(|s| matches!(s, SsaStmt::Assign { dst, src: SsaExpr::Var(_) } if *dst == v2)),
             "v2 = Var(v1) copy should be eliminated"
         );
 
@@ -456,15 +461,89 @@ mod tests {
 
         // SCCP should have folded the constant arithmetic:
         // X0 = 100, X1 = 100 + 200 = 300
-        // After SCCP the value used by Store should be Imm(300).
-        // Check that at least one Assign produces Imm(300) or the store
-        // value is a var whose definition is Imm(300).
+        // After SCCP/copy-prop the value should appear either as an Assign
+        // or directly in the surviving Store.
         let has_folded_const = ssa_func.blocks.iter().any(|b| {
-            b.stmts.iter().any(|s| matches!(s, SsaStmt::Assign { src: SsaExpr::Imm(300), .. }))
+            b.stmts.iter().any(|s| {
+                matches!(
+                    s,
+                    SsaStmt::Assign {
+                        src: SsaExpr::Imm(300),
+                        ..
+                    }
+                ) || matches!(
+                    s,
+                    SsaStmt::Store {
+                        value: SsaExpr::Imm(300),
+                        ..
+                    }
+                )
+            })
         });
+        assert!(has_folded_const, "SCCP should fold 100 + 200 to 300");
+    }
+
+    #[test]
+    fn pipeline_full_end_to_end_preserves_stack_slots() {
+        use aeonil::{e_add, Expr, Reg, Stmt};
+
+        let instructions: Vec<(u64, Stmt, Vec<u64>)> = vec![
+            (
+                0x1000,
+                Stmt::Pair(
+                    Box::new(Stmt::Store {
+                        addr: e_add(Expr::Reg(Reg::SP), Expr::Imm((-16i64) as u64)),
+                        value: Expr::Reg(Reg::X(29)),
+                        size: 8,
+                    }),
+                    Box::new(Stmt::Store {
+                        addr: e_add(Expr::Reg(Reg::SP), Expr::Imm((-8i64) as u64)),
+                        value: Expr::Reg(Reg::X(30)),
+                        size: 8,
+                    }),
+                ),
+                vec![0x1004],
+            ),
+            (
+                0x1004,
+                Stmt::Assign {
+                    dst: Reg::X(29),
+                    src: Expr::Reg(Reg::SP),
+                },
+                vec![0x1008],
+            ),
+            (
+                0x1008,
+                Stmt::Store {
+                    addr: Expr::Imm(0x5000),
+                    value: Expr::Load {
+                        addr: Box::new(e_add(Expr::Reg(Reg::SP), Expr::Imm(8))),
+                        size: 8,
+                    },
+                    size: 8,
+                },
+                vec![0x100c],
+            ),
+            (0x100c, Stmt::Ret, vec![]),
+        ];
+
+        let ssa_func = reduce_and_build_ssa(&instructions);
+        let has_stack_slot = ssa_func.blocks.iter().any(|block| {
+            block.stmts.iter().any(|stmt| {
+                matches!(
+                    stmt,
+                    SsaStmt::Store {
+                        value: SsaExpr::Load { addr, size: 8 },
+                        size: 8,
+                        ..
+                    } if matches!(addr.as_ref(), SsaExpr::StackSlot { offset: 8, size: 8 })
+                )
+            })
+        });
+
         assert!(
-            has_folded_const,
-            "SCCP should fold 100 + 200 to 300"
+            has_stack_slot,
+            "reduce_and_build_ssa should preserve stack-slot rewrites into SSA"
         );
     }
 
@@ -558,9 +637,12 @@ mod tests {
 
         // v1 should be dead (not used by anything after SCCP folded the branch)
         assert!(
-            !func.blocks.iter().any(|b| b.stmts.iter().any(|s|
-                matches!(s, SsaStmt::Assign { dst, src: SsaExpr::Imm(5) } if *dst == v1)
-            )),
+            !func
+                .blocks
+                .iter()
+                .any(|b| b.stmts.iter().any(
+                    |s| matches!(s, SsaStmt::Assign { dst, src: SsaExpr::Imm(5) } if *dst == v1)
+                )),
             "v1 = Imm(5) should be eliminated by DCE"
         );
     }

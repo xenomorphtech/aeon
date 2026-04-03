@@ -16,7 +16,7 @@ fn extract_comparison(expr: &Expr) -> Option<(Expr, Expr)> {
         Expr::Sub(lhs, rhs) => Some((*lhs.clone(), *rhs.clone())), // CMP
         Expr::Add(lhs, rhs) => Some((*lhs.clone(), *rhs.clone())), // CMN
         Expr::And(lhs, rhs) => Some((*lhs.clone(), *rhs.clone())), // TST
-        _ => None, // complex SetFlags we can't fuse
+        _ => None,                                                 // complex SetFlags we can't fuse
     }
 }
 
@@ -384,10 +384,7 @@ mod tests {
         ];
         let result = fuse_flags(input);
         assert_eq!(result.len(), 2);
-        assert_eq!(
-            result[0],
-            set_flags_sub(Expr::Reg(Reg::X(8)), Expr::Imm(1))
-        );
+        assert_eq!(result[0], set_flags_sub(Expr::Reg(Reg::X(8)), Expr::Imm(1)));
         assert_eq!(
             result[1],
             cond_branch_zero(Expr::Reg(Reg::W(8)), Expr::Imm(0x6000), 0x600)

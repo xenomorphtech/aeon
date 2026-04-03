@@ -107,7 +107,11 @@ pub fn detect_prologue(stmts: &[Stmt]) -> Option<PrologueInfo> {
                     // Scan for register saves after the SUB
                     for (i, stmt) in stmts[1..].iter().enumerate() {
                         match stmt {
-                            Stmt::Store { addr, value, size: 8 } => {
+                            Stmt::Store {
+                                addr,
+                                value,
+                                size: 8,
+                            } => {
                                 if let Some(reg) = store_value_reg(value) {
                                     let offset = if is_sp(addr) {
                                         Some(0i64)
@@ -115,7 +119,9 @@ pub fn detect_prologue(stmts: &[Stmt]) -> Option<PrologueInfo> {
                                         sp_plus_imm(addr).map(imm_as_signed)
                                     };
                                     if let Some(off) = offset {
-                                        if matches!(reg, Reg::X(29) | Reg::X(30)) || is_callee_saved(reg) {
+                                        if matches!(reg, Reg::X(29) | Reg::X(30))
+                                            || is_callee_saved(reg)
+                                        {
                                             saved_regs.push((reg.clone(), off));
                                             prologue_end = i + 2; // +1 for the SUB, +1 for 0-based
                                             continue;
@@ -124,7 +130,10 @@ pub fn detect_prologue(stmts: &[Stmt]) -> Option<PrologueInfo> {
                                 }
                                 break;
                             }
-                            Stmt::Assign { dst: Reg::X(29), src } if is_sp(src) => {
+                            Stmt::Assign {
+                                dst: Reg::X(29),
+                                src,
+                            } if is_sp(src) => {
                                 has_frame_pointer = true;
                                 prologue_end = i + 2;
                                 continue;
@@ -154,7 +163,11 @@ pub fn detect_prologue(stmts: &[Stmt]) -> Option<PrologueInfo> {
 fn try_detect_preindexed(stmts: &[Stmt]) -> Option<PrologueInfo> {
     // First statement must be a Store at a negative SP offset
     let (first_offset, first_reg) = match &stmts[0] {
-        Stmt::Store { addr, value, size: 8 } => {
+        Stmt::Store {
+            addr,
+            value,
+            size: 8,
+        } => {
             let off = if is_sp(addr) {
                 Some(0u64)
             } else {
@@ -193,7 +206,11 @@ fn try_detect_preindexed(stmts: &[Stmt]) -> Option<PrologueInfo> {
     // Scan subsequent statements
     for stmt in &stmts[1..] {
         match stmt {
-            Stmt::Store { addr, value, size: 8 } => {
+            Stmt::Store {
+                addr,
+                value,
+                size: 8,
+            } => {
                 if let Some(reg) = store_value_reg(value) {
                     let offset = if is_sp(addr) {
                         Some(0u64)
@@ -207,7 +224,9 @@ fn try_detect_preindexed(stmts: &[Stmt]) -> Option<PrologueInfo> {
                         // Store(Add(SP, -16), X29, 8)  => offset -16, base = -16, rel = 0
                         // Store(Add(SP, -8), X30, 8)   => offset -8,  base = -16, rel = 8
                         let rel = signed - base;
-                        if rel >= 0 && (matches!(reg, Reg::X(29) | Reg::X(30)) || is_callee_saved(reg)) {
+                        if rel >= 0
+                            && (matches!(reg, Reg::X(29) | Reg::X(30)) || is_callee_saved(reg))
+                        {
                             saved_regs.push((reg.clone(), rel));
                             prologue_end += 1;
                             continue;
@@ -216,7 +235,10 @@ fn try_detect_preindexed(stmts: &[Stmt]) -> Option<PrologueInfo> {
                 }
                 break;
             }
-            Stmt::Assign { dst: Reg::X(29), src } if is_sp(src) => {
+            Stmt::Assign {
+                dst: Reg::X(29),
+                src,
+            } if is_sp(src) => {
                 has_frame_pointer = true;
                 prologue_end += 1;
                 continue;
@@ -243,14 +265,20 @@ fn rewrite_expr(expr: &Expr, has_fp: bool) -> Expr {
             // Check if addr is SP-relative
             if is_sp(addr) {
                 return Expr::Load {
-                    addr: Box::new(Expr::StackSlot { offset: 0, size: *size }),
+                    addr: Box::new(Expr::StackSlot {
+                        offset: 0,
+                        size: *size,
+                    }),
                     size: *size,
                 };
             }
             if let Some(v) = sp_plus_imm(addr) {
                 let offset = imm_as_signed(v);
                 return Expr::Load {
-                    addr: Box::new(Expr::StackSlot { offset, size: *size }),
+                    addr: Box::new(Expr::StackSlot {
+                        offset,
+                        size: *size,
+                    }),
                     size: *size,
                 };
             }
@@ -258,14 +286,20 @@ fn rewrite_expr(expr: &Expr, has_fp: bool) -> Expr {
             if has_fp {
                 if is_fp(addr) {
                     return Expr::Load {
-                        addr: Box::new(Expr::StackSlot { offset: 0, size: *size }),
+                        addr: Box::new(Expr::StackSlot {
+                            offset: 0,
+                            size: *size,
+                        }),
                         size: *size,
                     };
                 }
                 if let Some(v) = fp_plus_imm(addr) {
                     let offset = imm_as_signed(v);
                     return Expr::Load {
-                        addr: Box::new(Expr::StackSlot { offset, size: *size }),
+                        addr: Box::new(Expr::StackSlot {
+                            offset,
+                            size: *size,
+                        }),
                         size: *size,
                     };
                 }
@@ -340,13 +374,23 @@ fn rewrite_stmt(stmt: Stmt, has_fp: bool) -> Stmt {
         Stmt::SetFlags { expr } => Stmt::SetFlags {
             expr: rewrite_expr(&expr, has_fp),
         },
-        Stmt::CondBranch { cond, target, fallthrough } => {
+        Stmt::CondBranch {
+            cond,
+            target,
+            fallthrough,
+        } => {
             let new_cond = match cond {
                 aeonil::BranchCond::Flag(c) => aeonil::BranchCond::Flag(c),
                 aeonil::BranchCond::Zero(e) => aeonil::BranchCond::Zero(rewrite_expr(&e, has_fp)),
-                aeonil::BranchCond::NotZero(e) => aeonil::BranchCond::NotZero(rewrite_expr(&e, has_fp)),
-                aeonil::BranchCond::BitZero(e, b) => aeonil::BranchCond::BitZero(rewrite_expr(&e, has_fp), b),
-                aeonil::BranchCond::BitNotZero(e, b) => aeonil::BranchCond::BitNotZero(rewrite_expr(&e, has_fp), b),
+                aeonil::BranchCond::NotZero(e) => {
+                    aeonil::BranchCond::NotZero(rewrite_expr(&e, has_fp))
+                }
+                aeonil::BranchCond::BitZero(e, b) => {
+                    aeonil::BranchCond::BitZero(rewrite_expr(&e, has_fp), b)
+                }
+                aeonil::BranchCond::BitNotZero(e, b) => {
+                    aeonil::BranchCond::BitNotZero(rewrite_expr(&e, has_fp), b)
+                }
                 aeonil::BranchCond::Compare { cond: c, lhs, rhs } => aeonil::BranchCond::Compare {
                     cond: c,
                     lhs: Box::new(rewrite_expr(&lhs, has_fp)),
@@ -392,7 +436,7 @@ pub fn recognize_stack_frame(stmts: Vec<Stmt>) -> Vec<Stmt> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aeonil::{e_add, e_load, e_sub, e_stack_slot, Expr, Reg, Stmt};
+    use aeonil::{e_add, e_load, e_stack_slot, e_sub, Expr, Reg, Stmt};
 
     // ---- Prologue detection tests ----
 
@@ -418,10 +462,7 @@ mod tests {
         let info = detect_prologue(&stmts).expect("should detect prologue");
         assert_eq!(info.frame_size, 16);
         assert!(info.has_frame_pointer);
-        assert_eq!(
-            info.saved_regs,
-            vec![(Reg::X(29), 0), (Reg::X(30), 8)]
-        );
+        assert_eq!(info.saved_regs, vec![(Reg::X(29), 0), (Reg::X(30), 8)]);
         assert_eq!(info.prologue_end, 3);
     }
 
@@ -452,10 +493,7 @@ mod tests {
         let info = detect_prologue(&stmts).expect("should detect prologue");
         assert_eq!(info.frame_size, 32);
         assert!(!info.has_frame_pointer);
-        assert_eq!(
-            info.saved_regs,
-            vec![(Reg::X(29), 0), (Reg::X(30), 8)]
-        );
+        assert_eq!(info.saved_regs, vec![(Reg::X(29), 0), (Reg::X(30), 8)]);
     }
 
     #[test]

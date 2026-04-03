@@ -3,11 +3,11 @@
 //! unconditional branches, and deletes newly-unreachable basic blocks.
 //! Also cleans up phi nodes that reference removed predecessors.
 
-use std::collections::{HashSet, VecDeque};
-use aeonil::Condition;
-use super::types::*;
 use super::construct::SsaFunction;
+use super::types::*;
 use super::use_def::UseDefMap;
+use aeonil::Condition;
+use std::collections::{HashSet, VecDeque};
 
 /// Run dead branch and unreachable block elimination. Returns true if changes were made.
 pub fn run(func: &mut SsaFunction, use_def: &mut UseDefMap) -> bool {
@@ -27,10 +27,10 @@ fn eval_compare(cond: &Condition, a: u64, b: u64) -> Option<bool> {
     match cond {
         Condition::EQ => Some(a == b),
         Condition::NE => Some(a != b),
-        Condition::CS => Some(a >= b),  // unsigned >=
-        Condition::CC => Some(a < b),   // unsigned <
-        Condition::HI => Some(a > b),   // unsigned >
-        Condition::LS => Some(a <= b),  // unsigned <=
+        Condition::CS => Some(a >= b), // unsigned >=
+        Condition::CC => Some(a < b),  // unsigned <
+        Condition::HI => Some(a > b),  // unsigned >
+        Condition::LS => Some(a <= b), // unsigned <=
         Condition::GE => Some((a as i64) >= (b as i64)),
         Condition::LT => Some((a as i64) < (b as i64)),
         Condition::GT => Some((a as i64) > (b as i64)),
@@ -51,10 +51,16 @@ fn resolve_constant_branches(func: &mut SsaFunction) -> bool {
             let mut result = None;
 
             for (stmt_idx, stmt) in block.stmts.iter().enumerate() {
-                if let SsaStmt::CondBranch { cond, target, fallthrough } = stmt {
+                if let SsaStmt::CondBranch {
+                    cond,
+                    target,
+                    fallthrough,
+                } = stmt
+                {
                     let takes_branch = match cond {
                         SsaBranchCond::Compare { cond: cc, lhs, rhs } => {
-                            if let (SsaExpr::Imm(a), SsaExpr::Imm(b)) = (lhs.as_ref(), rhs.as_ref()) {
+                            if let (SsaExpr::Imm(a), SsaExpr::Imm(b)) = (lhs.as_ref(), rhs.as_ref())
+                            {
                                 eval_compare(cc, *a, *b)
                             } else {
                                 None
@@ -91,13 +97,16 @@ fn resolve_constant_branches(func: &mut SsaFunction) -> bool {
             if taken {
                 // Branch is taken: replace with unconditional branch to target,
                 // remove fallthrough from successors.
-                block.stmts[stmt_idx] = SsaStmt::Branch { target: target_expr };
+                block.stmts[stmt_idx] = SsaStmt::Branch {
+                    target: target_expr,
+                };
                 block.successors.retain(|&s| s != fallthrough);
             } else {
                 // Branch is not taken: replace with unconditional branch to fallthrough,
                 // remove the branch target from successors.
                 // The branch target block is the successor that isn't the fallthrough.
-                let branch_target_block: Vec<BlockId> = block.successors
+                let branch_target_block: Vec<BlockId> = block
+                    .successors
                     .iter()
                     .copied()
                     .filter(|&s| s != fallthrough)
@@ -295,7 +304,9 @@ mod tests {
         // Block 0 should now have an unconditional Branch
         assert!(matches!(
             &func.blocks[0].stmts[0],
-            SsaStmt::Branch { target: SsaExpr::Imm(0x100) }
+            SsaStmt::Branch {
+                target: SsaExpr::Imm(0x100)
+            }
         ));
         // Successors should only contain block 1 (not block 2)
         assert_eq!(func.blocks[0].successors, vec![1]);
@@ -340,7 +351,9 @@ mod tests {
         // Block 0 should now have an unconditional Branch to fallthrough
         assert!(matches!(
             &func.blocks[0].stmts[0],
-            SsaStmt::Branch { target: SsaExpr::Imm(2) }
+            SsaStmt::Branch {
+                target: SsaExpr::Imm(2)
+            }
         ));
         // Successors should only contain block 2 (not block 1)
         assert_eq!(func.blocks[0].successors, vec![2]);
@@ -409,8 +422,13 @@ mod tests {
                 make_block(
                     0,
                     vec![
-                        SsaStmt::Assign { dst: v1, src: SsaExpr::Imm(10) },
-                        SsaStmt::Branch { target: SsaExpr::Imm(8) },
+                        SsaStmt::Assign {
+                            dst: v1,
+                            src: SsaExpr::Imm(10),
+                        },
+                        SsaStmt::Branch {
+                            target: SsaExpr::Imm(8),
+                        },
                     ],
                     vec![2],
                     vec![],
@@ -418,8 +436,13 @@ mod tests {
                 make_block(
                     1,
                     vec![
-                        SsaStmt::Assign { dst: v2, src: SsaExpr::Imm(20) },
-                        SsaStmt::Branch { target: SsaExpr::Imm(8) },
+                        SsaStmt::Assign {
+                            dst: v2,
+                            src: SsaExpr::Imm(20),
+                        },
+                        SsaStmt::Branch {
+                            target: SsaExpr::Imm(8),
+                        },
                     ],
                     vec![2],
                     vec![],
@@ -461,10 +484,7 @@ mod tests {
     fn entry_never_removed() {
         // Single entry block with Ret. No predecessors, no successors.
         // It should always survive.
-        let mut func = make_func(
-            0,
-            vec![make_block(0, vec![SsaStmt::Ret], vec![], vec![])],
-        );
+        let mut func = make_func(0, vec![make_block(0, vec![SsaStmt::Ret], vec![], vec![])]);
         let mut ud = UseDefMap::build(&func);
 
         let changed = run(&mut func, &mut ud);
@@ -505,7 +525,9 @@ mod tests {
                 ),
                 make_block(
                     1,
-                    vec![SsaStmt::Branch { target: SsaExpr::Imm(0x200) }],
+                    vec![SsaStmt::Branch {
+                        target: SsaExpr::Imm(0x200),
+                    }],
                     vec![2],
                     vec![0],
                 ),
@@ -555,7 +577,9 @@ mod tests {
         // Should have become an unconditional branch, fallthrough removed
         assert!(matches!(
             &func.blocks[0].stmts[0],
-            SsaStmt::Branch { target: SsaExpr::Imm(0x100) }
+            SsaStmt::Branch {
+                target: SsaExpr::Imm(0x100)
+            }
         ));
         // Fallthrough (block 1) should be removed from successors
         assert!(!func.blocks[0].successors.contains(&1));
@@ -589,7 +613,9 @@ mod tests {
         // Should branch to fallthrough (block 1)
         assert!(matches!(
             &func.blocks[0].stmts[0],
-            SsaStmt::Branch { target: SsaExpr::Imm(1) }
+            SsaStmt::Branch {
+                target: SsaExpr::Imm(1)
+            }
         ));
         // The branch target block should be removed from successors
         assert!(!func.blocks[0].successors.contains(&2));
@@ -626,7 +652,9 @@ mod tests {
         assert!(changed);
         assert!(matches!(
             &func.blocks[0].stmts[0],
-            SsaStmt::Branch { target: SsaExpr::Imm(0x100) }
+            SsaStmt::Branch {
+                target: SsaExpr::Imm(0x100)
+            }
         ));
     }
 
@@ -661,7 +689,9 @@ mod tests {
         assert!(changed);
         assert!(matches!(
             &func.blocks[0].stmts[0],
-            SsaStmt::Branch { target: SsaExpr::Imm(0x100) }
+            SsaStmt::Branch {
+                target: SsaExpr::Imm(0x100)
+            }
         ));
     }
 }

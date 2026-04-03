@@ -6,10 +6,10 @@
 //! functions explicitly, variable lookups lazily recurse through predecessors,
 //! inserting phi nodes on demand and removing trivial ones.
 
-use std::collections::HashMap;
-use super::types::*;
 use super::cfg::Cfg;
-use aeonil::{Stmt, Reg, Expr, BranchCond};
+use super::types::*;
+use aeonil::{BranchCond, Expr, Reg, Stmt};
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -96,14 +96,22 @@ impl SsaBuilder {
 
         let var = if preds.is_empty() {
             // Entry block, no predecessors: create entry version (version 0)
-            SsaVar { loc, version: 0, width: loc.full_width() }
+            SsaVar {
+                loc,
+                version: 0,
+                width: loc.full_width(),
+            }
         } else if preds.len() == 1 {
             // Single predecessor: no phi needed
             self.read_variable(preds[0], loc)
         } else {
             // Multiple predecessors: insert phi
             let version = self.new_version(loc);
-            let phi_var = SsaVar { loc, version, width: loc.full_width() };
+            let phi_var = SsaVar {
+                loc,
+                version,
+                width: loc.full_width(),
+            };
             // Write the phi result BEFORE recursing to break cycles
             self.write_variable(block, loc, phi_var);
 
@@ -268,7 +276,12 @@ impl SsaBuilder {
                 lsb: *lsb,
                 width: *width,
             },
-            Expr::Insert { dst, src, lsb, width } => SsaExpr::Insert {
+            Expr::Insert {
+                dst,
+                src,
+                lsb,
+                width,
+            } => SsaExpr::Insert {
                 dst: Box::new(self.convert_read_expr(block, dst)),
                 src: Box::new(self.convert_read_expr(block, src)),
                 lsb: *lsb,
@@ -308,7 +321,11 @@ impl SsaBuilder {
             Expr::Cls(a) => SsaExpr::Cls(Box::new(self.convert_read_expr(block, a))),
             Expr::Rev(a) => SsaExpr::Rev(Box::new(self.convert_read_expr(block, a))),
             Expr::Rbit(a) => SsaExpr::Rbit(Box::new(self.convert_read_expr(block, a))),
-            Expr::CondSelect { cond, if_true, if_false } => SsaExpr::CondSelect {
+            Expr::CondSelect {
+                cond,
+                if_true,
+                if_false,
+            } => SsaExpr::CondSelect {
                 cond: *cond,
                 if_true: Box::new(self.convert_read_expr(block, if_true)),
                 if_false: Box::new(self.convert_read_expr(block, if_false)),
@@ -325,7 +342,10 @@ impl SsaBuilder {
             Expr::MrsRead(s) => SsaExpr::MrsRead(s.clone()),
             Expr::Intrinsic { name, operands } => SsaExpr::Intrinsic {
                 name: name.clone(),
-                operands: operands.iter().map(|op| self.convert_read_expr(block, op)).collect(),
+                operands: operands
+                    .iter()
+                    .map(|op| self.convert_read_expr(block, op))
+                    .collect(),
             },
             Expr::AdrpImm(v) => SsaExpr::AdrpImm(*v),
             Expr::AdrImm(v) => SsaExpr::AdrImm(*v),
@@ -339,9 +359,7 @@ impl SsaBuilder {
                 let flags = self.read_variable(block, RegLocation::Flags);
                 SsaBranchCond::Flag(*c, flags)
             }
-            BranchCond::Zero(expr) => {
-                SsaBranchCond::Zero(self.convert_read_expr(block, expr))
-            }
+            BranchCond::Zero(expr) => SsaBranchCond::Zero(self.convert_read_expr(block, expr)),
             BranchCond::NotZero(expr) => {
                 SsaBranchCond::NotZero(self.convert_read_expr(block, expr))
             }
@@ -384,7 +402,11 @@ impl SsaBuilder {
                 };
 
                 let version = self.new_version(loc);
-                let ssa_dst = SsaVar { loc, version, width: loc.full_width() };
+                let ssa_dst = SsaVar {
+                    loc,
+                    version,
+                    width: loc.full_width(),
+                };
                 self.write_variable(block, loc, ssa_dst);
 
                 self.blocks[block as usize].stmts.push(SsaStmt::Assign {
@@ -405,12 +427,16 @@ impl SsaBuilder {
 
             Stmt::Branch { target } => {
                 let ssa_target = self.convert_read_expr(block, target);
-                self.blocks[block as usize].stmts.push(SsaStmt::Branch {
-                    target: ssa_target,
-                });
+                self.blocks[block as usize]
+                    .stmts
+                    .push(SsaStmt::Branch { target: ssa_target });
             }
 
-            Stmt::CondBranch { cond, target, fallthrough: _ } => {
+            Stmt::CondBranch {
+                cond,
+                target,
+                fallthrough: _,
+            } => {
                 let ssa_cond = self.convert_read_branch_cond(block, cond);
                 let ssa_target = self.convert_read_expr(block, target);
                 // Fallthrough block id: determined from the CFG successors.
@@ -426,22 +452,30 @@ impl SsaBuilder {
 
             Stmt::Call { target } => {
                 let ssa_target = self.convert_read_expr(block, target);
-                self.blocks[block as usize].stmts.push(SsaStmt::Call {
-                    target: ssa_target,
-                });
+                self.blocks[block as usize]
+                    .stmts
+                    .push(SsaStmt::Call { target: ssa_target });
 
                 // After a call, clobber all caller-saved registers:
                 // Gpr(0)..Gpr(18) and Flags
                 for i in 0..=18u8 {
                     let loc = RegLocation::Gpr(i);
                     let version = self.new_version(loc);
-                    let var = SsaVar { loc, version, width: RegWidth::W64 };
+                    let var = SsaVar {
+                        loc,
+                        version,
+                        width: RegWidth::W64,
+                    };
                     self.write_variable(block, loc, var);
                 }
                 {
                     let loc = RegLocation::Flags;
                     let version = self.new_version(loc);
-                    let var = SsaVar { loc, version, width: RegWidth::Full };
+                    let var = SsaVar {
+                        loc,
+                        version,
+                        width: RegWidth::Full,
+                    };
                     self.write_variable(block, loc, var);
                 }
             }
@@ -458,7 +492,11 @@ impl SsaBuilder {
                 let ssa_expr = self.convert_read_expr(block, expr);
                 let loc = RegLocation::Flags;
                 let version = self.new_version(loc);
-                let flags_var = SsaVar { loc, version, width: RegWidth::Full };
+                let flags_var = SsaVar {
+                    loc,
+                    version,
+                    width: RegWidth::Full,
+                };
                 self.write_variable(block, loc, flags_var);
                 self.blocks[block as usize].stmts.push(SsaStmt::SetFlags {
                     src: flags_var,
@@ -467,7 +505,9 @@ impl SsaBuilder {
             }
 
             Stmt::Barrier(s) => {
-                self.blocks[block as usize].stmts.push(SsaStmt::Barrier(s.clone()));
+                self.blocks[block as usize]
+                    .stmts
+                    .push(SsaStmt::Barrier(s.clone()));
             }
 
             Stmt::Trap => {
@@ -519,7 +559,10 @@ impl SsaBuilder {
                 while si < self.blocks[bi].stmts.len() {
                     let needs_update = matches!(
                         &self.blocks[bi].stmts[si],
-                        SsaStmt::Assign { src: SsaExpr::Phi(_), .. }
+                        SsaStmt::Assign {
+                            src: SsaExpr::Phi(_),
+                            ..
+                        }
                     );
                     if !needs_update {
                         si += 1;
@@ -528,19 +571,30 @@ impl SsaBuilder {
 
                     // Extract phi info
                     let (phi_var, operands) = match &self.blocks[bi].stmts[si] {
-                        SsaStmt::Assign { dst, src: SsaExpr::Phi(ops) } => (*dst, ops.clone()),
+                        SsaStmt::Assign {
+                            dst,
+                            src: SsaExpr::Phi(ops),
+                        } => (*dst, ops.clone()),
                         _ => unreachable!(),
                     };
 
                     // Re-read operands from current_def (final values)
-                    let updated_ops: Vec<(BlockId, SsaVar)> = operands.iter().map(|&(pred, _)| {
-                        let var = self.current_def
-                            .get(&pred)
-                            .and_then(|m| m.get(&phi_var.loc))
-                            .copied()
-                            .unwrap_or(SsaVar { loc: phi_var.loc, version: 0, width: phi_var.loc.full_width() });
-                        (pred, var)
-                    }).collect();
+                    let updated_ops: Vec<(BlockId, SsaVar)> = operands
+                        .iter()
+                        .map(|&(pred, _)| {
+                            let var = self
+                                .current_def
+                                .get(&pred)
+                                .and_then(|m| m.get(&phi_var.loc))
+                                .copied()
+                                .unwrap_or(SsaVar {
+                                    loc: phi_var.loc,
+                                    version: 0,
+                                    width: phi_var.loc.full_width(),
+                                });
+                            (pred, var)
+                        })
+                        .collect();
 
                     // Check if this phi is now trivial
                     // In the fixup pass, self-trivial removal IS allowed
@@ -595,9 +649,9 @@ pub fn build_ssa(cfg: &Cfg) -> SsaFunction {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::cfg::build_cfg;
-    use aeonil::{Expr, Reg, Condition, BranchCond, Stmt};
+    use super::*;
+    use aeonil::{BranchCond, Condition, Expr, Reg, Stmt};
 
     /// Helper: build a single-block CFG from statements, then construct SSA.
     fn single_block_ssa(stmts: Vec<Stmt>) -> SsaFunction {
@@ -630,14 +684,21 @@ mod tests {
     // -- helpers to find statements in an SsaFunction --
 
     fn find_assigns(func: &SsaFunction, loc: RegLocation) -> Vec<&SsaStmt> {
-        func.blocks.iter()
+        func.blocks
+            .iter()
             .flat_map(|b| b.stmts.iter())
             .filter(|s| matches!(s, SsaStmt::Assign { dst, .. } if dst.loc == loc))
             .collect()
     }
 
-    fn find_assigns_in_block(func: &SsaFunction, block: BlockId, loc: RegLocation) -> Vec<&SsaStmt> {
-        func.blocks[block as usize].stmts.iter()
+    fn find_assigns_in_block(
+        func: &SsaFunction,
+        block: BlockId,
+        loc: RegLocation,
+    ) -> Vec<&SsaStmt> {
+        func.blocks[block as usize]
+            .stmts
+            .iter()
             .filter(|s| matches!(s, SsaStmt::Assign { dst, .. } if dst.loc == loc))
             .collect()
     }
@@ -661,9 +722,10 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn ssa_single_def() {
-        let func = single_block_ssa(vec![
-            Stmt::Assign { dst: Reg::X(0), src: Expr::Imm(42) },
-        ]);
+        let func = single_block_ssa(vec![Stmt::Assign {
+            dst: Reg::X(0),
+            src: Expr::Imm(42),
+        }]);
 
         assert_eq!(func.blocks.len(), 1);
         let assigns = find_assigns(&func, RegLocation::Gpr(0));
@@ -681,8 +743,14 @@ mod tests {
     #[test]
     fn ssa_two_defs() {
         let func = single_block_ssa(vec![
-            Stmt::Assign { dst: Reg::X(0), src: Expr::Imm(1) },
-            Stmt::Assign { dst: Reg::X(0), src: Expr::Imm(2) },
+            Stmt::Assign {
+                dst: Reg::X(0),
+                src: Expr::Imm(1),
+            },
+            Stmt::Assign {
+                dst: Reg::X(0),
+                src: Expr::Imm(2),
+            },
         ]);
 
         let assigns = find_assigns(&func, RegLocation::Gpr(0));
@@ -703,15 +771,10 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn ssa_use_before_def() {
-        let func = single_block_ssa(vec![
-            Stmt::Assign {
-                dst: Reg::X(1),
-                src: Expr::Add(
-                    Box::new(Expr::Reg(Reg::X(0))),
-                    Box::new(Expr::Imm(1)),
-                ),
-            },
-        ]);
+        let func = single_block_ssa(vec![Stmt::Assign {
+            dst: Reg::X(1),
+            src: Expr::Add(Box::new(Expr::Reg(Reg::X(0))), Box::new(Expr::Imm(1))),
+        }]);
 
         let assigns = find_assigns(&func, RegLocation::Gpr(1));
         assert_eq!(assigns.len(), 1);
@@ -738,12 +801,18 @@ mod tests {
     #[test]
     fn ssa_def_use_chain() {
         let func = single_block_ssa(vec![
-            Stmt::Assign { dst: Reg::X(0), src: Expr::Imm(1) },
+            Stmt::Assign {
+                dst: Reg::X(0),
+                src: Expr::Imm(1),
+            },
             Stmt::Assign {
                 dst: Reg::X(1),
                 src: Expr::Add(Box::new(Expr::Reg(Reg::X(0))), Box::new(Expr::Imm(2))),
             },
-            Stmt::Assign { dst: Reg::X(0), src: Expr::Imm(3) },
+            Stmt::Assign {
+                dst: Reg::X(0),
+                src: Expr::Imm(3),
+            },
             Stmt::Assign {
                 dst: Reg::X(2),
                 src: Expr::Add(Box::new(Expr::Reg(Reg::X(0))), Box::new(Expr::Imm(4))),
@@ -793,30 +862,64 @@ mod tests {
         // Block C (0x10c): X0=3, branch to D (0x110)
         // Block D (0x110): X1 = X0 (should get phi)
         let instrs = vec![
-            (0x100u64, Stmt::Assign { dst: Reg::X(0), src: Expr::Imm(1) }, vec![0x104]),
-            (0x104, Stmt::CondBranch {
-                cond: BranchCond::Flag(Condition::EQ),
-                target: Expr::Imm(0x108),
-                fallthrough: 0x10c,
-            }, vec![0x108, 0x10c]),
-            (0x108, Stmt::Assign { dst: Reg::X(0), src: Expr::Imm(2) }, vec![0x110]),
-            (0x10c, Stmt::Assign { dst: Reg::X(0), src: Expr::Imm(3) }, vec![0x110]),
-            (0x110, Stmt::Assign {
-                dst: Reg::X(1),
-                src: Expr::Reg(Reg::X(0)),
-            }, vec![]),
+            (
+                0x100u64,
+                Stmt::Assign {
+                    dst: Reg::X(0),
+                    src: Expr::Imm(1),
+                },
+                vec![0x104],
+            ),
+            (
+                0x104,
+                Stmt::CondBranch {
+                    cond: BranchCond::Flag(Condition::EQ),
+                    target: Expr::Imm(0x108),
+                    fallthrough: 0x10c,
+                },
+                vec![0x108, 0x10c],
+            ),
+            (
+                0x108,
+                Stmt::Assign {
+                    dst: Reg::X(0),
+                    src: Expr::Imm(2),
+                },
+                vec![0x110],
+            ),
+            (
+                0x10c,
+                Stmt::Assign {
+                    dst: Reg::X(0),
+                    src: Expr::Imm(3),
+                },
+                vec![0x110],
+            ),
+            (
+                0x110,
+                Stmt::Assign {
+                    dst: Reg::X(1),
+                    src: Expr::Reg(Reg::X(0)),
+                },
+                vec![],
+            ),
         ];
 
         let func = multi_block_ssa(instrs);
 
         // Block D (last block) should have a phi for gpr0 and an assign for gpr1
         let d = func.blocks.last().unwrap();
-        let gpr0_assigns: Vec<_> = d.stmts.iter()
+        let gpr0_assigns: Vec<_> = d
+            .stmts
+            .iter()
             .filter(|s| matches!(s, SsaStmt::Assign { dst, .. } if dst.loc == RegLocation::Gpr(0)))
             .collect();
 
         // Should have a phi
-        assert!(!gpr0_assigns.is_empty(), "expected phi for gpr0 in merge block");
+        assert!(
+            !gpr0_assigns.is_empty(),
+            "expected phi for gpr0 in merge block"
+        );
         let phi_stmt = gpr0_assigns[0];
         match get_assign_src(phi_stmt) {
             SsaExpr::Phi(operands) => {
@@ -841,28 +944,58 @@ mod tests {
         // Since neither B nor C redefine X0, both read A's definition.
         // The phi is trivial and should be removed.
         let instrs = vec![
-            (0x100u64, Stmt::Assign { dst: Reg::X(0), src: Expr::Imm(42) }, vec![0x104]),
-            (0x104, Stmt::CondBranch {
-                cond: BranchCond::Flag(Condition::EQ),
-                target: Expr::Imm(0x108),
-                fallthrough: 0x10c,
-            }, vec![0x108, 0x10c]),
-            (0x108, Stmt::Branch { target: Expr::Imm(0x110) }, vec![0x110]),
-            (0x10c, Stmt::Branch { target: Expr::Imm(0x110) }, vec![0x110]),
-            (0x110, Stmt::Assign {
-                dst: Reg::X(1),
-                src: Expr::Reg(Reg::X(0)),
-            }, vec![]),
+            (
+                0x100u64,
+                Stmt::Assign {
+                    dst: Reg::X(0),
+                    src: Expr::Imm(42),
+                },
+                vec![0x104],
+            ),
+            (
+                0x104,
+                Stmt::CondBranch {
+                    cond: BranchCond::Flag(Condition::EQ),
+                    target: Expr::Imm(0x108),
+                    fallthrough: 0x10c,
+                },
+                vec![0x108, 0x10c],
+            ),
+            (
+                0x108,
+                Stmt::Branch {
+                    target: Expr::Imm(0x110),
+                },
+                vec![0x110],
+            ),
+            (
+                0x10c,
+                Stmt::Branch {
+                    target: Expr::Imm(0x110),
+                },
+                vec![0x110],
+            ),
+            (
+                0x110,
+                Stmt::Assign {
+                    dst: Reg::X(1),
+                    src: Expr::Reg(Reg::X(0)),
+                },
+                vec![],
+            ),
         ];
 
         let func = multi_block_ssa(instrs);
         let d = func.blocks.last().unwrap();
 
         // No phi for gpr0 in the merge block (trivially removed)
-        let gpr0_phis: Vec<_> = d.stmts.iter()
+        let gpr0_phis: Vec<_> = d
+            .stmts
+            .iter()
             .filter(|s| match s {
-                SsaStmt::Assign { dst, src } =>
-                    dst.loc == RegLocation::Gpr(0) && matches!(src, SsaExpr::Phi(_)),
+                SsaStmt::Assign { dst, src } => {
+                    dst.loc == RegLocation::Gpr(0) && matches!(src, SsaExpr::Phi(_))
+                }
                 _ => false,
             })
             .collect();
@@ -892,17 +1025,32 @@ mod tests {
         //
         // We want a phi at block B for X0.
         let instrs = vec![
-            (0x100u64, Stmt::Assign { dst: Reg::X(0), src: Expr::Imm(0) }, vec![0x104]),
+            (
+                0x100u64,
+                Stmt::Assign {
+                    dst: Reg::X(0),
+                    src: Expr::Imm(0),
+                },
+                vec![0x104],
+            ),
             // loop header
-            (0x104, Stmt::Assign {
-                dst: Reg::X(0),
-                src: Expr::Add(Box::new(Expr::Reg(Reg::X(0))), Box::new(Expr::Imm(1))),
-            }, vec![0x108]),
-            (0x108, Stmt::CondBranch {
-                cond: BranchCond::Flag(Condition::NE),
-                target: Expr::Imm(0x104),
-                fallthrough: 0x10c,
-            }, vec![0x104, 0x10c]),
+            (
+                0x104,
+                Stmt::Assign {
+                    dst: Reg::X(0),
+                    src: Expr::Add(Box::new(Expr::Reg(Reg::X(0))), Box::new(Expr::Imm(1))),
+                },
+                vec![0x108],
+            ),
+            (
+                0x108,
+                Stmt::CondBranch {
+                    cond: BranchCond::Flag(Condition::NE),
+                    target: Expr::Imm(0x104),
+                    fallthrough: 0x10c,
+                },
+                vec![0x104, 0x10c],
+            ),
             (0x10c, Stmt::Ret, vec![]),
         ];
 
@@ -911,16 +1059,25 @@ mod tests {
         // The loop header block (block containing 0x104) should have a phi for gpr0
         // because it has two predecessors: A and itself (back-edge).
         let loop_header = &func.blocks[1]; // block 1 = {0x104, 0x108}
-        assert!(loop_header.predecessors.len() >= 2, "loop header should have >=2 preds");
+        assert!(
+            loop_header.predecessors.len() >= 2,
+            "loop header should have >=2 preds"
+        );
 
-        let gpr0_phis: Vec<_> = loop_header.stmts.iter()
+        let gpr0_phis: Vec<_> = loop_header
+            .stmts
+            .iter()
             .filter(|s| match s {
-                SsaStmt::Assign { dst, src } =>
-                    dst.loc == RegLocation::Gpr(0) && matches!(src, SsaExpr::Phi(_)),
+                SsaStmt::Assign { dst, src } => {
+                    dst.loc == RegLocation::Gpr(0) && matches!(src, SsaExpr::Phi(_))
+                }
                 _ => false,
             })
             .collect();
-        assert!(!gpr0_phis.is_empty(), "expected phi for gpr0 at loop header");
+        assert!(
+            !gpr0_phis.is_empty(),
+            "expected phi for gpr0 at loop header"
+        );
 
         // The phi should have 2 operands
         match get_assign_src(gpr0_phis[0]) {
@@ -936,15 +1093,10 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn xzr_becomes_imm0() {
-        let func = single_block_ssa(vec![
-            Stmt::Assign {
-                dst: Reg::X(0),
-                src: Expr::Add(
-                    Box::new(Expr::Reg(Reg::XZR)),
-                    Box::new(Expr::Imm(1)),
-                ),
-            },
-        ]);
+        let func = single_block_ssa(vec![Stmt::Assign {
+            dst: Reg::X(0),
+            src: Expr::Add(Box::new(Expr::Reg(Reg::XZR)), Box::new(Expr::Imm(1))),
+        }]);
 
         let assigns = find_assigns(&func, RegLocation::Gpr(0));
         assert_eq!(assigns.len(), 1);
@@ -963,8 +1115,13 @@ mod tests {
     #[test]
     fn call_clobbers_caller_saved() {
         let func = single_block_ssa(vec![
-            Stmt::Assign { dst: Reg::X(0), src: Expr::Imm(10) },
-            Stmt::Call { target: Expr::Imm(0xdead) },
+            Stmt::Assign {
+                dst: Reg::X(0),
+                src: Expr::Imm(10),
+            },
+            Stmt::Call {
+                target: Expr::Imm(0xdead),
+            },
             Stmt::Assign {
                 dst: Reg::X(1),
                 src: Expr::Reg(Reg::X(0)),
@@ -978,7 +1135,11 @@ mod tests {
         match get_assign_src(x1_assigns[0]) {
             SsaExpr::Var(v) => {
                 assert_eq!(v.loc, RegLocation::Gpr(0));
-                assert!(v.version > 1, "X0 after call should have version > 1 (was clobbered), got {}", v.version);
+                assert!(
+                    v.version > 1,
+                    "X0 after call should have version > 1 (was clobbered), got {}",
+                    v.version
+                );
             }
             other => panic!("expected Var, got {:?}", other),
         }
@@ -989,9 +1150,10 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn wx_write_w_produces_zext() {
-        let func = single_block_ssa(vec![
-            Stmt::Assign { dst: Reg::W(0), src: Expr::Imm(42) },
-        ]);
+        let func = single_block_ssa(vec![Stmt::Assign {
+            dst: Reg::W(0),
+            src: Expr::Imm(42),
+        }]);
 
         let assigns = find_assigns(&func, RegLocation::Gpr(0));
         assert_eq!(assigns.len(), 1);
@@ -1014,7 +1176,10 @@ mod tests {
     #[test]
     fn wx_read_w_produces_extract() {
         let func = single_block_ssa(vec![
-            Stmt::Assign { dst: Reg::X(0), src: Expr::Imm(0xFFFF_FFFF_FFFF_FFFF) },
+            Stmt::Assign {
+                dst: Reg::X(0),
+                src: Expr::Imm(0xFFFF_FFFF_FFFF_FFFF),
+            },
             Stmt::Assign {
                 dst: Reg::X(1),
                 src: Expr::Reg(Reg::W(0)),

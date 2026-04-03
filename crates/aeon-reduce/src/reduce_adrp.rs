@@ -15,10 +15,12 @@ fn fold_adr_add(expr: &Expr) -> Expr {
 
     match &folded {
         Expr::Add(a, b) => match (a.as_ref(), b.as_ref()) {
-            (Expr::AdrpImm(page), Expr::Imm(off))
-            | (Expr::Imm(off), Expr::AdrpImm(page)) => Expr::Imm(page.wrapping_add(*off)),
-            (Expr::AdrImm(addr), Expr::Imm(off))
-            | (Expr::Imm(off), Expr::AdrImm(addr)) => Expr::Imm(addr.wrapping_add(*off)),
+            (Expr::AdrpImm(page), Expr::Imm(off)) | (Expr::Imm(off), Expr::AdrpImm(page)) => {
+                Expr::Imm(page.wrapping_add(*off))
+            }
+            (Expr::AdrImm(addr), Expr::Imm(off)) | (Expr::Imm(off), Expr::AdrImm(addr)) => {
+                Expr::Imm(addr.wrapping_add(*off))
+            }
             _ => folded,
         },
         _ => folded,
@@ -139,10 +141,7 @@ mod tests {
     fn adrp_add_resolves() {
         let stmts = vec![
             assign(Reg::X(0), Expr::AdrpImm(0x12345000)),
-            assign(
-                Reg::X(0),
-                e_add(Expr::Reg(Reg::X(0)), Expr::Imm(0x678)),
-            ),
+            assign(Reg::X(0), e_add(Expr::Reg(Reg::X(0)), Expr::Imm(0x678))),
         ];
         let result = resolve_adrp_add(stmts);
         assert_eq!(result.len(), 2);
@@ -154,10 +153,7 @@ mod tests {
     fn adrp_add_different_regs() {
         let stmts = vec![
             assign(Reg::X(0), Expr::AdrpImm(0x12345000)),
-            assign(
-                Reg::X(1),
-                e_add(Expr::Reg(Reg::X(0)), Expr::Imm(0x10)),
-            ),
+            assign(Reg::X(1), e_add(Expr::Reg(Reg::X(0)), Expr::Imm(0x10))),
         ];
         let result = resolve_adrp_add(stmts);
         assert_eq!(result[1], assign(Reg::X(1), Expr::Imm(0x12345010)));
@@ -169,10 +165,7 @@ mod tests {
         let stmts = vec![
             assign(Reg::X(0), Expr::AdrpImm(0x12345000)),
             assign(Reg::X(1), Expr::Imm(99)),
-            assign(
-                Reg::X(0),
-                e_add(Expr::Reg(Reg::X(0)), Expr::Imm(0x678)),
-            ),
+            assign(Reg::X(0), e_add(Expr::Reg(Reg::X(0)), Expr::Imm(0x678))),
         ];
         let result = resolve_adrp_add(stmts);
         assert_eq!(result.len(), 3);
@@ -186,10 +179,7 @@ mod tests {
         let stmts = vec![
             assign(Reg::X(0), Expr::AdrpImm(0x12345000)),
             assign(Reg::X(0), Expr::Imm(0)),
-            assign(
-                Reg::X(0),
-                e_add(Expr::Reg(Reg::X(0)), Expr::Imm(0x678)),
-            ),
+            assign(Reg::X(0), e_add(Expr::Reg(Reg::X(0)), Expr::Imm(0x678))),
         ];
         let result = resolve_adrp_add(stmts);
         // X(0) was overwritten with Imm(0), so Add(0, 0x678) = 0x678
@@ -216,14 +206,8 @@ mod tests {
         let stmts = vec![
             assign(Reg::X(0), Expr::AdrpImm(0xA000)),
             assign(Reg::X(1), Expr::AdrpImm(0xB000)),
-            assign(
-                Reg::X(0),
-                e_add(Expr::Reg(Reg::X(0)), Expr::Imm(0x100)),
-            ),
-            assign(
-                Reg::X(1),
-                e_add(Expr::Reg(Reg::X(1)), Expr::Imm(0x200)),
-            ),
+            assign(Reg::X(0), e_add(Expr::Reg(Reg::X(0)), Expr::Imm(0x100))),
+            assign(Reg::X(1), e_add(Expr::Reg(Reg::X(1)), Expr::Imm(0x200))),
         ];
         let result = resolve_adrp_add(stmts);
         assert_eq!(result[2], assign(Reg::X(0), Expr::Imm(0xA100)));
@@ -235,10 +219,7 @@ mod tests {
     fn adrp_page_boundary() {
         let stmts = vec![
             assign(Reg::X(0), Expr::AdrpImm(0xFFFFF000)),
-            assign(
-                Reg::X(0),
-                e_add(Expr::Reg(Reg::X(0)), Expr::Imm(0xFFF)),
-            ),
+            assign(Reg::X(0), e_add(Expr::Reg(Reg::X(0)), Expr::Imm(0xFFF))),
         ];
         let result = resolve_adrp_add(stmts);
         assert_eq!(result[1], assign(Reg::X(0), Expr::Imm(0xFFFFFFFF)));
@@ -251,10 +232,7 @@ mod tests {
     fn adr_imm_resolves() {
         let stmts = vec![
             assign(Reg::X(0), Expr::AdrImm(0x42000)),
-            assign(
-                Reg::X(0),
-                e_add(Expr::Reg(Reg::X(0)), Expr::Imm(0x42)),
-            ),
+            assign(Reg::X(0), e_add(Expr::Reg(Reg::X(0)), Expr::Imm(0x42))),
         ];
         let result = resolve_adrp_add(stmts);
         assert_eq!(result[1], assign(Reg::X(0), Expr::Imm(0x42042)));
@@ -290,20 +268,14 @@ mod tests {
             Stmt::Call {
                 target: Expr::Imm(0xDEAD),
             },
-            assign(
-                Reg::X(0),
-                e_add(Expr::Reg(Reg::X(0)), Expr::Imm(0x10)),
-            ),
+            assign(Reg::X(0), e_add(Expr::Reg(Reg::X(0)), Expr::Imm(0x10))),
         ];
         let result = resolve_adrp_add(stmts);
         // X(0) was invalidated by the call, so Add(Reg(X(0)), Imm(0x10))
         // cannot be resolved -- the register reference stays.
         assert_eq!(
             result[2],
-            assign(
-                Reg::X(0),
-                e_add(Expr::Reg(Reg::X(0)), Expr::Imm(0x10))
-            )
+            assign(Reg::X(0), e_add(Expr::Reg(Reg::X(0)), Expr::Imm(0x10)))
         );
     }
 
@@ -315,10 +287,7 @@ mod tests {
             Stmt::Call {
                 target: Expr::Imm(0xDEAD),
             },
-            assign(
-                Reg::X(19),
-                e_add(Expr::Reg(Reg::X(19)), Expr::Imm(0x10)),
-            ),
+            assign(Reg::X(19), e_add(Expr::Reg(Reg::X(19)), Expr::Imm(0x10))),
         ];
         let result = resolve_adrp_add(stmts);
         assert_eq!(result[2], assign(Reg::X(19), Expr::Imm(0x5010)));

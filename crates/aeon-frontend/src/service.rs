@@ -169,9 +169,9 @@ impl AeonFrontend {
     fn tool_get_function_pointers(&self, args: &Value) -> Result<Value, String> {
         let session = self.require_session()?;
         let addr = match args.get("addr").and_then(|value| value.as_str()) {
-            Some(value) => Some(
-                parse_hex(value).ok_or_else(|| format!("Invalid hex address: {}", value))?,
-            ),
+            Some(value) => {
+                Some(parse_hex(value).ok_or_else(|| format!("Invalid hex address: {}", value))?)
+            }
             None => None,
         };
         let offset = args

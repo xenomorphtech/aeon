@@ -454,10 +454,7 @@ mod tests {
             },
             SsaStmt::Assign {
                 dst: v3,
-                src: SsaExpr::Add(
-                    Box::new(SsaExpr::Var(v2)),
-                    Box::new(SsaExpr::Var(v2)),
-                ),
+                src: SsaExpr::Add(Box::new(SsaExpr::Var(v2)), Box::new(SsaExpr::Var(v2))),
             },
         ]);
 
@@ -469,10 +466,7 @@ mod tests {
             func.blocks[0].stmts[2],
             SsaStmt::Assign {
                 dst: v3,
-                src: SsaExpr::Add(
-                    Box::new(SsaExpr::Var(v1)),
-                    Box::new(SsaExpr::Var(v1)),
-                ),
+                src: SsaExpr::Add(Box::new(SsaExpr::Var(v1)), Box::new(SsaExpr::Var(v1)),),
             }
         );
     }
@@ -583,10 +577,7 @@ mod tests {
             },
             SsaStmt::Assign {
                 dst: v2,
-                src: SsaExpr::Add(
-                    Box::new(SsaExpr::Var(v1)),
-                    Box::new(SsaExpr::Imm(1)),
-                ),
+                src: SsaExpr::Add(Box::new(SsaExpr::Var(v1)), Box::new(SsaExpr::Imm(1))),
             },
             original_store.clone(),
         ]);

@@ -2,11 +2,11 @@
 //! hash table.  Only CSEs pure arithmetic/logic expressions (not loads,
 //! intrinsics, phis, or anything with side effects).
 
-use std::collections::HashMap;
-use super::types::*;
 use super::construct::SsaFunction;
 use super::domtree::DomTree;
+use super::types::*;
 use super::use_def::UseDefMap;
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // Canonical expression form
@@ -103,15 +103,19 @@ fn try_canonicalize(expr: &SsaExpr) -> Option<CanonExpr> {
         SsaExpr::Not(a) => Some(CanonExpr::Not(as_var(a)?)),
 
         // Unary with extra fields
-        SsaExpr::ZeroExtend { src, from_bits } => {
-            Some(CanonExpr::ZeroExtend { src: as_var(src)?, from_bits: *from_bits })
-        }
-        SsaExpr::SignExtend { src, from_bits } => {
-            Some(CanonExpr::SignExtend { src: as_var(src)?, from_bits: *from_bits })
-        }
-        SsaExpr::Extract { src, lsb, width } => {
-            Some(CanonExpr::Extract { src: as_var(src)?, lsb: *lsb, width: *width })
-        }
+        SsaExpr::ZeroExtend { src, from_bits } => Some(CanonExpr::ZeroExtend {
+            src: as_var(src)?,
+            from_bits: *from_bits,
+        }),
+        SsaExpr::SignExtend { src, from_bits } => Some(CanonExpr::SignExtend {
+            src: as_var(src)?,
+            from_bits: *from_bits,
+        }),
+        SsaExpr::Extract { src, lsb, width } => Some(CanonExpr::Extract {
+            src: as_var(src)?,
+            lsb: *lsb,
+            width: *width,
+        }),
 
         // Everything else: not eligible for CSE
         _ => None,
@@ -235,9 +239,7 @@ mod tests {
 
     /// Helper: build an SsaFunction from a list of (id, stmts, successors).
     /// Predecessors are computed automatically.
-    fn make_func(
-        blocks: &[(BlockId, Vec<SsaStmt>, Vec<BlockId>)],
-    ) -> SsaFunction {
+    fn make_func(blocks: &[(BlockId, Vec<SsaStmt>, Vec<BlockId>)]) -> SsaFunction {
         let mut pred_map: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
         for &(id, _, _) in blocks {
             pred_map.entry(id).or_default();
@@ -281,17 +283,11 @@ mod tests {
             vec![
                 SsaStmt::Assign {
                     dst: v1,
-                    src: SsaExpr::Add(
-                        Box::new(SsaExpr::Var(va)),
-                        Box::new(SsaExpr::Var(vb)),
-                    ),
+                    src: SsaExpr::Add(Box::new(SsaExpr::Var(va)), Box::new(SsaExpr::Var(vb))),
                 },
                 SsaStmt::Assign {
                     dst: v2,
-                    src: SsaExpr::Add(
-                        Box::new(SsaExpr::Var(va)),
-                        Box::new(SsaExpr::Var(vb)),
-                    ),
+                    src: SsaExpr::Add(Box::new(SsaExpr::Var(va)), Box::new(SsaExpr::Var(vb))),
                 },
             ],
             vec![],
@@ -315,10 +311,7 @@ mod tests {
             func.blocks[0].stmts[0],
             SsaStmt::Assign {
                 dst: v1,
-                src: SsaExpr::Add(
-                    Box::new(SsaExpr::Var(va)),
-                    Box::new(SsaExpr::Var(vb)),
-                ),
+                src: SsaExpr::Add(Box::new(SsaExpr::Var(va)), Box::new(SsaExpr::Var(vb)),),
             }
         );
     }
@@ -341,10 +334,7 @@ mod tests {
                 0,
                 vec![SsaStmt::Assign {
                     dst: v1,
-                    src: SsaExpr::Mul(
-                        Box::new(SsaExpr::Var(va)),
-                        Box::new(SsaExpr::Var(vb)),
-                    ),
+                    src: SsaExpr::Mul(Box::new(SsaExpr::Var(va)), Box::new(SsaExpr::Var(vb))),
                 }],
                 vec![1],
             ),
@@ -352,10 +342,7 @@ mod tests {
                 1,
                 vec![SsaStmt::Assign {
                     dst: v2,
-                    src: SsaExpr::Mul(
-                        Box::new(SsaExpr::Var(va)),
-                        Box::new(SsaExpr::Var(vb)),
-                    ),
+                    src: SsaExpr::Mul(Box::new(SsaExpr::Var(va)), Box::new(SsaExpr::Var(vb))),
                 }],
                 vec![],
             ),
@@ -392,17 +379,11 @@ mod tests {
 
         let orig_b_stmt = SsaStmt::Assign {
             dst: v1,
-            src: SsaExpr::Add(
-                Box::new(SsaExpr::Var(va)),
-                Box::new(SsaExpr::Var(vb)),
-            ),
+            src: SsaExpr::Add(Box::new(SsaExpr::Var(va)), Box::new(SsaExpr::Var(vb))),
         };
         let orig_c_stmt = SsaStmt::Assign {
             dst: v2,
-            src: SsaExpr::Add(
-                Box::new(SsaExpr::Var(va)),
-                Box::new(SsaExpr::Var(vb)),
-            ),
+            src: SsaExpr::Add(Box::new(SsaExpr::Var(va)), Box::new(SsaExpr::Var(vb))),
         };
 
         let mut func = make_func(&[
@@ -440,17 +421,11 @@ mod tests {
             vec![
                 SsaStmt::Assign {
                     dst: v1,
-                    src: SsaExpr::Add(
-                        Box::new(SsaExpr::Var(va)),
-                        Box::new(SsaExpr::Var(vb)),
-                    ),
+                    src: SsaExpr::Add(Box::new(SsaExpr::Var(va)), Box::new(SsaExpr::Var(vb))),
                 },
                 SsaStmt::Assign {
                     dst: v2,
-                    src: SsaExpr::Add(
-                        Box::new(SsaExpr::Var(vb)),
-                        Box::new(SsaExpr::Var(va)),
-                    ),
+                    src: SsaExpr::Add(Box::new(SsaExpr::Var(vb)), Box::new(SsaExpr::Var(va))),
                 },
             ],
             vec![],
@@ -485,24 +460,14 @@ mod tests {
 
         let orig_s1 = SsaStmt::Assign {
             dst: v1,
-            src: SsaExpr::Sub(
-                Box::new(SsaExpr::Var(va)),
-                Box::new(SsaExpr::Var(vb)),
-            ),
+            src: SsaExpr::Sub(Box::new(SsaExpr::Var(va)), Box::new(SsaExpr::Var(vb))),
         };
         let orig_s2 = SsaStmt::Assign {
             dst: v2,
-            src: SsaExpr::Sub(
-                Box::new(SsaExpr::Var(vb)),
-                Box::new(SsaExpr::Var(va)),
-            ),
+            src: SsaExpr::Sub(Box::new(SsaExpr::Var(vb)), Box::new(SsaExpr::Var(va))),
         };
 
-        let mut func = make_func(&[(
-            0,
-            vec![orig_s1.clone(), orig_s2.clone()],
-            vec![],
-        )]);
+        let mut func = make_func(&[(0, vec![orig_s1.clone(), orig_s2.clone()], vec![])]);
 
         let dom = DomTree::build(&func);
         let mut ud = UseDefMap::build(&func);
@@ -540,11 +505,7 @@ mod tests {
             },
         };
 
-        let mut func = make_func(&[(
-            0,
-            vec![orig_s1.clone(), orig_s2.clone()],
-            vec![],
-        )]);
+        let mut func = make_func(&[(0, vec![orig_s1.clone(), orig_s2.clone()], vec![])]);
 
         let dom = DomTree::build(&func);
         let mut ud = UseDefMap::build(&func);
@@ -570,24 +531,14 @@ mod tests {
 
         let orig_s1 = SsaStmt::Assign {
             dst: v1,
-            src: SsaExpr::Add(
-                Box::new(SsaExpr::Var(va)),
-                Box::new(SsaExpr::Var(vb)),
-            ),
+            src: SsaExpr::Add(Box::new(SsaExpr::Var(va)), Box::new(SsaExpr::Var(vb))),
         };
         let orig_s2 = SsaStmt::Assign {
             dst: v2,
-            src: SsaExpr::Sub(
-                Box::new(SsaExpr::Var(va)),
-                Box::new(SsaExpr::Var(vb)),
-            ),
+            src: SsaExpr::Sub(Box::new(SsaExpr::Var(va)), Box::new(SsaExpr::Var(vb))),
         };
 
-        let mut func = make_func(&[(
-            0,
-            vec![orig_s1.clone(), orig_s2.clone()],
-            vec![],
-        )]);
+        let mut func = make_func(&[(0, vec![orig_s1.clone(), orig_s2.clone()], vec![])]);
 
         let dom = DomTree::build(&func);
         let mut ud = UseDefMap::build(&func);

@@ -2,8 +2,8 @@
 //! to their SSA counterparts with unversioned variables (version=0).
 //! This is the mechanical first step before SSA renaming.
 
-use aeonil::{Expr, Reg, BranchCond, Stmt};
 use super::types::*;
+use aeonil::{BranchCond, Expr, Reg, Stmt};
 
 /// Convert an aeonil `Expr` to `SsaExpr`, mapping `Reg` references to
 /// unversioned `SsaVar` (version=0).
@@ -53,7 +53,12 @@ pub fn convert_expr(expr: &Expr) -> SsaExpr {
             lsb: *lsb,
             width: *width,
         },
-        Expr::Insert { dst, src, lsb, width } => SsaExpr::Insert {
+        Expr::Insert {
+            dst,
+            src,
+            lsb,
+            width,
+        } => SsaExpr::Insert {
             dst: Box::new(convert_expr(dst)),
             src: Box::new(convert_expr(src)),
             lsb: *lsb,
@@ -75,7 +80,11 @@ pub fn convert_expr(expr: &Expr) -> SsaExpr {
         Expr::Cls(a) => SsaExpr::Cls(Box::new(convert_expr(a))),
         Expr::Rev(a) => SsaExpr::Rev(Box::new(convert_expr(a))),
         Expr::Rbit(a) => SsaExpr::Rbit(Box::new(convert_expr(a))),
-        Expr::CondSelect { cond, if_true, if_false } => SsaExpr::CondSelect {
+        Expr::CondSelect {
+            cond,
+            if_true,
+            if_false,
+        } => SsaExpr::CondSelect {
             cond: *cond,
             if_true: Box::new(convert_expr(if_true)),
             if_false: Box::new(convert_expr(if_false)),
@@ -151,7 +160,11 @@ pub fn convert_stmt(stmt: &Stmt) -> SsaStmt {
         Stmt::Branch { target } => SsaStmt::Branch {
             target: convert_expr(target),
         },
-        Stmt::CondBranch { cond, target, fallthrough: _ } => SsaStmt::CondBranch {
+        Stmt::CondBranch {
+            cond,
+            target,
+            fallthrough: _,
+        } => SsaStmt::CondBranch {
             cond: convert_branch_cond(cond),
             target: convert_expr(target),
             fallthrough: 0, // block id resolved later during CFG integration
@@ -161,10 +174,7 @@ pub fn convert_stmt(stmt: &Stmt) -> SsaStmt {
         },
         Stmt::Ret => SsaStmt::Ret,
         Stmt::Nop => SsaStmt::Nop,
-        Stmt::Pair(a, b) => SsaStmt::Pair(
-            Box::new(convert_stmt(a)),
-            Box::new(convert_stmt(b)),
-        ),
+        Stmt::Pair(a, b) => SsaStmt::Pair(Box::new(convert_stmt(a)), Box::new(convert_stmt(b))),
         Stmt::SetFlags { expr } => {
             let flags_var = SsaVar {
                 loc: RegLocation::Flags,
@@ -188,7 +198,7 @@ pub fn convert_stmt(stmt: &Stmt) -> SsaStmt {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aeonil::{Condition, Reg, Expr};
+    use aeonil::{Condition, Expr, Reg};
 
     #[test]
     fn convert_reg_x() {
@@ -218,10 +228,7 @@ mod tests {
 
     #[test]
     fn convert_add() {
-        let expr = Expr::Add(
-            Box::new(Expr::Reg(Reg::X(0))),
-            Box::new(Expr::Imm(1)),
-        );
+        let expr = Expr::Add(Box::new(Expr::Reg(Reg::X(0))), Box::new(Expr::Imm(1)));
         let result = convert_expr(&expr);
         match result {
             SsaExpr::Add(lhs, rhs) => {
@@ -256,15 +263,33 @@ mod tests {
             SsaExpr::Sub(lhs, rhs) => {
                 match *lhs {
                     SsaExpr::Add(a, b) => {
-                        assert!(matches!(*a, SsaExpr::Var(SsaVar { loc: RegLocation::Gpr(1), .. })));
+                        assert!(matches!(
+                            *a,
+                            SsaExpr::Var(SsaVar {
+                                loc: RegLocation::Gpr(1),
+                                ..
+                            })
+                        ));
                         assert_eq!(*b, SsaExpr::Imm(2));
                     }
                     other => panic!("expected Add, got {:?}", other),
                 }
                 match *rhs {
                     SsaExpr::Mul(a, b) => {
-                        assert!(matches!(*a, SsaExpr::Var(SsaVar { loc: RegLocation::Gpr(3), .. })));
-                        assert!(matches!(*b, SsaExpr::Var(SsaVar { loc: RegLocation::Gpr(4), .. })));
+                        assert!(matches!(
+                            *a,
+                            SsaExpr::Var(SsaVar {
+                                loc: RegLocation::Gpr(3),
+                                ..
+                            })
+                        ));
+                        assert!(matches!(
+                            *b,
+                            SsaExpr::Var(SsaVar {
+                                loc: RegLocation::Gpr(4),
+                                ..
+                            })
+                        ));
                     }
                     other => panic!("expected Mul, got {:?}", other),
                 }
@@ -295,6 +320,21 @@ mod tests {
     }
 
     #[test]
+    fn convert_stack_slot() {
+        let expr = Expr::StackSlot {
+            offset: -16,
+            size: 8,
+        };
+        assert_eq!(
+            convert_expr(&expr),
+            SsaExpr::StackSlot {
+                offset: -16,
+                size: 8,
+            }
+        );
+    }
+
+    #[test]
     fn convert_branch_cond_flag() {
         let cond = BranchCond::Flag(Condition::EQ);
         let result = convert_branch_cond(&cond);
@@ -314,7 +354,13 @@ mod tests {
         let result = convert_branch_cond(&cond);
         match result {
             SsaBranchCond::Zero(expr) => {
-                assert!(matches!(expr, SsaExpr::Var(SsaVar { loc: RegLocation::Gpr(5), .. })));
+                assert!(matches!(
+                    expr,
+                    SsaExpr::Var(SsaVar {
+                        loc: RegLocation::Gpr(5),
+                        ..
+                    })
+                ));
             }
             other => panic!("expected Zero, got {:?}", other),
         }
@@ -343,6 +389,39 @@ mod tests {
             src: Expr::Imm(0),
         };
         assert_eq!(convert_stmt(&stmt), SsaStmt::Nop);
+    }
+
+    #[test]
+    fn convert_stmt_store_with_stack_slot_addr() {
+        let stmt = Stmt::Store {
+            addr: Expr::StackSlot {
+                offset: 16,
+                size: 8,
+            },
+            value: Expr::Reg(Reg::X(0)),
+            size: 8,
+        };
+
+        match convert_stmt(&stmt) {
+            SsaStmt::Store { addr, value, size } => {
+                assert_eq!(
+                    addr,
+                    SsaExpr::StackSlot {
+                        offset: 16,
+                        size: 8,
+                    }
+                );
+                assert!(matches!(
+                    value,
+                    SsaExpr::Var(SsaVar {
+                        loc: RegLocation::Gpr(0),
+                        ..
+                    })
+                ));
+                assert_eq!(size, 8);
+            }
+            other => panic!("expected Store, got {:?}", other),
+        }
     }
 
     #[test]
@@ -405,10 +484,26 @@ mod tests {
             if_false: Box::new(Expr::Reg(Reg::X(2))),
         };
         match convert_expr(&expr) {
-            SsaExpr::CondSelect { cond, if_true, if_false } => {
+            SsaExpr::CondSelect {
+                cond,
+                if_true,
+                if_false,
+            } => {
                 assert_eq!(cond, Condition::GE);
-                assert!(matches!(*if_true, SsaExpr::Var(SsaVar { loc: RegLocation::Gpr(1), .. })));
-                assert!(matches!(*if_false, SsaExpr::Var(SsaVar { loc: RegLocation::Gpr(2), .. })));
+                assert!(matches!(
+                    *if_true,
+                    SsaExpr::Var(SsaVar {
+                        loc: RegLocation::Gpr(1),
+                        ..
+                    })
+                ));
+                assert!(matches!(
+                    *if_false,
+                    SsaExpr::Var(SsaVar {
+                        loc: RegLocation::Gpr(2),
+                        ..
+                    })
+                ));
             }
             other => panic!("expected CondSelect, got {:?}", other),
         }

@@ -2,9 +2,9 @@
 //! Cooper-Harvey-Kennedy iterative algorithm.  Used by SSA passes that
 //! need dominance queries (e.g. dead-branch elimination, code motion).
 
-use std::collections::{HashMap, HashSet};
-use super::types::BlockId;
 use super::construct::SsaFunction;
+use super::types::BlockId;
+use std::collections::{HashMap, HashSet};
 
 /// Dominator tree for an SSA function.
 pub struct DomTree {
@@ -54,11 +54,8 @@ impl DomTree {
         let rpo = Self::compute_rpo(func.entry, &succ_map, func.blocks.len());
 
         // Map block -> RPO index (lower index = earlier in RPO)
-        let rpo_order: HashMap<BlockId, usize> = rpo
-            .iter()
-            .enumerate()
-            .map(|(i, &b)| (b, i))
-            .collect();
+        let rpo_order: HashMap<BlockId, usize> =
+            rpo.iter().enumerate().map(|(i, &b)| (b, i)).collect();
 
         // Build predecessor map
         let mut pred_map: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
@@ -241,11 +238,7 @@ mod tests {
     #[test]
     fn dom_straight_line() {
         // A(0) -> B(1) -> C(2)
-        let func = make_func(&[
-            (0, vec![1]),
-            (1, vec![2]),
-            (2, vec![]),
-        ]);
+        let func = make_func(&[(0, vec![1]), (1, vec![2]), (2, vec![])]);
         let dt = DomTree::build(&func);
 
         assert!(dt.dominates(0, 0));
@@ -267,12 +260,7 @@ mod tests {
         //  B(1) C(2)
         //    \ /
         //    D(3)
-        let func = make_func(&[
-            (0, vec![1, 2]),
-            (1, vec![3]),
-            (2, vec![3]),
-            (3, vec![]),
-        ]);
+        let func = make_func(&[(0, vec![1, 2]), (1, vec![3]), (2, vec![3]), (3, vec![])]);
         let dt = DomTree::build(&func);
 
         // A dominates everything
@@ -294,11 +282,7 @@ mod tests {
     fn dom_loop() {
         // A(0) -> B(1) -> A(0)  (back edge)
         //         B(1) -> C(2)
-        let func = make_func(&[
-            (0, vec![1]),
-            (1, vec![0, 2]),
-            (2, vec![]),
-        ]);
+        let func = make_func(&[(0, vec![1]), (1, vec![0, 2]), (2, vec![])]);
         let dt = DomTree::build(&func);
 
         assert!(dt.dominates(0, 1));
@@ -310,12 +294,7 @@ mod tests {
     #[test]
     fn dom_self() {
         // Every block dominates itself
-        let func = make_func(&[
-            (0, vec![1, 2]),
-            (1, vec![3]),
-            (2, vec![3]),
-            (3, vec![]),
-        ]);
+        let func = make_func(&[(0, vec![1, 2]), (1, vec![3]), (2, vec![3]), (3, vec![])]);
         let dt = DomTree::build(&func);
 
         for block in &func.blocks {
@@ -329,12 +308,7 @@ mod tests {
 
     #[test]
     fn dom_rpo_order() {
-        let func = make_func(&[
-            (0, vec![1, 2]),
-            (1, vec![3]),
-            (2, vec![3]),
-            (3, vec![]),
-        ]);
+        let func = make_func(&[(0, vec![1, 2]), (1, vec![3]), (2, vec![3]), (3, vec![])]);
         let dt = DomTree::build(&func);
 
         let rpo: Vec<BlockId> = dt.rpo_iter().collect();
@@ -350,11 +324,7 @@ mod tests {
     #[test]
     fn dom_children() {
         // A(0) -> B(1) -> C(2)
-        let func = make_func(&[
-            (0, vec![1]),
-            (1, vec![2]),
-            (2, vec![]),
-        ]);
+        let func = make_func(&[(0, vec![1]), (1, vec![2]), (2, vec![])]);
         let dt = DomTree::build(&func);
 
         assert_eq!(dt.dom_children(0), &[1]);

@@ -337,7 +337,11 @@ pub fn e_intrinsic(name: &str, ops: Vec<Expr>) -> Expr {
     }
 }
 pub fn e_compare(cond: Condition, lhs: Expr, rhs: Expr) -> Expr {
-    Expr::Compare { cond, lhs: Box::new(lhs), rhs: Box::new(rhs) }
+    Expr::Compare {
+        cond,
+        lhs: Box::new(lhs),
+        rhs: Box::new(rhs),
+    }
 }
 pub fn e_stack_slot(offset: i64, size: u8) -> Expr {
     Expr::StackSlot { offset, size }
@@ -412,7 +416,12 @@ impl Expr {
                 lsb: *lsb,
                 width: *width,
             },
-            Expr::Insert { dst, src, lsb, width } => Expr::Insert {
+            Expr::Insert {
+                dst,
+                src,
+                lsb,
+                width,
+            } => Expr::Insert {
                 dst: Box::new(f(dst)),
                 src: Box::new(f(src)),
                 lsb: *lsb,
@@ -426,7 +435,11 @@ impl Expr {
             },
 
             // Conditional
-            Expr::CondSelect { cond, if_true, if_false } => Expr::CondSelect {
+            Expr::CondSelect {
+                cond,
+                if_true,
+                if_false,
+            } => Expr::CondSelect {
                 cond: *cond,
                 if_true: Box::new(f(if_true)),
                 if_false: Box::new(f(if_false)),

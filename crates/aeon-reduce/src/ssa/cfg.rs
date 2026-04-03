@@ -2,9 +2,9 @@
 //! `Stmt` nodes into basic blocks connected by edges derived from branch
 //! and conditional-branch statements.  Provides predecessor/successor queries.
 
-use std::collections::{HashMap, HashSet};
 use super::types::*;
 use aeonil::Stmt;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 pub struct BasicBlock {
@@ -145,10 +145,7 @@ pub fn build_cfg(instructions: &[(u64, Stmt, Vec<u64>)]) -> Cfg {
     }
 
     // Build addr -> block_id map
-    let block_map: HashMap<u64, BlockId> = blocks
-        .iter()
-        .map(|b| (b.addr, b.id))
-        .collect();
+    let block_map: HashMap<u64, BlockId> = blocks.iter().map(|b| (b.addr, b.id)).collect();
 
     Cfg {
         entry: 0,
@@ -160,7 +157,7 @@ pub fn build_cfg(instructions: &[(u64, Stmt, Vec<u64>)]) -> Cfg {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aeonil::{Expr, Reg, Condition, BranchCond};
+    use aeonil::{BranchCond, Condition, Expr, Reg};
 
     /// Helper: make a simple assign statement (X(dst) = Imm(val))
     fn assign(dst: u8, val: u64) -> Stmt {
@@ -296,9 +293,9 @@ mod tests {
             fallthrough: 0x208,
         };
         let instrs = vec![
-            (0x200, assign(0, 1), vec![0x204]),        // branch to 0x204
-            (0x204, assign(1, 2), vec![0x208]),        // sequential to 0x208 (body)
-            (0x208, cond_branch, vec![0x204, 0x20c]),  // back to 0x204 or exit to 0x20c
+            (0x200, assign(0, 1), vec![0x204]),       // branch to 0x204
+            (0x204, assign(1, 2), vec![0x208]),       // sequential to 0x208 (body)
+            (0x208, cond_branch, vec![0x204, 0x20c]), // back to 0x204 or exit to 0x20c
             (0x20c, Stmt::Ret, vec![]),
         ];
         let cfg = build_cfg(&instrs);

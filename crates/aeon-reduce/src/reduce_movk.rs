@@ -11,8 +11,8 @@
 //! MOVK semantics: replace the 16-bit chunk at the shift position, keeping all
 //! other bits of the destination register unchanged.
 
-use aeonil::{Expr, Stmt};
 use crate::env::RegisterEnv;
+use aeonil::{Expr, Stmt};
 
 /// Extract the (shifted_value, mask) pair from a MOVK shifted-immediate operand.
 ///
@@ -81,8 +81,7 @@ pub fn resolve_movk_chains(stmts: Vec<Stmt>) -> Vec<Stmt> {
             Stmt::Assign {
                 dst,
                 src: Expr::Intrinsic { name, operands },
-            } if name == "movk" && operands.len() == 2 =>
-            {
+            } if name == "movk" && operands.len() == 2 => {
                 // operands[0] is Reg(dst) — the old value
                 // operands[1] is the shifted immediate
                 if let Some(Expr::Imm(old_val)) = env.lookup(dst).cloned() {
@@ -156,10 +155,7 @@ mod tests {
         // MOVZ X0, #0x1234
         // MOVK X0, #0x5678, LSL #16
         // Expected: X0 = 0x56781234
-        let stmts = vec![
-            movz(Reg::X(0), 0x1234),
-            movk_shl(Reg::X(0), 0x5678, 16),
-        ];
+        let stmts = vec![movz(Reg::X(0), 0x1234), movk_shl(Reg::X(0), 0x5678, 16)];
         let result = resolve_movk_chains(stmts);
         assert_eq!(result.len(), 2);
         assert_eq!(
@@ -209,10 +205,7 @@ mod tests {
     #[test]
     fn movz_movk_partial() {
         // Only MOVZ + 1 MOVK (low 32 bits)
-        let stmts = vec![
-            movz(Reg::X(0), 0xAAAA),
-            movk_shl(Reg::X(0), 0xBBBB, 16),
-        ];
+        let stmts = vec![movz(Reg::X(0), 0xAAAA), movk_shl(Reg::X(0), 0xBBBB, 16)];
         let result = resolve_movk_chains(stmts);
         assert_eq!(result.len(), 2);
         assert_eq!(
@@ -305,10 +298,7 @@ mod tests {
         // W register variant (32-bit)
         // MOVZ W0, #0x1234
         // MOVK W0, #0xABCD, LSL #16
-        let stmts = vec![
-            movz(Reg::W(0), 0x1234),
-            movk_shl(Reg::W(0), 0xABCD, 16),
-        ];
+        let stmts = vec![movz(Reg::W(0), 0x1234), movk_shl(Reg::W(0), 0xABCD, 16)];
         let result = resolve_movk_chains(stmts);
         assert_eq!(result.len(), 2);
         assert_eq!(
@@ -328,10 +318,7 @@ mod tests {
             movz(Reg::X(0), 0x1234),
             Stmt::Assign {
                 dst: Reg::X(0),
-                src: e_intrinsic(
-                    "movk",
-                    vec![Expr::Reg(Reg::X(0)), Expr::Imm(0x5678_0000)],
-                ),
+                src: e_intrinsic("movk", vec![Expr::Reg(Reg::X(0)), Expr::Imm(0x5678_0000)]),
             },
         ];
         let result = resolve_movk_chains(stmts);

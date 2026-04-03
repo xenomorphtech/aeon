@@ -289,10 +289,7 @@ mod tests {
     #[test]
     fn no_fold_reg() {
         let expr = e_add(Expr::Reg(Reg::X(0)), Expr::Imm(5));
-        assert_eq!(
-            fold_expr(&expr),
-            e_add(Expr::Reg(Reg::X(0)), Expr::Imm(5))
-        );
+        assert_eq!(fold_expr(&expr), e_add(Expr::Reg(Reg::X(0)), Expr::Imm(5)));
     }
 
     #[test]

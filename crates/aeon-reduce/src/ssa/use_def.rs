@@ -2,9 +2,9 @@
 //! its unique definition site, and from each definition to all its uses.
 //! Foundation for most SSA optimization passes.
 
-use std::collections::{HashMap, HashSet};
-use super::types::*;
 use super::construct::SsaFunction;
+use super::types::*;
+use std::collections::{HashMap, HashSet};
 
 /// Location of a statement within the function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -73,7 +73,9 @@ fn collect_uses_in_expr(
             collect_uses_in_expr(lhs, loc, uses);
             collect_uses_in_expr(rhs, loc, uses);
         }
-        SsaExpr::CondSelect { if_true, if_false, .. } => {
+        SsaExpr::CondSelect {
+            if_true, if_false, ..
+        } => {
             collect_uses_in_expr(if_true, loc, uses);
             collect_uses_in_expr(if_false, loc, uses);
         }
@@ -352,7 +354,10 @@ mod tests {
         let ud = UseDefMap::build(&func);
         assert_eq!(
             ud.def_of(&v1),
-            Some(StmtLocation { block: 0, stmt_idx: 0 })
+            Some(StmtLocation {
+                block: 0,
+                stmt_idx: 0
+            })
         );
         assert_eq!(ud.use_count(&v1), 0);
     }
@@ -370,10 +375,7 @@ mod tests {
             },
             SsaStmt::Assign {
                 dst: v2,
-                src: SsaExpr::Add(
-                    Box::new(SsaExpr::Var(v1)),
-                    Box::new(SsaExpr::Imm(1)),
-                ),
+                src: SsaExpr::Add(Box::new(SsaExpr::Var(v1)), Box::new(SsaExpr::Imm(1))),
             },
         ]);
 
@@ -383,7 +385,10 @@ mod tests {
         assert_eq!(use_locs.len(), 1);
         assert_eq!(
             *use_locs[0],
-            StmtLocation { block: 0, stmt_idx: 1 }
+            StmtLocation {
+                block: 0,
+                stmt_idx: 1
+            }
         );
     }
 
@@ -433,10 +438,7 @@ mod tests {
             },
             SsaStmt::Assign {
                 dst: v2,
-                src: SsaExpr::Add(
-                    Box::new(SsaExpr::Var(v1)),
-                    Box::new(SsaExpr::Var(v1)),
-                ),
+                src: SsaExpr::Add(Box::new(SsaExpr::Var(v1)), Box::new(SsaExpr::Var(v1))),
             },
         ]);
 
@@ -460,17 +462,20 @@ mod tests {
             },
             SsaStmt::Assign {
                 dst: v2,
-                src: SsaExpr::Add(
-                    Box::new(SsaExpr::Var(v1)),
-                    Box::new(SsaExpr::Imm(1)),
-                ),
+                src: SsaExpr::Add(Box::new(SsaExpr::Var(v1)), Box::new(SsaExpr::Imm(1))),
             },
         ]);
 
         let mut ud = UseDefMap::build(&func);
         assert_eq!(ud.use_count(&v1), 1);
 
-        ud.remove_use(&v1, StmtLocation { block: 0, stmt_idx: 1 });
+        ud.remove_use(
+            &v1,
+            StmtLocation {
+                block: 0,
+                stmt_idx: 1,
+            },
+        );
         assert_eq!(ud.use_count(&v1), 0);
     }
 
@@ -489,18 +494,12 @@ mod tests {
                 },
                 SsaStmt::Assign {
                     dst: v2,
-                    src: SsaExpr::Add(
-                        Box::new(SsaExpr::Var(v1)),
-                        Box::new(SsaExpr::Imm(1)),
-                    ),
+                    src: SsaExpr::Add(Box::new(SsaExpr::Var(v1)), Box::new(SsaExpr::Imm(1))),
                 },
             ],
             vec![SsaStmt::Assign {
                 dst: v3,
-                src: SsaExpr::Sub(
-                    Box::new(SsaExpr::Var(v1)),
-                    Box::new(SsaExpr::Imm(2)),
-                ),
+                src: SsaExpr::Sub(Box::new(SsaExpr::Var(v1)), Box::new(SsaExpr::Imm(2))),
             }],
         );
 

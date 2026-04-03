@@ -291,7 +291,12 @@ impl VTableIndex {
         }
     }
 
-    fn resolve_slot_in_vtable(&self, vtables: &[VTableInfo], vtable_addr: u64, slot: u64) -> Vec<u64> {
+    fn resolve_slot_in_vtable(
+        &self,
+        vtables: &[VTableInfo],
+        vtable_addr: u64,
+        slot: u64,
+    ) -> Vec<u64> {
         let Some(&position) = self.address_points.get(&vtable_addr) else {
             return Vec::new();
         };
@@ -638,7 +643,11 @@ fn plausible_vtable_header(entries: &[RawSectionPointer], index: usize) -> Optio
     }
 
     let typeinfo_raw = entries[index - 1].raw;
-    let typeinfo_addr = if typeinfo_raw == 0 { None } else { Some(typeinfo_raw) };
+    let typeinfo_addr = if typeinfo_raw == 0 {
+        None
+    } else {
+        Some(typeinfo_raw)
+    };
     Some(VTableHeader {
         start_addr: entries[index - 2].addr,
         offset_to_top,
@@ -787,7 +796,9 @@ fn process_stmt(
             if let Some(target_addr) = pointer_value(&resolved) {
                 let target = classify_target(binary, target_addr);
                 if target.kind != AddressKind::Unknown {
-                    if let Some(vtable_addr) = vtable_index.normalize_vtable_addr(vtables, target_addr) {
+                    if let Some(vtable_addr) =
+                        vtable_index.normalize_vtable_addr(vtables, target_addr)
+                    {
                         known_vtables.insert(vtable_addr);
                     }
                     references.push(FunctionPointerReference {
@@ -850,7 +861,9 @@ fn process_stmt(
             if let Some(target_addr) = pointer_value(&resolved_value) {
                 let target = classify_target(binary, target_addr);
                 if target.kind != AddressKind::Unknown {
-                    if let Some(vtable_addr) = vtable_index.normalize_vtable_addr(vtables, target_addr) {
+                    if let Some(vtable_addr) =
+                        vtable_index.normalize_vtable_addr(vtables, target_addr)
+                    {
                         known_vtables.insert(vtable_addr);
                     }
                     references.push(FunctionPointerReference {
@@ -909,7 +922,11 @@ fn process_stmt(
                     .and_then(|addr| vtable_index.normalize_vtable_addr(vtables, addr));
 
                 if let Some(vtable_addr) = resolved_vtable_addr {
-                    for target in vtable_index.resolve_slot_in_vtable(vtables, vtable_addr, slot_access.slot_offset) {
+                    for target in vtable_index.resolve_slot_in_vtable(
+                        vtables,
+                        vtable_addr,
+                        slot_access.slot_offset,
+                    ) {
                         candidate_functions.insert(target);
                     }
                     edge_kind = Some(CallEdgeKind::IndirectVtableExact);
@@ -917,7 +934,11 @@ fn process_stmt(
 
                 if candidate_functions.is_empty() && !known_vtables.is_empty() {
                     for &vtable_addr in known_vtables.iter() {
-                        for target in vtable_index.resolve_slot_in_vtable(vtables, vtable_addr, slot_access.slot_offset) {
+                        for target in vtable_index.resolve_slot_in_vtable(
+                            vtables,
+                            vtable_addr,
+                            slot_access.slot_offset,
+                        ) {
                             candidate_functions.insert(target);
                         }
                     }
@@ -979,7 +1000,8 @@ fn process_stmt(
             let resolved = env.resolve(target);
             if let Some(target_addr) = pointer_value(&resolved) {
                 let target_info = classify_target(binary, target_addr);
-                if target_info.kind.is_executable() && target_info.function_addr != Some(func.addr) {
+                if target_info.kind.is_executable() && target_info.function_addr != Some(func.addr)
+                {
                     references.push(FunctionPointerReference {
                         instruction_addr,
                         disassembly: disassembly.to_string(),
@@ -1143,14 +1165,18 @@ fn classify_target(binary: &LoadedBinary, addr: u64) -> TargetInfo {
             } else {
                 AddressKind::Code
             },
-            section: binary.section_containing(addr).map(|section| section.name.clone()),
+            section: binary
+                .section_containing(addr)
+                .map(|section| section.name.clone()),
             function_addr: Some(func.addr),
             name: func.name.clone(),
             string_preview: None,
         };
     }
 
-    let alloc_section = binary.section_containing(addr).filter(|section| section.is_alloc);
+    let alloc_section = binary
+        .section_containing(addr)
+        .filter(|section| section.is_alloc);
     if alloc_section.is_some() || binary.contains_vaddr(addr) {
         return TargetInfo {
             addr,
@@ -1407,8 +1433,9 @@ fn contains_pc_relative(expr: &Expr) -> bool {
             if_true, if_false, ..
         } => contains_pc_relative(if_true) || contains_pc_relative(if_false),
         Expr::Intrinsic { operands, .. } => operands.iter().any(contains_pc_relative),
-        Expr::Reg(_) | Expr::Imm(_) | Expr::FImm(_) | Expr::MrsRead(_)
-        | Expr::StackSlot { .. } => false,
+        Expr::Reg(_) | Expr::Imm(_) | Expr::FImm(_) | Expr::MrsRead(_) | Expr::StackSlot { .. } => {
+            false
+        }
     }
 }
 
@@ -1454,7 +1481,10 @@ fn split_base_offset(expr: &Expr) -> (&Expr, u64) {
 
 fn looks_like_vtable_base(expr: &Expr) -> bool {
     pointer_value(expr).is_some()
-        || matches!(expr, Expr::Load { size: 8, .. } | Expr::Reg(_) | Expr::Add(_, _) | Expr::Sub(_, _))
+        || matches!(
+            expr,
+            Expr::Load { size: 8, .. } | Expr::Reg(_) | Expr::Add(_, _) | Expr::Sub(_, _)
+        )
 }
 
 fn register_name_from_expr(expr: &Expr) -> Option<String> {
@@ -1572,7 +1602,10 @@ mod tests {
 
         let report = scan_vtables(&binary);
         assert!(report.total_vtables > 0);
-        assert!(report.vtables.iter().any(|vtable| vtable.function_count >= 3));
+        assert!(report
+            .vtables
+            .iter()
+            .any(|vtable| vtable.function_count >= 3));
     }
 
     #[test]
@@ -1584,7 +1617,10 @@ mod tests {
         let report = scan_function_pointers(&binary, Some(0x05e66990), 0, 1).unwrap();
         let function = report.functions.first().expect("expected function report");
         assert!(function.reference_count > 0);
-        assert!(!function.unique_data_targets.is_empty() || !function.unique_function_targets.is_empty());
+        assert!(
+            !function.unique_data_targets.is_empty()
+                || !function.unique_function_targets.is_empty()
+        );
     }
 
     #[test]

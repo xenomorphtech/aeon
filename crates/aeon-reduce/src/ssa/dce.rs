@@ -3,10 +3,10 @@
 //! Uses a worklist to cascade: removing a dead def may reduce use counts
 //! of its operands, making those defs dead too.
 
-use std::collections::VecDeque;
-use super::types::*;
 use super::construct::SsaFunction;
+use super::types::*;
 use super::use_def::UseDefMap;
+use std::collections::VecDeque;
 
 /// Run dead code elimination. Returns true if any changes were made.
 pub fn run(func: &mut SsaFunction, use_def: &mut UseDefMap) -> bool {
@@ -124,7 +124,9 @@ fn collect_vars_recursive(expr: &SsaExpr, vars: &mut Vec<SsaVar>) {
             collect_vars_recursive(lhs, vars);
             collect_vars_recursive(rhs, vars);
         }
-        SsaExpr::CondSelect { if_true, if_false, .. } => {
+        SsaExpr::CondSelect {
+            if_true, if_false, ..
+        } => {
             collect_vars_recursive(if_true, vars);
             collect_vars_recursive(if_false, vars);
         }
@@ -309,17 +311,11 @@ mod tests {
             },
             SsaStmt::Assign {
                 dst: v2,
-                src: SsaExpr::Add(
-                    Box::new(SsaExpr::Var(v1)),
-                    Box::new(SsaExpr::Var(v1)),
-                ),
+                src: SsaExpr::Add(Box::new(SsaExpr::Var(v1)), Box::new(SsaExpr::Var(v1))),
             },
             SsaStmt::Assign {
                 dst: v3,
-                src: SsaExpr::Mul(
-                    Box::new(SsaExpr::Var(v2)),
-                    Box::new(SsaExpr::Imm(2)),
-                ),
+                src: SsaExpr::Mul(Box::new(SsaExpr::Var(v2)), Box::new(SsaExpr::Imm(2))),
             },
         ]);
         let mut ud = UseDefMap::build(&func);
@@ -382,10 +378,7 @@ mod tests {
             },
             SsaStmt::Assign {
                 dst: v2,
-                src: SsaExpr::Add(
-                    Box::new(SsaExpr::Var(v1)),
-                    Box::new(SsaExpr::Imm(2)),
-                ),
+                src: SsaExpr::Add(Box::new(SsaExpr::Var(v1)), Box::new(SsaExpr::Imm(2))),
             },
             SsaStmt::Store {
                 addr: SsaExpr::Imm(0x1000),

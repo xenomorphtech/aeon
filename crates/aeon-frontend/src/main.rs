@@ -1,10 +1,24 @@
 enum Command {
-    Coverage { binary_path: String },
-    Rc4 { binary_path: String },
-    Func { binary_path: String, addr: u64 },
-    Pointers { binary_path: String },
-    VTables { binary_path: String },
-    FuncPointers { binary_path: String, addr: u64 },
+    Coverage {
+        binary_path: String,
+    },
+    Rc4 {
+        binary_path: String,
+    },
+    Func {
+        binary_path: String,
+        addr: u64,
+    },
+    Pointers {
+        binary_path: String,
+    },
+    VTables {
+        binary_path: String,
+    },
+    FuncPointers {
+        binary_path: String,
+        addr: u64,
+    },
     CallPath {
         binary_path: String,
         start_addr: u64,

@@ -205,12 +205,7 @@ fn process_stmt(stmt: &Stmt, pc: u64, env: &mut RegisterEnv, facts: &mut Dataflo
 }
 
 /// Walk an expression tree, emit flows_to for every register read
-fn collect_reads(
-    expr: &Expr,
-    consumer_pc: u64,
-    env: &RegisterEnv,
-    facts: &mut DataflowFacts,
-) {
+fn collect_reads(expr: &Expr, consumer_pc: u64, env: &RegisterEnv, facts: &mut DataflowFacts) {
     match expr {
         Expr::Reg(r) => {
             if let Some(producer) = env.def_index(r) {

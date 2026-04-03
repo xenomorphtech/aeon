@@ -123,9 +123,7 @@ impl RegisterEnv {
                 visited.borrow_mut().remove(reg);
                 resolved
             }
-            other => {
-                other.map_subexprs(|sub| self.resolve_inner(sub, visited, depth - 1))
-            }
+            other => other.map_subexprs(|sub| self.resolve_inner(sub, visited, depth - 1)),
         }
     }
 

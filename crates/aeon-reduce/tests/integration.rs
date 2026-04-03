@@ -3,8 +3,8 @@
 // Tests here exercise the full reduction pipeline on small AeonIL function
 // snippets that model realistic ARM64 instruction sequences.
 
-use aeonil::*;
 use aeon_reduce::pipeline::reduce_block;
+use aeonil::*;
 
 // ---- Test 1: ADRP + ADD + LDR ----
 
@@ -89,10 +89,7 @@ fn real_movz_movk_4step() {
         }, // MOVZ
         Stmt::Assign {
             dst: Reg::X(0),
-            src: e_intrinsic(
-                "movk",
-                vec![Expr::Reg(Reg::X(0)), Expr::Imm(0xCAFE0000)],
-            ),
+            src: e_intrinsic("movk", vec![Expr::Reg(Reg::X(0)), Expr::Imm(0xCAFE0000)]),
         },
         Stmt::Assign {
             dst: Reg::X(0),
@@ -149,7 +146,7 @@ fn real_ldp_cmp_bcc() {
     let result = reduce_block(input);
     // Pair flattened to 2 assigns, SetFlags+CondBranch fused into 1
     assert_eq!(result.len(), 3); // 2 assigns + 1 fused CondBranch
-    // First two are the flattened loads
+                                 // First two are the flattened loads
     assert_eq!(
         result[0],
         Stmt::Assign {
@@ -211,7 +208,10 @@ fn real_function_prologue() {
     assert_eq!(
         result[0],
         Stmt::Store {
-            addr: e_add(Expr::Reg(Reg::SP), Expr::Imm(0xFFFFFFFFFFFFFFF0)),
+            addr: Expr::StackSlot {
+                offset: -16,
+                size: 8,
+            },
             value: Expr::Reg(Reg::X(29)),
             size: 8,
         }
@@ -219,7 +219,10 @@ fn real_function_prologue() {
     assert_eq!(
         result[1],
         Stmt::Store {
-            addr: e_add(Expr::Reg(Reg::SP), Expr::Imm(0xFFFFFFFFFFFFFFF8)),
+            addr: Expr::StackSlot {
+                offset: -8,
+                size: 8
+            },
             value: Expr::Reg(Reg::X(30)),
             size: 8,
         }

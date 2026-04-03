@@ -98,51 +98,33 @@ fn eval_expr(
     match expr {
         SsaExpr::Var(v) => values.get(v).cloned().unwrap_or(LatticeValue::Top),
         SsaExpr::Imm(c) => LatticeValue::Constant(*c),
-        SsaExpr::Add(a, b) => {
-            eval_binary(a, b, values, executable_edges, block, |x, y| {
-                x.wrapping_add(y)
-            })
-        }
-        SsaExpr::Sub(a, b) => {
-            eval_binary(a, b, values, executable_edges, block, |x, y| {
-                x.wrapping_sub(y)
-            })
-        }
-        SsaExpr::Mul(a, b) => {
-            eval_binary(a, b, values, executable_edges, block, |x, y| {
-                x.wrapping_mul(y)
-            })
-        }
-        SsaExpr::And(a, b) => {
-            eval_binary(a, b, values, executable_edges, block, |x, y| x & y)
-        }
-        SsaExpr::Or(a, b) => {
-            eval_binary(a, b, values, executable_edges, block, |x, y| x | y)
-        }
-        SsaExpr::Xor(a, b) => {
-            eval_binary(a, b, values, executable_edges, block, |x, y| x ^ y)
-        }
-        SsaExpr::Shl(a, b) => {
-            eval_binary(a, b, values, executable_edges, block, |x, y| {
-                if y < 64 {
-                    x.wrapping_shl(y as u32)
-                } else {
-                    0
-                }
-            })
-        }
-        SsaExpr::Lsr(a, b) => {
-            eval_binary(a, b, values, executable_edges, block, |x, y| {
-                if y < 64 {
-                    x.wrapping_shr(y as u32)
-                } else {
-                    0
-                }
-            })
-        }
-        SsaExpr::Neg(a) => {
-            eval_unary(a, values, executable_edges, block, |x| x.wrapping_neg())
-        }
+        SsaExpr::Add(a, b) => eval_binary(a, b, values, executable_edges, block, |x, y| {
+            x.wrapping_add(y)
+        }),
+        SsaExpr::Sub(a, b) => eval_binary(a, b, values, executable_edges, block, |x, y| {
+            x.wrapping_sub(y)
+        }),
+        SsaExpr::Mul(a, b) => eval_binary(a, b, values, executable_edges, block, |x, y| {
+            x.wrapping_mul(y)
+        }),
+        SsaExpr::And(a, b) => eval_binary(a, b, values, executable_edges, block, |x, y| x & y),
+        SsaExpr::Or(a, b) => eval_binary(a, b, values, executable_edges, block, |x, y| x | y),
+        SsaExpr::Xor(a, b) => eval_binary(a, b, values, executable_edges, block, |x, y| x ^ y),
+        SsaExpr::Shl(a, b) => eval_binary(a, b, values, executable_edges, block, |x, y| {
+            if y < 64 {
+                x.wrapping_shl(y as u32)
+            } else {
+                0
+            }
+        }),
+        SsaExpr::Lsr(a, b) => eval_binary(a, b, values, executable_edges, block, |x, y| {
+            if y < 64 {
+                x.wrapping_shr(y as u32)
+            } else {
+                0
+            }
+        }),
+        SsaExpr::Neg(a) => eval_unary(a, values, executable_edges, block, |x| x.wrapping_neg()),
         SsaExpr::Not(a) => eval_unary(a, values, executable_edges, block, |x| !x),
         SsaExpr::Phi(operands) => {
             // Meet over operands whose incoming edge is executable.
@@ -173,9 +155,7 @@ fn eval_binary(
     let va = eval_expr(a, values, exec_edges, block);
     let vb = eval_expr(b, values, exec_edges, block);
     match (va, vb) {
-        (LatticeValue::Constant(a), LatticeValue::Constant(b)) => {
-            LatticeValue::Constant(op(a, b))
-        }
+        (LatticeValue::Constant(a), LatticeValue::Constant(b)) => LatticeValue::Constant(op(a, b)),
         (LatticeValue::Bottom, _) | (_, LatticeValue::Bottom) => LatticeValue::Bottom,
         _ => LatticeValue::Top,
     }
@@ -209,41 +189,27 @@ fn eval_branch_cond(
     block: BlockId,
 ) -> Option<bool> {
     match cond {
-        SsaBranchCond::Zero(expr) => {
-            match eval_expr(expr, values, exec_edges, block) {
-                LatticeValue::Constant(v) => Some(v == 0),
-                _ => None,
-            }
-        }
-        SsaBranchCond::NotZero(expr) => {
-            match eval_expr(expr, values, exec_edges, block) {
-                LatticeValue::Constant(v) => Some(v != 0),
-                _ => None,
-            }
-        }
-        SsaBranchCond::BitZero(expr, bit) => {
-            match eval_expr(expr, values, exec_edges, block) {
-                LatticeValue::Constant(v) => Some((v >> *bit as u64) & 1 == 0),
-                _ => None,
-            }
-        }
-        SsaBranchCond::BitNotZero(expr, bit) => {
-            match eval_expr(expr, values, exec_edges, block) {
-                LatticeValue::Constant(v) => Some((v >> *bit as u64) & 1 != 0),
-                _ => None,
-            }
-        }
-        SsaBranchCond::Compare {
-            cond: cc,
-            lhs,
-            rhs,
-        } => {
+        SsaBranchCond::Zero(expr) => match eval_expr(expr, values, exec_edges, block) {
+            LatticeValue::Constant(v) => Some(v == 0),
+            _ => None,
+        },
+        SsaBranchCond::NotZero(expr) => match eval_expr(expr, values, exec_edges, block) {
+            LatticeValue::Constant(v) => Some(v != 0),
+            _ => None,
+        },
+        SsaBranchCond::BitZero(expr, bit) => match eval_expr(expr, values, exec_edges, block) {
+            LatticeValue::Constant(v) => Some((v >> *bit as u64) & 1 == 0),
+            _ => None,
+        },
+        SsaBranchCond::BitNotZero(expr, bit) => match eval_expr(expr, values, exec_edges, block) {
+            LatticeValue::Constant(v) => Some((v >> *bit as u64) & 1 != 0),
+            _ => None,
+        },
+        SsaBranchCond::Compare { cond: cc, lhs, rhs } => {
             let lv = eval_expr(lhs, values, exec_edges, block);
             let rv = eval_expr(rhs, values, exec_edges, block);
             match (lv, rv) {
-                (LatticeValue::Constant(a), LatticeValue::Constant(b)) => {
-                    eval_condition(cc, a, b)
-                }
+                (LatticeValue::Constant(a), LatticeValue::Constant(b)) => eval_condition(cc, a, b),
                 _ => None,
             }
         }
@@ -296,12 +262,7 @@ fn evaluate_phis(func: &SsaFunction, block_id: BlockId, state: &mut SccpState) {
 }
 
 /// Evaluate a single statement at (block_id, stmt_idx).
-fn evaluate_stmt(
-    func: &SsaFunction,
-    block_id: BlockId,
-    stmt_idx: usize,
-    state: &mut SccpState,
-) {
+fn evaluate_stmt(func: &SsaFunction, block_id: BlockId, stmt_idx: usize, state: &mut SccpState) {
     let block = &func.blocks[block_id as usize];
     let stmt = &block.stmts[stmt_idx];
 
@@ -313,12 +274,9 @@ fn evaluate_stmt(
             }
         }
         SsaStmt::CondBranch {
-            cond,
-            fallthrough,
-            ..
+            cond, fallthrough, ..
         } => {
-            let result =
-                eval_branch_cond(cond, &state.values, &state.executable_edges, block_id);
+            let result = eval_branch_cond(cond, &state.values, &state.executable_edges, block_id);
 
             // Determine the branch-taken target block from the successors list.
             // Convention: successors[0] = branch target, successors[1] = fallthrough
@@ -527,10 +485,7 @@ mod tests {
                     },
                     SsaStmt::Assign {
                         dst: v2,
-                        src: SsaExpr::Add(
-                            Box::new(SsaExpr::Var(v1)),
-                            Box::new(SsaExpr::Imm(8)),
-                        ),
+                        src: SsaExpr::Add(Box::new(SsaExpr::Var(v1)), Box::new(SsaExpr::Imm(8))),
                     },
                 ],
                 vec![],
@@ -575,17 +530,11 @@ mod tests {
                     },
                     SsaStmt::Assign {
                         dst: v2,
-                        src: SsaExpr::Mul(
-                            Box::new(SsaExpr::Var(v1)),
-                            Box::new(SsaExpr::Imm(3)),
-                        ),
+                        src: SsaExpr::Mul(Box::new(SsaExpr::Var(v1)), Box::new(SsaExpr::Imm(3))),
                     },
                     SsaStmt::Assign {
                         dst: v3,
-                        src: SsaExpr::Add(
-                            Box::new(SsaExpr::Var(v2)),
-                            Box::new(SsaExpr::Imm(1)),
-                        ),
+                        src: SsaExpr::Add(Box::new(SsaExpr::Var(v2)), Box::new(SsaExpr::Imm(1))),
                     },
                 ],
                 vec![],
@@ -837,10 +786,7 @@ mod tests {
                     },
                     SsaStmt::Assign {
                         dst: v2,
-                        src: SsaExpr::Add(
-                            Box::new(SsaExpr::Var(v1)),
-                            Box::new(SsaExpr::Imm(1)),
-                        ),
+                        src: SsaExpr::Add(Box::new(SsaExpr::Var(v1)), Box::new(SsaExpr::Imm(1))),
                     },
                 ],
                 vec![],
@@ -886,10 +832,7 @@ mod tests {
                     },
                     SsaStmt::Assign {
                         dst: v2,
-                        src: SsaExpr::Add(
-                            Box::new(SsaExpr::Var(v1)),
-                            Box::new(SsaExpr::Imm(1)),
-                        ),
+                        src: SsaExpr::Add(Box::new(SsaExpr::Var(v1)), Box::new(SsaExpr::Imm(1))),
                     },
                 ],
                 vec![],
