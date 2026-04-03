@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/aeon-eval",
+    "crates/aeon-jit",
     "crates/aeonil",
     "crates/aeon",
     "crates/aeon-frontend",

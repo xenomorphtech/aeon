@@ -1,0 +1,11 @@
+[package]
+name = "aeon-jit"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aeonil = { path = "../aeonil" }
+cranelift-codegen = "0.130.0"
+cranelift-frontend = "0.130.0"
+cranelift-module = "0.130.0"
+cranelift-jit = "0.130.0"
