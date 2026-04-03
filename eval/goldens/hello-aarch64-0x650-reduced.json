@@ -1,0 +1,57 @@
+{
+  "function": "0x650",
+  "binary_sha256": null,
+  "function_sha256": null,
+  "blocks": [
+    {
+      "addr": "0x650",
+      "predecessors": [],
+      "successors": ["0x668", "0x67c"],
+      "stmts": [
+        ["assign", "x0", ["adrp_imm", "0x20000"]],
+        ["assign", "x0", ["imm", "0x20010"]],
+        ["assign", "x1", ["adrp_imm", "0x20000"]],
+        ["assign", "x1", ["imm", "0x20010"]],
+        ["set_flags", ["imm", "0x0"]],
+        [
+          "cond_branch",
+          ["flag", "eq"],
+          ["imm", "0x67c"],
+          "0x668"
+        ]
+      ]
+    },
+    {
+      "addr": "0x668",
+      "predecessors": ["0x650"],
+      "successors": ["0x674", "0x67c"],
+      "stmts": [
+        ["assign", "x1", ["adrp_imm", "0x1f000"]],
+        ["assign", "x1", ["load", ["imm", "0x1ffd8"], 8]],
+        [
+          "cond_branch",
+          ["zero", ["load", ["imm", "0x1ffd8"], 8]],
+          ["imm", "0x67c"],
+          "0x674"
+        ]
+      ]
+    },
+    {
+      "addr": "0x674",
+      "predecessors": ["0x668"],
+      "successors": [],
+      "stmts": [
+        ["assign", "x16", ["reg", "x1"]],
+        ["branch", ["reg", "x1"]]
+      ]
+    },
+    {
+      "addr": "0x67c",
+      "predecessors": ["0x650", "0x668"],
+      "successors": [],
+      "stmts": [
+        ["ret"]
+      ]
+    }
+  ]
+}

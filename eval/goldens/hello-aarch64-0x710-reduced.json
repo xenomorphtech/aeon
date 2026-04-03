@@ -1,0 +1,16 @@
+{
+  "function": "0x710",
+  "binary_sha256": null,
+  "function_sha256": null,
+  "blocks": [
+    {
+      "addr": "0x710",
+      "predecessors": [],
+      "successors": [],
+      "stmts": [
+        ["nop"],
+        ["branch", ["imm", "0x680"]]
+      ]
+    }
+  ]
+}

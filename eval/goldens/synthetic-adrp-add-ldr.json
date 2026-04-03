@@ -1,0 +1,17 @@
+{
+  "function": "0x1000",
+  "binary_sha256": null,
+  "function_sha256": null,
+  "blocks": [
+    {
+      "addr": "0x1000",
+      "predecessors": [],
+      "successors": [],
+      "stmts": [
+        ["assign", "x8", ["adrp_imm", "0x412000"]],
+        ["assign", "x8", ["imm", "0x412340"]],
+        ["assign", "x0", ["load", ["imm", "0x412340"], 8]]
+      ]
+    }
+  ]
+}

@@ -1,0 +1,99 @@
+{
+  "function": "0x788",
+  "binary_sha256": null,
+  "function_sha256": null,
+  "blocks": [
+    {
+      "addr": "0x788",
+      "predecessors": [],
+      "successors": ["0x7a0", "0x7ac"],
+      "stmts": [
+        ["assign", "sp", ["sub", ["reg", "sp"], ["imm", "0x10"]]],
+        [
+          "store",
+          ["add", ["sub", ["reg", "sp"], ["imm", "0x10"]], ["imm", "0xc"]],
+          ["reg", "w0"],
+          4
+        ],
+        [
+          "assign",
+          "w1",
+          ["load", ["add", ["sub", ["reg", "sp"], ["imm", "0x10"]], ["imm", "0xc"]], 4]
+        ],
+        ["assign", "w0", ["imm", "0x1234"]],
+        [
+          "cond_branch",
+          [
+            "compare",
+            "ne",
+            [
+              "load",
+              [
+                "add",
+                ["sub", ["sub", ["reg", "sp"], ["imm", "0x10"]], ["imm", "0x10"]],
+                ["imm", "0xc"]
+              ],
+              4
+            ],
+            ["imm", "0x1234"]
+          ],
+          ["imm", "0x7ac"],
+          "0x7a0"
+        ]
+      ]
+    },
+    {
+      "addr": "0x7a0",
+      "predecessors": ["0x788"],
+      "successors": ["0x7d0"],
+      "stmts": [
+        ["assign", "x0", ["adrp_imm", "0x0"]],
+        ["assign", "x0", ["imm", "0x838"]],
+        ["branch", ["imm", "0x7d0"]]
+      ]
+    },
+    {
+      "addr": "0x7ac",
+      "predecessors": ["0x788"],
+      "successors": ["0x7bc", "0x7c8"],
+      "stmts": [
+        ["assign", "w0", ["load", ["stack_slot", 12, 4], 4]],
+        ["assign", "w0", ["and", ["load", ["stack_slot", 12, 4], 4], ["imm", "0x1"]]],
+        [
+          "cond_branch",
+          ["compare", "eq", ["load", ["stack_slot", 12, 4], 4], ["imm", "0x1"]],
+          ["imm", "0x7c8"],
+          "0x7bc"
+        ]
+      ]
+    },
+    {
+      "addr": "0x7bc",
+      "predecessors": ["0x7ac"],
+      "successors": ["0x7d0"],
+      "stmts": [
+        ["assign", "x0", ["adrp_imm", "0x0"]],
+        ["assign", "x0", ["imm", "0x848"]],
+        ["branch", ["imm", "0x7d0"]]
+      ]
+    },
+    {
+      "addr": "0x7c8",
+      "predecessors": ["0x7ac"],
+      "successors": ["0x7d0"],
+      "stmts": [
+        ["assign", "x0", ["adrp_imm", "0x0"]],
+        ["assign", "x0", ["imm", "0x858"]]
+      ]
+    },
+    {
+      "addr": "0x7d0",
+      "predecessors": ["0x7a0", "0x7bc", "0x7c8"],
+      "successors": [],
+      "stmts": [
+        ["assign", "sp", ["add", ["reg", "sp"], ["imm", "0x10"]]],
+        ["ret"]
+      ]
+    }
+  ]
+}

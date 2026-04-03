@@ -8,13 +8,6 @@ use std::cell::Cell;
 use crate::env::RegisterEnv;
 use crate::reduce_const::fold_expr;
 
-/// Fold `Add(AdrpImm(a), Imm(b))` and `Add(AdrImm(a), Imm(b))` into `Imm(a + b)`.
-/// Also handles the reversed operand order.
-/// Applied recursively to sub-expressions.
-fn fold_adr_add(expr: &Expr) -> Expr {
-    fold_adr_add_with_count(expr).0
-}
-
 fn fold_adr_add_with_count(expr: &Expr) -> (Expr, usize) {
     let count = Cell::new(0usize);
     let folded = expr.map_subexprs(|e| {
@@ -41,21 +34,10 @@ fn fold_adr_add_with_count(expr: &Expr) -> (Expr, usize) {
     (folded, count.get())
 }
 
-/// Resolve an expression: substitute registers from `env`, constant-fold,
-/// then fold ADRP/ADR + immediate additions.
-fn resolve_and_fold(expr: &Expr, env: &RegisterEnv) -> Expr {
-    resolve_and_fold_with_count(expr, env).0
-}
-
 fn resolve_and_fold_with_count(expr: &Expr, env: &RegisterEnv) -> (Expr, usize) {
     let resolved = env.resolve(expr);
     let folded = fold_expr(&resolved);
     fold_adr_add_with_count(&folded)
-}
-
-/// Resolve expressions inside a `BranchCond`.
-fn resolve_branch_cond(cond: &BranchCond, env: &RegisterEnv) -> BranchCond {
-    resolve_branch_cond_with_count(cond, env).0
 }
 
 fn resolve_branch_cond_with_count(cond: &BranchCond, env: &RegisterEnv) -> (BranchCond, usize) {
@@ -90,12 +72,6 @@ fn resolve_branch_cond_with_count(cond: &BranchCond, env: &RegisterEnv) -> (Bran
             )
         }
     }
-}
-
-/// Resolve register references and fold constants in all expressions within a
-/// statement.  Used for statement types not handled specially in the main loop.
-fn resolve_stmt_exprs(stmt: Stmt, env: &RegisterEnv) -> Stmt {
-    resolve_stmt_exprs_with_count(stmt, env).0
 }
 
 fn resolve_stmt_exprs_with_count(stmt: Stmt, env: &RegisterEnv) -> (Stmt, usize) {

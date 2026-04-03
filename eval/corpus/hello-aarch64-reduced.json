@@ -1,0 +1,27 @@
+{
+  "id": "hello-aarch64-reduced",
+  "path": "samples/hello_aarch64.elf",
+  "architecture": "aarch64",
+  "format": "elf",
+  "description": "Sample ARM64 ELF reduction and SSA evaluation targets.",
+  "cases": [
+    {
+      "id": "hello-0x650-reduced",
+      "function": "0x650",
+      "golden": "eval/goldens/hello-aarch64-0x650-reduced.json",
+      "tags": ["reduced_il", "adrp", "flags"]
+    },
+    {
+      "id": "hello-0x710-reduced",
+      "function": "0x710",
+      "golden": "eval/goldens/hello-aarch64-0x710-reduced.json",
+      "tags": ["reduced_il", "branch"]
+    },
+    {
+      "id": "hello-0x788-reduced",
+      "function": "0x788",
+      "golden": "eval/goldens/hello-aarch64-0x788-reduced.json",
+      "tags": ["reduced_il", "stack", "adrp", "flags"]
+    }
+  ]
+}

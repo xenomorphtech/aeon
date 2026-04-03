@@ -1,0 +1,36 @@
+{
+  "function": "0x2000",
+  "binary_sha256": null,
+  "function_sha256": null,
+  "blocks": [
+    {
+      "addr": "0x2000",
+      "predecessors": [],
+      "successors": ["0x2008", "0x3000"],
+      "stmts": [
+        [
+          "cond_branch",
+          ["compare", "ne", ["reg", "w8"], ["imm", "0x1"]],
+          ["imm", "0x3000"],
+          "0x2008"
+        ]
+      ]
+    },
+    {
+      "addr": "0x2008",
+      "predecessors": ["0x2000"],
+      "successors": [],
+      "stmts": [
+        ["ret"]
+      ]
+    },
+    {
+      "addr": "0x3000",
+      "predecessors": ["0x2000"],
+      "successors": [],
+      "stmts": [
+        ["ret"]
+      ]
+    }
+  ]
+}

@@ -860,6 +860,7 @@ fn materialize_optional_golden_fields(mut expected: Value, actual: &Value) -> Va
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aeon::il::{e_add, e_intrinsic, e_load, e_sub};
     use serde_json::json;
     use std::path::PathBuf;
 
@@ -955,5 +956,202 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(offsets, vec![0, 32, 280, 296]);
+    }
+
+    #[test]
+    fn synthetic_reduction_goldens_match() {
+        let cases = vec![
+            (
+                0x1000,
+                vec![
+                    (
+                        0x1000,
+                        Stmt::Assign {
+                            dst: Reg::X(8),
+                            src: Expr::AdrpImm(0x412000),
+                        },
+                        vec![0x1004],
+                    ),
+                    (
+                        0x1004,
+                        Stmt::Assign {
+                            dst: Reg::X(8),
+                            src: e_add(Expr::Reg(Reg::X(8)), Expr::Imm(0x340)),
+                        },
+                        vec![0x1008],
+                    ),
+                    (
+                        0x1008,
+                        Stmt::Assign {
+                            dst: Reg::X(0),
+                            src: e_load(Expr::Reg(Reg::X(8)), 8),
+                        },
+                        vec![],
+                    ),
+                ],
+                "synthetic-adrp-add-ldr.json",
+            ),
+            (
+                0x2000,
+                vec![
+                    (
+                        0x2000,
+                        Stmt::SetFlags {
+                            expr: e_sub(Expr::Reg(Reg::W(8)), Expr::Imm(1)),
+                        },
+                        vec![0x2004],
+                    ),
+                    (
+                        0x2004,
+                        Stmt::CondBranch {
+                            cond: BranchCond::Flag(Condition::NE),
+                            target: Expr::Imm(0x3000),
+                            fallthrough: 0x2008,
+                        },
+                        vec![0x3000, 0x2008],
+                    ),
+                    (0x2008, Stmt::Ret, vec![]),
+                    (0x3000, Stmt::Ret, vec![]),
+                ],
+                "synthetic-cmp-bne.json",
+            ),
+            (
+                0x4000,
+                vec![
+                    (
+                        0x4000,
+                        Stmt::Assign {
+                            dst: Reg::X(0),
+                            src: Expr::Imm(0xBABE),
+                        },
+                        vec![0x4004],
+                    ),
+                    (
+                        0x4004,
+                        Stmt::Assign {
+                            dst: Reg::X(0),
+                            src: e_intrinsic("movk", vec![Expr::Reg(Reg::X(0)), Expr::Imm(0xCAFE0000)]),
+                        },
+                        vec![0x4008],
+                    ),
+                    (
+                        0x4008,
+                        Stmt::Assign {
+                            dst: Reg::X(0),
+                            src: e_intrinsic(
+                                "movk",
+                                vec![Expr::Reg(Reg::X(0)), Expr::Imm(0xBEEF00000000)],
+                            ),
+                        },
+                        vec![0x400c],
+                    ),
+                    (
+                        0x400c,
+                        Stmt::Assign {
+                            dst: Reg::X(0),
+                            src: e_intrinsic(
+                                "movk",
+                                vec![Expr::Reg(Reg::X(0)), Expr::Imm(0xDEAD000000000000)],
+                            ),
+                        },
+                        vec![],
+                    ),
+                ],
+                "synthetic-movk-chain.json",
+            ),
+        ];
+
+        for (function_addr, instructions, golden_name) in cases {
+            let actual = normalize_reduced_instructions_artifact(function_addr, &instructions);
+            let expected = read_json(golden_path(golden_name));
+            assert_eq!(actual, expected, "synthetic golden mismatch for {}", golden_name);
+        }
+    }
+
+    #[test]
+    fn reduced_il_binary_goldens_match_sample_elf() {
+        let binary_path = sample_binary_path();
+        let cases = [
+            (0x650_u64, "hello-aarch64-0x650-reduced.json"),
+            (0x710_u64, "hello-aarch64-0x710-reduced.json"),
+            (0x788_u64, "hello-aarch64-0x788-reduced.json"),
+        ];
+
+        for (addr, golden_name) in cases {
+            let run = evaluate_reduced_il_golden(
+                binary_path.to_str().unwrap(),
+                addr,
+                golden_path(golden_name).to_str().unwrap(),
+            )
+            .expect("binary golden evaluation should succeed");
+            assert_eq!(run.outcome, RunOutcome::Passed, "golden mismatch at 0x{:x}", addr);
+        }
+    }
+
+    #[test]
+    fn reduction_metrics_report_expected_counts_for_sample_function() {
+        let binary_path = sample_binary_path();
+        let run = evaluate_reduction_metrics(binary_path.to_str().unwrap(), 0x788)
+            .expect("reduction metrics evaluation should succeed");
+
+        assert_eq!(run.outcome, RunOutcome::Passed);
+
+        let metrics = run
+            .evidence
+            .iter()
+            .find(|item| item.id == "ev-metric-snapshot")
+            .expect("metric snapshot evidence should exist");
+        assert_eq!(metrics.value["eligible_stack_accesses"], json!(1));
+        assert_eq!(metrics.value["stack_slots_recognized"], json!(1));
+        assert_eq!(metrics.value["adrp_resolutions"], json!(3));
+        assert_eq!(metrics.value["flag_fusions"], json!(2));
+        assert_eq!(metrics.value["movk_chain_resolutions"], json!(0));
+        assert_eq!(metrics.value["intrinsic_to_proper_il_ratio"], json!(0.0));
+
+        let before = metrics.value["ssa_vars_before_optimization"]
+            .as_u64()
+            .expect("ssa_vars_before_optimization should be numeric");
+        let after = metrics.value["ssa_vars_after_optimization"]
+            .as_u64()
+            .expect("ssa_vars_after_optimization should be numeric");
+        assert!(after <= before);
+
+        let validation = run
+            .evidence
+            .iter()
+            .find(|item| item.id == "ev-ssa-validation")
+            .expect("ssa validation evidence should exist");
+        assert_eq!(validation.value["is_valid"], json!(true));
+        assert_eq!(validation.value["issue_count"], json!(0));
+    }
+
+    #[test]
+    fn sample_corpus_manifest_lists_expected_cases() {
+        let manifest = read_json(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../eval/corpus/hello-aarch64-reduced.json"),
+        );
+
+        assert_eq!(manifest["id"], json!("hello-aarch64-reduced"));
+        assert_eq!(manifest["path"], json!("samples/hello_aarch64.elf"));
+        assert_eq!(
+            manifest["cases"].as_array().map(Vec::len),
+            Some(3),
+            "manifest should keep the three sample golden cases in sync"
+        );
+    }
+
+    fn sample_binary_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../samples/hello_aarch64.elf")
+    }
+
+    fn golden_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../eval/goldens")
+            .join(name)
+    }
+
+    fn read_json(path: PathBuf) -> Value {
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
     }
 }

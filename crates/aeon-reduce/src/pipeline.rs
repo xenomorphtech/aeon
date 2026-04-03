@@ -6,11 +6,11 @@ use std::collections::HashSet;
 
 use aeonil::{Expr, Stmt};
 
-use crate::reduce_adrp::{resolve_adrp_add, resolve_adrp_add_with_stats};
+use crate::reduce_adrp::resolve_adrp_add_with_stats;
 use crate::reduce_const::fold_constants;
 use crate::reduce_ext::fold_extensions;
-use crate::reduce_flags::{eliminate_dead_flags, fuse_flags, fuse_flags_with_stats};
-use crate::reduce_movk::{resolve_movk_chains, resolve_movk_chains_with_stats};
+use crate::reduce_flags::{eliminate_dead_flags, fuse_flags_with_stats};
+use crate::reduce_movk::resolve_movk_chains_with_stats;
 use crate::reduce_pair::flatten_pairs;
 use crate::reduce_stack::{detect_prologue, recognize_stack_frame, rewrite_stack_accesses};
 use crate::ssa::cfg::{build_cfg, Cfg};

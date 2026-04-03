@@ -1,0 +1,18 @@
+{
+  "function": "0x4000",
+  "binary_sha256": null,
+  "function_sha256": null,
+  "blocks": [
+    {
+      "addr": "0x4000",
+      "predecessors": [],
+      "successors": [],
+      "stmts": [
+        ["assign", "x0", ["imm", "0xbabe"]],
+        ["assign", "x0", ["imm", "0xcafebabe"]],
+        ["assign", "x0", ["imm", "0xbeefcafebabe"]],
+        ["assign", "x0", ["imm", "0xdeadbeefcafebabe"]]
+      ]
+    }
+  ]
+}
