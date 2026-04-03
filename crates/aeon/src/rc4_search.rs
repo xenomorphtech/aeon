@@ -1,437 +1,98 @@
-use ascent::ascent;
 use serde_json::{json, Value};
 
-use aeon_reduce::env::RegisterEnv;
+use aeon_reduce::ssa::types::{SsaExpr, SsaStmt};
 
 use crate::elf::LoadedBinary;
-use crate::il::*;
+use crate::engine::AeonEngine;
+use crate::facts::{FunctionFacts, PatternMatch, PatternSpec, StmtSite};
 use crate::lifter;
 
-// ═══════════════════════════════════════════════════════════════════════
-// Datalog: behavioral RC4 detector
-// ═══════════════════════════════════════════════════════════════════════
+const RC4_PRGA: &str = "RC4_PRGA (swap + keystream XOR)";
+const RC4_KSA: &str = "RC4_KSA (swap + 256 loop + mod256)";
+const RC4_SWAP_ONLY: &str = "swap_pattern (unconfirmed)";
 
-ascent! {
-    pub struct Rc4Hunter;
-
-    // ── Input facts (populated from IL dataflow analysis) ──────────
-
-    relation byte_load(u64, u64);           // (inst_addr, dest_var)
-    relation byte_store(u64, u64);          // (inst_addr, value_var)
-    relation is_xor(u64, u64, u64);         // (inst_addr, src1_var, src2_var)
-    relation flows_to(u64, u64);            // (producer_var, consumer_inst)
-    relation in_loop(u64);                  // (inst_addr)
-
-    // ── Derived: array swap detection ─────────────────────────────
-    // Two byte loads produce val_a, val_b.
-    // Two byte stores write them back cross-wired (val_b→addr_a, val_a→addr_b).
-
-    relation swap_detected(u64, u64, u64, u64); // (load1, load2, store1, store2)
-    swap_detected(l1, l2, s1, s2) <--
-        byte_load(l1, va),
-        byte_load(l2, vb),
-        byte_store(s1, vb),        // store1 writes val_b (from load2)
-        byte_store(s2, va),        // store2 writes val_a (from load1)
-        flows_to(vb, s1),          // dataflow: load2 → store1
-        flows_to(va, s2),          // dataflow: load1 → store2
-        in_loop(l1),
-        in_loop(s1),
-        if l1 != l2,
-        if s1 != s2;
-
-    // ── Derived: keystream XOR ────────────────────────────────────
-    // A byte loaded from memory flows into an XOR (PRGA output).
-
-    relation keystream_xor_detected(u64); // (xor_inst_addr)
-    keystream_xor_detected(xi) <--
-        byte_load(_li, kb),
-        is_xor(xi, kb, _),
-        flows_to(kb, xi),
-        in_loop(xi);
-    keystream_xor_detected(xi) <--
-        byte_load(_li, kb),
-        is_xor(xi, _, kb),
-        flows_to(kb, xi),
-        in_loop(xi);
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// Dataflow fact extraction from lifted IL
-// ═══════════════════════════════════════════════════════════════════════
-
-struct DataflowFacts {
-    byte_loads: Vec<(u64, u64)>,  // (inst_addr, dest_var = inst_addr)
-    byte_stores: Vec<(u64, u64)>, // (inst_addr, value_var)
-    xors: Vec<(u64, u64, u64)>,   // (inst_addr, src1_var, src2_var)
-    flows_to: Vec<(u64, u64)>,    // (producer_var, consumer_inst)
-    in_loop: Vec<u64>,            // inst addrs inside loops
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Rc4CandidateEvidence {
+    swap_instances: Vec<(StmtSite, StmtSite, StmtSite, StmtSite)>,
+    keystream_xor_sites: Vec<StmtSite>,
     has_256_bound: bool,
     has_mod256: bool,
+    byte_loads: usize,
+    byte_stores: usize,
+    flows_to_edges: usize,
+    loop_instructions: usize,
 }
-
-fn extract_dataflow(raw_bytes: &[u8], func_addr: u64) -> DataflowFacts {
-    let mut facts = DataflowFacts {
-        byte_loads: Vec::new(),
-        byte_stores: Vec::new(),
-        xors: Vec::new(),
-        flows_to: Vec::new(),
-        in_loop: Vec::new(),
-        has_256_bound: false,
-        has_mod256: false,
-    };
-
-    // ── Pass 1: decode, lift, collect edges ──────────────────────
-    let mut lifted: Vec<(u64, lifter::LiftResult)> = Vec::new();
-    let mut offset = 0usize;
-    let mut pc = func_addr;
-
-    while offset + 4 <= raw_bytes.len() {
-        let word = u32::from_le_bytes(raw_bytes[offset..offset + 4].try_into().unwrap());
-        let next_pc = if offset + 8 <= raw_bytes.len() {
-            Some(pc + 4)
-        } else {
-            None
-        };
-
-        if let Ok(insn) = bad64::decode(word, pc) {
-            lifted.push((pc, lifter::lift(&insn, pc, next_pc)));
-        }
-        offset += 4;
-        pc += 4;
-    }
-
-    // ── Loop detection: backward branch edges ────────────────────
-    for (src_pc, result) in &lifted {
-        for &target in &result.edges {
-            if target < *src_pc && target >= func_addr {
-                // Backward edge → all instructions in [target, src_pc] are in a loop
-                for (addr, _) in &lifted {
-                    if *addr >= target && *addr <= *src_pc {
-                        facts.in_loop.push(*addr);
-                    }
-                }
-            }
-        }
-    }
-
-    // ── Pass 2: def-use chain building + fact extraction ─────────
-    let mut env = RegisterEnv::new();
-
-    for (inst_pc, result) in &lifted {
-        let pc = *inst_pc;
-        process_stmt(&result.stmt, pc, &mut env, &mut facts);
-    }
-
-    facts
-}
-
-/// Process a single statement: extract reads → flows_to, classify, update env
-fn process_stmt(stmt: &Stmt, pc: u64, env: &mut RegisterEnv, facts: &mut DataflowFacts) {
-    match stmt {
-        Stmt::Assign { dst, src } => {
-            // Collect all register reads from src → flows_to
-            collect_reads(src, pc, env, facts);
-
-            // Check for constants in the expression
-            scan_constants(src, facts);
-
-            // Classify: byte load?
-            if is_byte_load(src) {
-                facts.byte_loads.push((pc, pc)); // dest_var = inst addr
-            }
-
-            // Classify: XOR?
-            if let Expr::Xor(a, b) = src {
-                let src1 = primary_reg(a)
-                    .and_then(|r| env.def_index(&r).map(|i| i as u64))
-                    .unwrap_or(0);
-                let src2 = primary_reg(b)
-                    .and_then(|r| env.def_index(&r).map(|i| i as u64))
-                    .unwrap_or(0);
-                if src1 != 0 && src2 != 0 {
-                    facts.xors.push((pc, src1, src2));
-                }
-            }
-
-            // Update env: this instruction defines dst
-            env.mark_def(dst.clone(), pc as usize);
-        }
-
-        Stmt::Store { addr, value, size } => {
-            collect_reads(addr, pc, env, facts);
-            collect_reads(value, pc, env, facts);
-            scan_constants(addr, facts);
-            scan_constants(value, facts);
-
-            if *size == 1 {
-                // Byte store — extract value variable from env
-                if let Some(r) = primary_reg(value) {
-                    if let Some(producer) = env.def_index(&r) {
-                        facts.byte_stores.push((pc, producer as u64));
-                    }
-                }
-            }
-        }
-
-        Stmt::SetFlags { expr } => {
-            collect_reads(expr, pc, env, facts);
-            scan_constants(expr, facts);
-        }
-
-        Stmt::Pair(a, b) => {
-            process_stmt(a, pc, env, facts);
-            process_stmt(b, pc + 1, env, facts); // +1 to distinguish sub-stmts
-        }
-
-        Stmt::CondBranch { cond, .. } => match cond {
-            BranchCond::Zero(e) | BranchCond::NotZero(e) => {
-                collect_reads(e, pc, env, facts);
-            }
-            BranchCond::BitZero(e, _) | BranchCond::BitNotZero(e, _) => {
-                collect_reads(e, pc, env, facts);
-            }
-            _ => {}
-        },
-
-        Stmt::Intrinsic { operands, .. } => {
-            for op in operands {
-                collect_reads(op, pc, env, facts);
-                scan_constants(op, facts);
-            }
-        }
-
-        _ => {}
-    }
-}
-
-/// Walk an expression tree, emit flows_to for every register read
-fn collect_reads(expr: &Expr, consumer_pc: u64, env: &RegisterEnv, facts: &mut DataflowFacts) {
-    match expr {
-        Expr::Reg(r) => {
-            if let Some(producer) = env.def_index(r) {
-                facts.flows_to.push((producer as u64, consumer_pc));
-            }
-        }
-        Expr::Add(a, b)
-        | Expr::Sub(a, b)
-        | Expr::Mul(a, b)
-        | Expr::Div(a, b)
-        | Expr::UDiv(a, b)
-        | Expr::And(a, b)
-        | Expr::Or(a, b)
-        | Expr::Xor(a, b)
-        | Expr::Shl(a, b)
-        | Expr::Lsr(a, b)
-        | Expr::Asr(a, b)
-        | Expr::Ror(a, b)
-        | Expr::FAdd(a, b)
-        | Expr::FSub(a, b)
-        | Expr::FMul(a, b)
-        | Expr::FDiv(a, b)
-        | Expr::FMax(a, b)
-        | Expr::FMin(a, b) => {
-            collect_reads(a, consumer_pc, env, facts);
-            collect_reads(b, consumer_pc, env, facts);
-        }
-        Expr::Neg(a)
-        | Expr::Not(a)
-        | Expr::Abs(a)
-        | Expr::FNeg(a)
-        | Expr::FAbs(a)
-        | Expr::FSqrt(a)
-        | Expr::FCvt(a)
-        | Expr::IntToFloat(a)
-        | Expr::FloatToInt(a)
-        | Expr::Clz(a)
-        | Expr::Cls(a)
-        | Expr::Rev(a)
-        | Expr::Rbit(a) => {
-            collect_reads(a, consumer_pc, env, facts);
-        }
-        Expr::Load { addr, .. } => {
-            collect_reads(addr, consumer_pc, env, facts);
-        }
-        Expr::SignExtend { src, .. } | Expr::ZeroExtend { src, .. } | Expr::Extract { src, .. } => {
-            collect_reads(src, consumer_pc, env, facts);
-        }
-        Expr::Insert { dst, src, .. } => {
-            collect_reads(dst, consumer_pc, env, facts);
-            collect_reads(src, consumer_pc, env, facts);
-        }
-        Expr::CondSelect {
-            if_true, if_false, ..
-        } => {
-            collect_reads(if_true, consumer_pc, env, facts);
-            collect_reads(if_false, consumer_pc, env, facts);
-        }
-        Expr::Intrinsic { operands, .. } => {
-            for op in operands {
-                collect_reads(op, consumer_pc, env, facts);
-            }
-        }
-        _ => {} // Imm, FImm, AdrpImm, etc.
-    }
-}
-
-/// Scan expression for 256 constant and AND 0xff
-fn scan_constants(expr: &Expr, facts: &mut DataflowFacts) {
-    match expr {
-        Expr::Imm(256) => {
-            facts.has_256_bound = true;
-        }
-        Expr::And(a, b) => {
-            if matches!(a.as_ref(), Expr::Imm(0xff)) || matches!(b.as_ref(), Expr::Imm(0xff)) {
-                facts.has_mod256 = true;
-            }
-            scan_constants(a, facts);
-            scan_constants(b, facts);
-        }
-        Expr::Sub(a, b) => {
-            scan_constants(a, facts);
-            scan_constants(b, facts);
-        }
-        Expr::Add(a, b)
-        | Expr::Mul(a, b)
-        | Expr::Or(a, b)
-        | Expr::Xor(a, b)
-        | Expr::Shl(a, b)
-        | Expr::Lsr(a, b) => {
-            scan_constants(a, facts);
-            scan_constants(b, facts);
-        }
-        Expr::Load { addr, .. } => {
-            scan_constants(addr, facts);
-        }
-        Expr::SignExtend { src, .. } | Expr::ZeroExtend { src, .. } => {
-            scan_constants(src, facts);
-        }
-        _ => {}
-    }
-}
-
-fn is_byte_load(expr: &Expr) -> bool {
-    match expr {
-        Expr::Load { size: 1, .. } => true,
-        Expr::SignExtend { src, .. } | Expr::ZeroExtend { src, .. } => is_byte_load(src),
-        _ => false,
-    }
-}
-
-fn primary_reg(expr: &Expr) -> Option<Reg> {
-    match expr {
-        Expr::Reg(r) => Some(r.clone()),
-        _ => None,
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// Two-phase search
-// ═══════════════════════════════════════════════════════════════════════
 
 pub fn search(binary: &LoadedBinary) -> Value {
+    let mut engine = AeonEngine::with_binary(binary.clone());
+    search_with_engine(binary, &mut engine)
+}
+
+pub fn search_with_engine(binary: &LoadedBinary, engine: &mut AeonEngine) -> Value {
     let mut phase1_count = 0u64;
     let mut phase2_count = 0u64;
-    let mut verified: Vec<Value> = Vec::new();
+    let mut verified = Vec::new();
 
     for func in &binary.functions {
-        // Size filter: RC4 is compact
         if func.size < 48 || func.size > 4000 {
             continue;
         }
 
         let raw_bytes = match binary.function_bytes(func) {
-            Some(b) => b,
+            Some(bytes) => bytes,
             None => continue,
         };
 
-        // ── Phase 1: cheap pre-filter on extracted facts ─────────
-        let facts = extract_dataflow(raw_bytes, func.addr);
+        let Some(analysis) = engine.function_analysis(func.addr) else {
+            continue;
+        };
+        let evidence = extract_candidate_evidence(&analysis.facts);
 
-        // Must have the structural minimum for a swap
-        if facts.byte_loads.len() < 2 || facts.byte_stores.len() < 2 {
+        if !passes_phase1(&evidence) {
             continue;
         }
-        // Must have some loop
-        if facts.in_loop.is_empty() {
-            continue;
-        }
-
         phase1_count += 1;
 
-        // ── Phase 2: Datalog behavioral verification ─────────────
-        let mut hunter = Rc4Hunter::default();
-
-        for &(addr, dest) in &facts.byte_loads {
-            hunter.byte_load.push((addr, dest));
-        }
-        for &(addr, val) in &facts.byte_stores {
-            hunter.byte_store.push((addr, val));
-        }
-        for &(addr, s1, s2) in &facts.xors {
-            hunter.is_xor.push((addr, s1, s2));
-        }
-        for &(prod, cons) in &facts.flows_to {
-            hunter.flows_to.push((prod, cons));
-        }
-        for &addr in &facts.in_loop {
-            hunter.in_loop.push((addr,));
-        }
-
-        hunter.run();
-
-        if hunter.swap_detected.is_empty() {
+        if evidence.swap_instances.is_empty() {
             continue;
         }
-
         phase2_count += 1;
 
-        // ── Build result for this verified candidate ─────────────
-        let has_ks_xor = !hunter.keystream_xor_detected.is_empty();
-        let kind = if has_ks_xor {
-            "RC4_PRGA (swap + keystream XOR)"
-        } else if facts.has_256_bound && facts.has_mod256 {
-            "RC4_KSA (swap + 256 loop + mod256)"
-        } else {
-            "swap_pattern (unconfirmed)"
-        };
-
-        let swaps: Vec<Value> = hunter
-            .swap_detected
+        let classification = classify_evidence(&evidence);
+        let swaps: Vec<Value> = evidence
+            .swap_instances
             .iter()
             .take(3)
-            .map(|(l1, l2, s1, s2)| {
+            .map(|(load1, load2, store1, store2)| {
                 json!({
-                    "load1": format!("0x{:x}", l1),
-                    "load2": format!("0x{:x}", l2),
-                    "store1": format!("0x{:x}", s1),
-                    "store2": format!("0x{:x}", s2),
+                    "load1": format_stmt_site(&analysis.facts, *load1),
+                    "load2": format_stmt_site(&analysis.facts, *load2),
+                    "store1": format_stmt_site(&analysis.facts, *store1),
+                    "store2": format_stmt_site(&analysis.facts, *store2),
                 })
             })
             .collect();
-
-        let xor_sites: Vec<String> = hunter
-            .keystream_xor_detected
+        let xor_sites: Vec<String> = evidence
+            .keystream_xor_sites
             .iter()
-            .map(|(a,)| format!("0x{:x}", a))
+            .map(|site| format_stmt_site(&analysis.facts, *site))
             .collect();
-
-        // Full IL listing for the candidate
         let listing = disassemble_function(raw_bytes, func.addr);
 
         verified.push(json!({
             "address": format!("0x{:x}", func.addr),
             "size": func.size,
             "name": func.name.as_deref().unwrap_or("(unnamed)"),
-            "classification": kind,
+            "classification": classification,
             "evidence": {
                 "swap_instances": swaps,
                 "keystream_xor_sites": xor_sites,
-                "has_256_bound": facts.has_256_bound,
-                "has_mod256": facts.has_mod256,
-                "byte_loads": facts.byte_loads.len(),
-                "byte_stores": facts.byte_stores.len(),
-                "flows_to_edges": facts.flows_to.len(),
-                "loop_instructions": facts.in_loop.len(),
+                "has_256_bound": evidence.has_256_bound,
+                "has_mod256": evidence.has_mod256,
+                "byte_loads": evidence.byte_loads,
+                "byte_stores": evidence.byte_stores,
+                "flows_to_edges": evidence.flows_to_edges,
+                "loop_instructions": evidence.loop_instructions,
             },
             "il_listing": listing,
         }));
@@ -439,11 +100,77 @@ pub fn search(binary: &LoadedBinary) -> Value {
 
     json!({
         "search": "rc4_behavioral",
-        "method": "datalog_subgraph_isomorphism",
+        "method": "shared_facts_ssa_patterns",
         "phase1_prefiltered": phase1_count,
         "phase2_verified": phase2_count,
         "candidates": verified,
     })
+}
+
+fn extract_candidate_evidence(facts: &FunctionFacts) -> Rc4CandidateEvidence {
+    let swap_instances = facts
+        .find_pattern(PatternSpec::LoopByteSwap)
+        .into_iter()
+        .filter_map(|entry| match entry {
+            PatternMatch::ByteSwap {
+                load1,
+                load2,
+                store1,
+                store2,
+            } => Some((load1, load2, store1, store2)),
+            PatternMatch::KeystreamXor { .. } => None,
+        })
+        .collect();
+    let keystream_xor_sites = facts
+        .find_pattern(PatternSpec::LoopKeystreamXor)
+        .into_iter()
+        .filter_map(|entry| match entry {
+            PatternMatch::KeystreamXor { stmt } => Some(stmt),
+            PatternMatch::ByteSwap { .. } => None,
+        })
+        .collect();
+
+    Rc4CandidateEvidence {
+        swap_instances,
+        keystream_xor_sites,
+        has_256_bound: facts.has_immediate_value(256)
+            || facts.get_constants().iter().any(|fact| fact.value == 256),
+        has_mod256: facts.has_and_mask(0xff),
+        byte_loads: facts
+            .definitions()
+            .iter()
+            .filter(|fact| matches!(fact.expr, SsaExpr::Load { size: 1, .. }))
+            .count(),
+        byte_stores: facts
+            .stmt_sites()
+            .iter()
+            .filter(|site| matches!(facts.stmt(**site), Some(SsaStmt::Store { size: 1, .. })))
+            .count(),
+        flows_to_edges: facts.uses().len(),
+        loop_instructions: facts
+            .stmt_sites()
+            .iter()
+            .filter(|site| facts.is_in_loop(**site))
+            .count(),
+    }
+}
+
+fn passes_phase1(evidence: &Rc4CandidateEvidence) -> bool {
+    evidence.byte_loads >= 2 && evidence.byte_stores >= 2 && evidence.loop_instructions > 0
+}
+
+fn classify_evidence(evidence: &Rc4CandidateEvidence) -> &'static str {
+    if !evidence.keystream_xor_sites.is_empty() {
+        RC4_PRGA
+    } else if evidence.has_256_bound && evidence.has_mod256 {
+        RC4_KSA
+    } else {
+        RC4_SWAP_ONLY
+    }
+}
+
+fn format_stmt_site(facts: &FunctionFacts, site: StmtSite) -> String {
+    format!("0x{:x}", facts.stmt_address(site))
 }
 
 fn disassemble_function(raw_bytes: &[u8], func_addr: u64) -> Vec<Value> {
@@ -476,4 +203,158 @@ fn disassemble_function(raw_bytes: &[u8], func_addr: u64) -> Vec<Value> {
     }
 
     listing
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::facts::extract_function_facts;
+    use aeon_reduce::ssa::construct::{SsaBlock, SsaFunction};
+    use aeon_reduce::ssa::types::{RegLocation, RegWidth, SsaBranchCond, SsaExpr, SsaStmt, SsaVar};
+    use aeonil::Condition;
+
+    fn var(index: u8, version: u32) -> SsaVar {
+        SsaVar {
+            loc: RegLocation::Gpr(index),
+            version,
+            width: RegWidth::W64,
+        }
+    }
+
+    fn block(
+        id: u32,
+        addr: u64,
+        stmts: Vec<SsaStmt>,
+        successors: Vec<u32>,
+        predecessors: Vec<u32>,
+    ) -> SsaBlock {
+        SsaBlock {
+            id,
+            addr,
+            stmts,
+            successors,
+            predecessors,
+        }
+    }
+
+    fn build_candidate(include_xor: bool, include_ksa_hints: bool) -> FunctionFacts {
+        let load_a = var(0, 1);
+        let load_b = var(1, 1);
+        let mixed = var(2, 1);
+        let loop_counter = var(3, 0);
+        let addr_a = var(4, 0);
+        let addr_b = var(5, 0);
+        let addr_c = var(6, 0);
+        let input = var(7, 0);
+        let bound = var(8, 1);
+        let masked = var(9, 1);
+
+        let mut header_stmts = Vec::new();
+        if include_ksa_hints {
+            header_stmts.push(SsaStmt::Assign {
+                dst: bound,
+                src: SsaExpr::Imm(256),
+            });
+            header_stmts.push(SsaStmt::Assign {
+                dst: masked,
+                src: SsaExpr::And(
+                    Box::new(SsaExpr::Var(loop_counter)),
+                    Box::new(SsaExpr::Imm(0xff)),
+                ),
+            });
+        }
+        header_stmts.push(SsaStmt::Branch {
+            target: SsaExpr::Imm(0x1100),
+        });
+
+        let mut loop_stmts = vec![
+            SsaStmt::Assign {
+                dst: load_a,
+                src: SsaExpr::Load {
+                    addr: Box::new(SsaExpr::Var(addr_a)),
+                    size: 1,
+                },
+            },
+            SsaStmt::Assign {
+                dst: load_b,
+                src: SsaExpr::Load {
+                    addr: Box::new(SsaExpr::Var(addr_b)),
+                    size: 1,
+                },
+            },
+            SsaStmt::Store {
+                addr: SsaExpr::Var(addr_a),
+                value: SsaExpr::Var(load_b),
+                size: 1,
+            },
+            SsaStmt::Store {
+                addr: SsaExpr::Var(addr_c),
+                value: SsaExpr::Var(load_a),
+                size: 1,
+            },
+        ];
+        if include_xor {
+            loop_stmts.push(SsaStmt::Assign {
+                dst: mixed,
+                src: SsaExpr::Xor(
+                    Box::new(SsaExpr::Var(load_a)),
+                    Box::new(SsaExpr::Var(input)),
+                ),
+            });
+        }
+        loop_stmts.push(SsaStmt::CondBranch {
+            cond: SsaBranchCond::Compare {
+                cond: Condition::NE,
+                lhs: Box::new(SsaExpr::Var(loop_counter)),
+                rhs: Box::new(SsaExpr::Imm(0)),
+            },
+            target: SsaExpr::Imm(0x1000),
+            fallthrough: 2,
+        });
+
+        let func = SsaFunction {
+            entry: 0,
+            blocks: vec![
+                block(0, 0x1000, header_stmts, vec![1], vec![]),
+                block(1, 0x1100, loop_stmts, vec![0, 2], vec![0, 1]),
+                block(2, 0x1200, vec![SsaStmt::Ret], vec![], vec![1]),
+            ],
+        };
+
+        extract_function_facts(&func)
+    }
+
+    #[test]
+    fn rc4_regression_prga_classification_uses_shared_facts() {
+        let facts = build_candidate(true, true);
+        let evidence = extract_candidate_evidence(&facts);
+
+        assert!(passes_phase1(&evidence));
+        assert_eq!(classify_evidence(&evidence), RC4_PRGA);
+        assert_eq!(evidence.swap_instances.len(), 1);
+        assert_eq!(evidence.keystream_xor_sites.len(), 1);
+    }
+
+    #[test]
+    fn rc4_regression_ksa_classification_uses_shared_facts() {
+        let facts = build_candidate(false, true);
+        let evidence = extract_candidate_evidence(&facts);
+
+        assert!(passes_phase1(&evidence));
+        assert_eq!(classify_evidence(&evidence), RC4_KSA);
+        assert_eq!(evidence.swap_instances.len(), 1);
+        assert!(evidence.keystream_xor_sites.is_empty());
+    }
+
+    #[test]
+    fn rc4_regression_swap_only_classification_uses_shared_facts() {
+        let facts = build_candidate(false, false);
+        let evidence = extract_candidate_evidence(&facts);
+
+        assert!(passes_phase1(&evidence));
+        assert_eq!(classify_evidence(&evidence), RC4_SWAP_ONLY);
+        assert_eq!(evidence.swap_instances.len(), 1);
+        assert!(!evidence.has_256_bound);
+        assert!(!evidence.has_mod256);
+    }
 }

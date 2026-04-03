@@ -492,14 +492,7 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         }
         Op::CCMP | Op::CCMN => {
             ft(&mut edges, next_pc);
-            lift_intrinsic_all(
-                operands,
-                if insn.op() == Op::CCMP {
-                    "ccmp"
-                } else {
-                    "ccmn"
-                },
-            )
+            lift_cond_compare(operands, insn.op() == Op::CCMN)
         }
 
         // ── Conditional select ─────────────────────────────────────
@@ -1312,6 +1305,22 @@ fn lift_csel(operands: &[Operand], make: fn(Expr, Expr, Condition) -> Expr) -> S
     }
 }
 
+fn lift_cond_compare(operands: &[Operand], is_add: bool) -> Stmt {
+    let lhs = expr_op(operands, 0);
+    let rhs = expr_op(operands, 1);
+    let nzcv = Expr::Imm(imm_val(operands, 2) & 0xf);
+    let cond = cond_op(operands, 3);
+    let compare_expr = if is_add {
+        e_add(lhs, rhs)
+    } else {
+        e_sub(lhs, rhs)
+    };
+
+    Stmt::SetFlags {
+        expr: e_cond_select(cond, compare_expr, nzcv),
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Operand extraction
 // ═══════════════════════════════════════════════════════════════════════
@@ -1940,6 +1949,42 @@ mod tests {
                 addr: e_add(Expr::Reg(Reg::X(0)), Expr::Imm(8)),
                 value: Expr::Reg(Reg::XZR),
                 size: 4,
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_ccmp_register_form_as_conditional_flag_update() {
+        let pc = 0x1000;
+        let result = lift_word(0x7a57_00c1, pc); // ccmp w6, w23, #0x1, eq
+
+        assert_eq!(
+            result.stmt,
+            Stmt::SetFlags {
+                expr: e_cond_select(
+                    Condition::EQ,
+                    e_sub(Expr::Reg(Reg::W(6)), Expr::Reg(Reg::W(23))),
+                    Expr::Imm(0x1),
+                ),
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_ccmn_immediate_form_as_conditional_flag_update() {
+        let pc = 0x2000;
+        let result = lift_word(0xba4a_280d, pc); // ccmn x0, #0xa, #0xd, hs
+
+        assert_eq!(
+            result.stmt,
+            Stmt::SetFlags {
+                expr: e_cond_select(
+                    Condition::CS,
+                    e_add(Expr::Reg(Reg::X(0)), Expr::Imm(0xa)),
+                    Expr::Imm(0xd),
+                ),
             }
         );
         assert_eq!(result.edges, vec![pc + 4]);

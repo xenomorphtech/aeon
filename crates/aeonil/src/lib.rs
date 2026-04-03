@@ -1,6 +1,6 @@
 /// AeonIL — a BNIL-like intermediate language for ARM64.
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Reg {
     X(u8),     // 64-bit general purpose
     W(u8),     // 32-bit general purpose

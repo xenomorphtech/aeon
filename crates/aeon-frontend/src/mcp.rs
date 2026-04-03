@@ -124,3 +124,56 @@ fn write_error(out: &mut impl Write, id: Value, code: i64, message: &str) {
     let _ = writeln!(out, "{}", serde_json::to_string(&response).unwrap());
     let _ = out.flush();
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use serde_json::json;
+
+    use super::dispatch;
+    use crate::service::AeonFrontend;
+
+    fn sample_binary_path() -> String {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        manifest_dir
+            .join("../../samples/hello_aarch64.elf")
+            .display()
+            .to_string()
+    }
+
+    #[test]
+    fn mcp_tools_call_smoke_for_reduced_il() {
+        let mut frontend = AeonFrontend::new();
+
+        let load = dispatch(
+            "tools/call",
+            &json!({
+                "name": "load_binary",
+                "arguments": { "path": sample_binary_path() }
+            }),
+            &mut frontend,
+        )
+        .expect("load_binary should succeed");
+        assert_eq!(load["isError"], false);
+
+        let response = dispatch(
+            "tools/call",
+            &json!({
+                "name": "get_reduced_il",
+                "arguments": { "addr": "0x718" }
+            }),
+            &mut frontend,
+        )
+        .expect("get_reduced_il should succeed");
+
+        let content = response["content"][0]["text"]
+            .as_str()
+            .expect("MCP tool response should contain text");
+        let parsed: serde_json::Value =
+            serde_json::from_str(content).expect("tool content should be valid JSON");
+
+        assert_eq!(response["isError"], false);
+        assert_eq!(parsed["artifact"], "reduced_il");
+    }
+}

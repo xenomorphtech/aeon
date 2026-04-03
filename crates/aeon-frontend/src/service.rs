@@ -32,6 +32,9 @@ impl AeonFrontend {
             "search_analysis_names" => self.tool_search_analysis_names(args),
             "get_il" => self.tool_get_il(args),
             "get_function_il" => self.tool_get_function_il(args),
+            "get_reduced_il" => self.tool_get_reduced_il(args),
+            "get_ssa" => self.tool_get_ssa(args),
+            "get_stack_frame" => self.tool_get_stack_frame(args),
             "get_function_cfg" => self.tool_get_function_cfg(args),
             "get_xrefs" => self.tool_get_xrefs(args),
             "scan_pointers" => self.tool_scan_pointers(),
@@ -136,6 +139,25 @@ impl AeonFrontend {
 
     fn tool_get_function_il(&self, args: &Value) -> Result<Value, String> {
         self.tool_get_il(args)
+    }
+
+    fn tool_get_reduced_il(&self, args: &Value) -> Result<Value, String> {
+        let session = self.require_session()?;
+        let addr = parse_addr_arg(args)?;
+        session.get_reduced_il(addr)
+    }
+
+    fn tool_get_ssa(&self, args: &Value) -> Result<Value, String> {
+        let session = self.require_session()?;
+        let addr = parse_addr_arg(args)?;
+        let optimize = parse_bool_arg(args, "optimize", true)?;
+        session.get_ssa(addr, optimize)
+    }
+
+    fn tool_get_stack_frame(&self, args: &Value) -> Result<Value, String> {
+        let session = self.require_session()?;
+        let addr = parse_addr_arg(args)?;
+        session.get_stack_frame(addr)
     }
 
     fn tool_get_il(&self, args: &Value) -> Result<Value, String> {
@@ -347,6 +369,25 @@ pub fn tools_list() -> Value {
                     "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"}
                 }, "required": ["addr"]})),
 
+            tool_schema("get_reduced_il",
+                "Return block-structured reduced AeonIL for the function containing a given address.",
+                json!({"type": "object", "properties": {
+                    "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"}
+                }, "required": ["addr"]})),
+
+            tool_schema("get_ssa",
+                "Return reduced SSA form for the function containing a given address, optionally optimized.",
+                json!({"type": "object", "properties": {
+                    "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"},
+                    "optimize": {"type": "boolean", "description": "Run SSA optimization passes before returning JSON", "default": true}
+                }, "required": ["addr"]})),
+
+            tool_schema("get_stack_frame",
+                "Summarize the detected stack frame and visible stack-slot accesses for the function containing a given address.",
+                json!({"type": "object", "properties": {
+                    "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"}
+                }, "required": ["addr"]})),
+
             tool_schema("get_function_cfg",
                 "Get the Control Flow Graph for a function. Returns adjacency list, terminal blocks, and reachability from Datalog analysis.",
                 json!({"type": "object", "properties": {
@@ -495,10 +536,33 @@ fn escape_markdown_cell(value: &str) -> String {
 mod tests {
     use std::path::PathBuf;
 
-    use super::tools_markdown_table;
+    use serde_json::{json, Value};
+
+    use super::{tools_list, tools_markdown_table, AeonFrontend};
 
     const README_BEGIN: &str = "<!-- BEGIN GENERATED TOOL SURFACE -->";
     const README_END: &str = "<!-- END GENERATED TOOL SURFACE -->";
+
+    fn sample_binary_path() -> String {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        manifest_dir
+            .join("../../samples/hello_aarch64.elf")
+            .display()
+            .to_string()
+    }
+
+    fn has_stack_slot(value: &Value) -> bool {
+        match value {
+            Value::Object(map) => {
+                map.get("op")
+                    .and_then(Value::as_str)
+                    .is_some_and(|op| op == "stack_slot")
+                    || map.values().any(has_stack_slot)
+            }
+            Value::Array(items) => items.iter().any(has_stack_slot),
+            _ => false,
+        }
+    }
 
     #[test]
     fn readme_tool_surface_matches_generated_table() {
@@ -520,6 +584,50 @@ mod tests {
         assert_eq!(
             actual, expected,
             "README tool surface is out of date; regenerate it from tools_markdown_table()"
+        );
+    }
+
+    #[test]
+    fn tools_list_registers_reduction_tools() {
+        let tool_list = tools_list();
+        let tools = tool_list["tools"]
+            .as_array()
+            .expect("tools list should be an array");
+
+        assert!(tools.iter().any(|tool| tool["name"] == "get_reduced_il"));
+        assert!(tools.iter().any(|tool| tool["name"] == "get_ssa"));
+        assert!(tools.iter().any(|tool| tool["name"] == "get_stack_frame"));
+    }
+
+    #[test]
+    fn frontend_call_tool_smoke_for_reduction_artifacts() {
+        let mut frontend = AeonFrontend::new();
+        frontend
+            .call_tool("load_binary", &json!({ "path": sample_binary_path() }))
+            .expect("sample binary should load");
+
+        let reduced = frontend
+            .call_tool("get_reduced_il", &json!({ "addr": "0x718" }))
+            .expect("reduced IL should succeed");
+        assert_eq!(reduced["artifact"], "reduced_il");
+        assert!(has_stack_slot(&reduced));
+
+        let ssa = frontend
+            .call_tool("get_ssa", &json!({ "addr": "0x718", "optimize": true }))
+            .expect("SSA should succeed");
+        assert_eq!(ssa["artifact"], "ssa");
+        assert_eq!(ssa["optimized"], true);
+
+        let frame = frontend
+            .call_tool("get_stack_frame", &json!({ "addr": "0x718" }))
+            .expect("stack frame should succeed");
+        assert_eq!(frame["artifact"], "stack_frame");
+        assert_eq!(frame["detected"], true);
+        assert!(
+            frame["slots"]
+                .as_array()
+                .is_some_and(|slots| !slots.is_empty()),
+            "stack frame output should expose stack-slot summaries"
         );
     }
 }

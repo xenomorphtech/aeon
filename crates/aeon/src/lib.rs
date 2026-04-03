@@ -1,8 +1,12 @@
 pub mod analysis;
 pub mod api;
 pub mod components;
+pub mod coverage;
+pub mod emulation;
 pub mod elf;
 pub mod engine;
+pub mod facts;
+pub mod function_ir;
 pub mod il;
 pub mod lifter;
 pub mod object_layout;

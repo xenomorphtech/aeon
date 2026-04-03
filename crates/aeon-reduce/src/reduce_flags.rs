@@ -51,11 +51,16 @@ fn writes_flags(stmt: &Stmt) -> bool {
 /// For `SetFlags` + `Assign { dst, src: CondSelect { cond, .. } }`:
 ///   The `SetFlags` is removed (the `CondSelect` already carries the condition code).
 pub fn fuse_flags(stmts: Vec<Stmt>) -> Vec<Stmt> {
+    fuse_flags_with_stats(stmts).0
+}
+
+pub(crate) fn fuse_flags_with_stats(stmts: Vec<Stmt>) -> (Vec<Stmt>, usize) {
     let len = stmts.len();
     // Track which indices have been consumed (removed) by fusion.
     let mut consumed = vec![false; len];
     // Collect output: we'll rebuild from the original list, applying replacements.
     let mut replacements: Vec<Option<Stmt>> = vec![None; len];
+    let mut fusions = 0usize;
 
     for i in 0..len {
         if consumed[i] {
@@ -88,6 +93,7 @@ pub fn fuse_flags(stmts: Vec<Stmt>) -> Vec<Stmt> {
                                     fallthrough: *fallthrough,
                                 });
                                 consumed[i] = true;
+                                fusions += 1;
                                 found = true;
                             }
                             Stmt::Assign {
@@ -97,6 +103,7 @@ pub fn fuse_flags(stmts: Vec<Stmt>) -> Vec<Stmt> {
                                 // The CondSelect already carries the condition code.
                                 // Just remove the SetFlags; the CondSelect is unchanged.
                                 consumed[i] = true;
+                                fusions += 1;
                                 found = true;
                             }
                             _ => {}
@@ -120,7 +127,7 @@ pub fn fuse_flags(stmts: Vec<Stmt>) -> Vec<Stmt> {
             out.push(stmts[i].clone());
         }
     }
-    out
+    (out, fusions)
 }
 
 /// Backward liveness pass: remove `SetFlags` statements whose flags are never

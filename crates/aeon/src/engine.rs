@@ -7,7 +7,10 @@ use serde_json::{json, Value};
 
 use crate::analysis::AeonAnalysis;
 use crate::components::{Address, BelongsToFunction, CfgEdges, LiftedIL, RawInstruction};
+use crate::coverage::analyze_lift_coverage;
 use crate::elf::LoadedBinary;
+use crate::facts::{analyze_function, FunctionAnalysis};
+use crate::function_ir::DecodedFunction;
 use crate::il::Stmt;
 use crate::lifter;
 
@@ -15,6 +18,7 @@ pub struct AeonEngine {
     pub world: World,
     pub binary: Option<LoadedBinary>,
     semantic: HashMap<u64, SemanticContext>,
+    function_analyses: HashMap<u64, FunctionAnalysis>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
@@ -50,7 +54,14 @@ impl AeonEngine {
             world: World::new(),
             binary: None,
             semantic: HashMap::new(),
+            function_analyses: HashMap::new(),
         }
+    }
+
+    pub fn with_binary(binary: LoadedBinary) -> Self {
+        let mut engine = Self::new();
+        engine.binary = Some(binary);
+        engine
     }
 
     pub fn load_binary(&mut self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -62,6 +73,7 @@ impl AeonEngine {
             binary.functions.len()
         );
         self.binary = Some(binary);
+        self.function_analyses.clear();
         Ok(())
     }
 
@@ -84,6 +96,20 @@ impl AeonEngine {
 
         self.ingest_function(func_addr, &raw_bytes);
         true
+    }
+
+    pub fn function_analysis(&mut self, func_addr: u64) -> Option<&FunctionAnalysis> {
+        if !self.function_analyses.contains_key(&func_addr) {
+            let raw_bytes = {
+                let binary = self.binary.as_ref()?;
+                let func = binary.functions.iter().find(|f| f.addr == func_addr)?;
+                binary.function_bytes(func)?.to_vec()
+            };
+            let analysis = analyze_function(&raw_bytes, func_addr);
+            self.function_analyses.insert(func_addr, analysis);
+        }
+
+        self.function_analyses.get(&func_addr)
     }
 
     /// Ingest raw function bytes into ECS
@@ -122,6 +148,22 @@ impl AeonEngine {
 
             if !result.edges.is_empty() {
                 entity.insert(CfgEdges(result.edges));
+            }
+        }
+    }
+
+    /// Ingest an already-decoded function into ECS without re-running decode/lift.
+    pub fn ingest_decoded_function(&mut self, decoded: &DecodedFunction) {
+        for instruction in &decoded.instructions {
+            let mut entity = self.world.spawn((
+                Address(instruction.addr),
+                RawInstruction(instruction.asm.clone()),
+                LiftedIL(instruction.stmt.clone()),
+                BelongsToFunction(decoded.func_addr),
+            ));
+
+            if !instruction.edges.is_empty() {
+                entity.insert(CfgEdges(instruction.edges.clone()));
             }
         }
     }
@@ -280,60 +322,15 @@ impl AeonEngine {
             None => return json!({"error": "no binary loaded"}),
         };
 
-        let text = binary.text_bytes();
-        let base_addr = binary.text_section_addr;
-
-        let mut total: u64 = 0;
-        let mut decode_errors: u64 = 0;
-        let mut proper_il: u64 = 0;
-        let mut intrinsic_count: u64 = 0;
-        let mut nop_count: u64 = 0;
-
-        let mut offset = 0usize;
-        let mut pc = base_addr;
-
-        while offset + 4 <= text.len() {
-            let word = u32::from_le_bytes(text[offset..offset + 4].try_into().unwrap());
-            total += 1;
-
-            match bad64::decode(word, pc) {
-                Ok(insn) => {
-                    let result = lifter::lift(&insn, pc, Some(pc + 4));
-                    match &result.stmt {
-                        Stmt::Nop => nop_count += 1,
-                        Stmt::Intrinsic { .. } => intrinsic_count += 1,
-                        Stmt::Assign {
-                            src: crate::il::Expr::Intrinsic { .. },
-                            ..
-                        } => intrinsic_count += 1,
-                        Stmt::Pair(_, _) => proper_il += 1,
-                        _ => proper_il += 1,
-                    }
-                }
-                Err(_) => decode_errors += 1,
-            }
-
-            offset += 4;
-            pc += 4;
-        }
-
+        let stats = analyze_lift_coverage(binary.text_bytes(), binary.text_section_addr);
         let named_functions = binary.functions.iter().filter(|f| f.name.is_some()).count();
 
-        json!({
-            "total_instructions": total,
-            "decode_errors": decode_errors,
-            "decode_error_pct": format!("{:.4}%", decode_errors as f64 / total as f64 * 100.0),
-            "proper_il": proper_il,
-            "proper_il_pct": format!("{:.2}%", proper_il as f64 / total as f64 * 100.0),
-            "intrinsic": intrinsic_count,
-            "intrinsic_pct": format!("{:.2}%", intrinsic_count as f64 / total as f64 * 100.0),
-            "nop": nop_count,
-            "nop_pct": format!("{:.2}%", nop_count as f64 / total as f64 * 100.0),
-            "total_functions": binary.functions.len(),
-            "named_functions": named_functions,
-            "text_section_addr": format!("0x{:x}", binary.text_section_addr),
-            "text_section_size": format!("0x{:x}", binary.text_section_size),
-        })
+        stats.to_json(
+            binary.functions.len(),
+            named_functions,
+            binary.text_section_addr,
+            binary.text_section_size,
+        )
     }
 }
 

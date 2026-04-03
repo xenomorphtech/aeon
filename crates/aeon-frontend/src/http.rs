@@ -110,3 +110,47 @@ fn respond_json(request: Request, status: u16, body: Value) {
 
     let _ = request.respond(response);
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use serde_json::json;
+
+    use super::handle_call;
+    use crate::service::AeonFrontend;
+
+    fn sample_binary_path() -> String {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        manifest_dir
+            .join("../../samples/hello_aarch64.elf")
+            .display()
+            .to_string()
+    }
+
+    #[test]
+    fn http_call_smoke_for_stack_frame_tool() {
+        let mut frontend = AeonFrontend::new();
+
+        let (status, load) = handle_call(
+            json!({
+                "name": "load_binary",
+                "arguments": { "path": sample_binary_path() }
+            }),
+            &mut frontend,
+        );
+        assert_eq!(status, 200);
+        assert_eq!(load["ok"], true);
+
+        let (status, response) = handle_call(
+            json!({
+                "name": "get_stack_frame",
+                "arguments": { "addr": "0x718" }
+            }),
+            &mut frontend,
+        );
+        assert_eq!(status, 200);
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["result"]["artifact"], "stack_frame");
+    }
+}

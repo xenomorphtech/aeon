@@ -172,6 +172,9 @@ Generated from `crates/aeon-frontend/src/service.rs` via `cargo run -p aeon-fron
 | `search_analysis_names` | Search analysis names attached to addresses using a regex pattern. |
 | `get_il` | Get the lifted AeonIL intermediate language listing for the function containing a given address. |
 | `get_function_il` | Backwards-compatible alias for get_il. |
+| `get_reduced_il` | Return block-structured reduced AeonIL for the function containing a given address. |
+| `get_ssa` | Return reduced SSA form for the function containing a given address, optionally optimized. |
+| `get_stack_frame` | Summarize the detected stack frame and visible stack-slot accesses for the function containing a given address. |
 | `get_function_cfg` | Get the Control Flow Graph for a function. Returns adjacency list, terminal blocks, and reachability from Datalog analysis. |
 | `get_xrefs` | Get cross-references for an address: outgoing calls from the function, and incoming calls from other functions. |
 | `scan_pointers` | Scan non-executable mapped sections for pointer-sized values that reference other locations in the binary, classifying data-to-data and data-to-code edges. |

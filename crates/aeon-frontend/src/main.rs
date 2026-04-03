@@ -9,6 +9,19 @@ enum Command {
         binary_path: String,
         addr: u64,
     },
+    ReducedIl {
+        binary_path: String,
+        addr: u64,
+    },
+    Ssa {
+        binary_path: String,
+        addr: u64,
+        optimize: bool,
+    },
+    StackFrame {
+        binary_path: String,
+        addr: u64,
+    },
     Pointers {
         binary_path: String,
     },
@@ -48,6 +61,9 @@ fn main() {
         Command::Coverage { binary_path }
         | Command::Rc4 { binary_path }
         | Command::Func { binary_path, .. }
+        | Command::ReducedIl { binary_path, .. }
+        | Command::Ssa { binary_path, .. }
+        | Command::StackFrame { binary_path, .. }
         | Command::Pointers { binary_path }
         | Command::VTables { binary_path }
         | Command::FuncPointers { binary_path, .. }
@@ -80,6 +96,40 @@ fn main() {
                 std::process::exit(1);
             }
         },
+        Command::ReducedIl { addr, .. } => {
+            eprintln!("Reducing function at 0x{:x}...", addr);
+            match session.get_reduced_il(addr) {
+                Ok(details) => details,
+                Err(error) => {
+                    eprintln!("{}", error);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Command::Ssa { addr, optimize, .. } => {
+            eprintln!(
+                "Building {} SSA for 0x{:x}...",
+                if optimize { "optimized" } else { "raw" },
+                addr
+            );
+            match session.get_ssa(addr, optimize) {
+                Ok(details) => details,
+                Err(error) => {
+                    eprintln!("{}", error);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Command::StackFrame { addr, .. } => {
+            eprintln!("Summarizing stack frame for 0x{:x}...", addr);
+            match session.get_stack_frame(addr) {
+                Ok(details) => details,
+                Err(error) => {
+                    eprintln!("{}", error);
+                    std::process::exit(1);
+                }
+            }
+        }
         Command::Pointers { .. } => {
             eprintln!("Scanning mapped data pointers...");
             session.scan_pointers()
@@ -164,6 +214,44 @@ fn parse_args() -> Result<Command, String> {
             let addr = parse_hex_addr(&addr_str)?;
             Ok(Command::Func { binary_path, addr })
         }
+        "reduced-il" => {
+            let binary_path = args.next().ok_or_else(usage)?;
+            let addr_str = args.next().ok_or_else(usage)?;
+            if args.next().is_some() {
+                return Err(usage());
+            }
+            let addr = parse_hex_addr(&addr_str)?;
+            Ok(Command::ReducedIl { binary_path, addr })
+        }
+        "ssa" => {
+            let binary_path = args.next().ok_or_else(usage)?;
+            let addr_str = args.next().ok_or_else(usage)?;
+            let mut optimize = true;
+
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--raw" => optimize = false,
+                    "--optimized" => optimize = true,
+                    _ => return Err(usage()),
+                }
+            }
+
+            let addr = parse_hex_addr(&addr_str)?;
+            Ok(Command::Ssa {
+                binary_path,
+                addr,
+                optimize,
+            })
+        }
+        "stack-frame" => {
+            let binary_path = args.next().ok_or_else(usage)?;
+            let addr_str = args.next().ok_or_else(usage)?;
+            if args.next().is_some() {
+                return Err(usage());
+            }
+            let addr = parse_hex_addr(&addr_str)?;
+            Ok(Command::StackFrame { binary_path, addr })
+        }
         "pointers" => {
             let binary_path = args.next().ok_or_else(usage)?;
             if args.next().is_some() {
@@ -245,6 +333,9 @@ fn usage() -> String {
         "  aeon coverage <binary>",
         "  aeon rc4 <binary>",
         "  aeon func <binary> <addr>",
+        "  aeon reduced-il <binary> <addr>",
+        "  aeon ssa <binary> <addr> [--raw|--optimized]",
+        "  aeon stack-frame <binary> <addr>",
         "  aeon pointers <binary>",
         "  aeon vtables <binary>",
         "  aeon func-pointers <binary> <addr>",

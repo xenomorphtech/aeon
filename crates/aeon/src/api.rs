@@ -1,9 +1,15 @@
 use std::cell::RefCell;
+use std::collections::{hash_map::Entry, HashMap};
 
 use serde_json::{json, Value};
 
+use crate::coverage::analyze_lift_coverage;
 use crate::elf::{self, FunctionInfo, LoadedBinary};
 use crate::engine::{AeonEngine, SemanticContext};
+use crate::function_ir::{
+    decode_function, DecodedFunction, FunctionArtifacts, ReducedFunctionView, SsaFunctionView,
+    StackFrameArtifactView,
+};
 use crate::il::{Expr, Stmt};
 use crate::lifter;
 use crate::object_layout::ConstructorObjectLayout;
@@ -13,6 +19,7 @@ pub struct AeonSession {
     path: String,
     binary: LoadedBinary,
     analysis_state: RefCell<AeonEngine>,
+    function_cache: RefCell<HashMap<u64, FunctionArtifacts>>,
 }
 
 impl AeonSession {
@@ -20,8 +27,9 @@ impl AeonSession {
         let binary = elf::load_elf(path)?;
         Ok(Self {
             path: path.to_string(),
+            analysis_state: RefCell::new(AeonEngine::with_binary(binary.clone())),
             binary,
-            analysis_state: RefCell::new(AeonEngine::new()),
+            function_cache: RefCell::new(HashMap::new()),
         })
     }
 
@@ -167,34 +175,61 @@ impl AeonSession {
     }
 
     pub fn get_il(&self, addr: u64) -> Result<Value, String> {
-        let func = self
-            .binary
-            .function_containing(addr)
-            .ok_or_else(|| format!("No function containing 0x{:x}", addr))?;
-        let bytes = self
-            .binary
-            .function_bytes(func)
-            .ok_or("Function bytes out of range")?;
         let engine = self.analysis_state.borrow();
-        let listing =
-            render_instruction_listing(bytes, func.addr, &self.binary, &engine, ListingMode::Il);
+        self.with_function_artifacts(addr, |func, artifacts| {
+            let listing =
+                render_decoded_listing(artifacts.decoded(), &self.binary, &engine, ListingMode::Il);
 
-        Ok(json!({
-            "query_addr": format!("0x{:x}", addr),
-            "query_semantic": semantic_value(&engine, addr),
-            "function": format!("0x{:x}", func.addr),
-            "size": func.size,
-            "name": option_str(func.name.as_deref()),
-            "resolved_name": resolved_name_value(func.addr, func.name.as_deref(), &self.binary, &engine),
-            "semantic": semantic_value(&engine, func.addr),
-            "listing_kind": ListingMode::Il.label(),
-            "instruction_count": listing.len(),
-            "listing": listing,
-        }))
+            Ok(json!({
+                "query_addr": format!("0x{:x}", addr),
+                "query_semantic": semantic_value(&engine, addr),
+                "function": format!("0x{:x}", func.addr),
+                "size": func.size,
+                "name": option_str(func.name.as_deref()),
+                "resolved_name": resolved_name_value(func.addr, func.name.as_deref(), &self.binary, &engine),
+                "semantic": semantic_value(&engine, func.addr),
+                "listing_kind": ListingMode::Il.label(),
+                "instruction_count": listing.len(),
+                "listing": listing,
+            }))
+        })
     }
 
     pub fn get_function_il(&self, addr: u64) -> Result<Value, String> {
         self.get_il(addr)
+    }
+
+    pub fn get_reduced_il(&self, addr: u64) -> Result<Value, String> {
+        self.with_function_artifacts(addr, |_, artifacts| {
+            Ok(serde_json::to_value(ReducedFunctionView::from_artifacts(addr, artifacts)).unwrap())
+        })
+    }
+
+    pub fn get_ssa(&self, addr: u64, optimize: bool) -> Result<Value, String> {
+        self.with_function_artifacts(addr, |_, artifacts| {
+            Ok(
+                serde_json::to_value(SsaFunctionView::from_artifacts(addr, artifacts, optimize))
+                    .unwrap(),
+            )
+        })
+    }
+
+    pub fn get_stack_frame(&self, addr: u64) -> Result<Value, String> {
+        self.with_function_artifacts(addr, |_, artifacts| {
+            Ok(
+                serde_json::to_value(StackFrameArtifactView::from_artifacts(addr, artifacts))
+                    .unwrap(),
+            )
+        })
+    }
+
+    pub fn lift_function_instructions(
+        &self,
+        addr: u64,
+    ) -> Result<Vec<(u64, Stmt, Vec<u64>)>, String> {
+        self.with_function_artifacts(addr, |_, artifacts| {
+            Ok(artifacts.decoded().instruction_tuples())
+        })
     }
 
     pub fn analyze_constructor_object_layout(
@@ -214,14 +249,11 @@ impl AeonSession {
 
     pub fn get_function_details(&self, addr: u64) -> Result<Value, String> {
         let func = self.find_function(addr)?;
-        let bytes = self
-            .binary
-            .function_bytes(func)
-            .ok_or("Function bytes out of range")?;
-
-        let mut analysis = AeonEngine::new();
-        analysis.ingest_function(addr, bytes);
-        let mut details = analysis.get_function_details(addr);
+        let mut details = self.with_function_artifacts(addr, |_, artifacts| {
+            let mut analysis = AeonEngine::new();
+            analysis.ingest_decoded_function(artifacts.decoded());
+            Ok(analysis.get_function_details(func.addr))
+        })?;
 
         let engine = self.analysis_state.borrow();
         annotate_function_details(&mut details, func, &self.binary, &engine);
@@ -417,42 +449,7 @@ impl AeonSession {
     }
 
     pub fn get_coverage(&self) -> Value {
-        let text = self.binary.text_bytes();
-        let base_addr = self.binary.text_section_addr;
-
-        let mut total: u64 = 0;
-        let mut decode_errors: u64 = 0;
-        let mut proper_il: u64 = 0;
-        let mut intrinsic_count: u64 = 0;
-        let mut nop_count: u64 = 0;
-
-        let mut offset = 0usize;
-        let mut pc = base_addr;
-        while offset + 4 <= text.len() {
-            let word = u32::from_le_bytes(text[offset..offset + 4].try_into().unwrap());
-            total += 1;
-
-            match bad64::decode(word, pc) {
-                Ok(insn) => {
-                    let result = lifter::lift(&insn, pc, Some(pc + 4));
-                    match &result.stmt {
-                        Stmt::Nop => nop_count += 1,
-                        Stmt::Intrinsic { .. } => intrinsic_count += 1,
-                        Stmt::Assign {
-                            src: Expr::Intrinsic { .. },
-                            ..
-                        } => intrinsic_count += 1,
-                        Stmt::Pair(_, _) => proper_il += 1,
-                        _ => proper_il += 1,
-                    }
-                }
-                Err(_) => decode_errors += 1,
-            }
-
-            offset += 4;
-            pc += 4;
-        }
-
+        let stats = analyze_lift_coverage(self.binary.text_bytes(), self.binary.text_section_addr);
         let named_functions = self
             .binary
             .functions
@@ -460,21 +457,12 @@ impl AeonSession {
             .filter(|f| f.name.is_some())
             .count();
 
-        json!({
-            "total_instructions": total,
-            "decode_errors": decode_errors,
-            "decode_error_pct": percent(decode_errors, total, 4),
-            "proper_il": proper_il,
-            "proper_il_pct": percent(proper_il, total, 2),
-            "intrinsic": intrinsic_count,
-            "intrinsic_pct": percent(intrinsic_count, total, 2),
-            "nop": nop_count,
-            "nop_pct": percent(nop_count, total, 2),
-            "total_functions": self.binary.functions.len(),
-            "named_functions": named_functions,
-            "text_section_addr": format!("0x{:x}", self.binary.text_section_addr),
-            "text_section_size": format!("0x{:x}", self.binary.text_section_size),
-        })
+        stats.to_json(
+            self.binary.functions.len(),
+            named_functions,
+            self.binary.text_section_addr,
+            self.binary.text_section_size,
+        )
     }
 
     pub fn get_asm(&self, start_addr: u64, stop_addr: u64) -> Result<Value, String> {
@@ -536,11 +524,14 @@ impl AeonSession {
         });
 
         if let Some(mode) = ListingMode::from_flags(include_asm, include_il) {
-            let bytes = self
-                .binary
-                .function_bytes(func)
-                .ok_or("Function bytes out of range")?;
-            let listing = render_instruction_listing(bytes, func.addr, &self.binary, &engine, mode);
+            let listing = self.with_function_artifacts(addr, |_, artifacts| {
+                Ok(render_decoded_listing(
+                    artifacts.decoded(),
+                    &self.binary,
+                    &engine,
+                    mode,
+                ))
+            })?;
             if let Some(object) = response.as_object_mut() {
                 object.insert(
                     "listing_kind".to_string(),
@@ -562,6 +553,28 @@ impl AeonSession {
         let engine = self.analysis_state.borrow();
         annotate_rc4_report(&mut report, &self.binary, &engine);
         report
+    }
+
+    fn with_function_artifacts<T>(
+        &self,
+        addr: u64,
+        f: impl FnOnce(&FunctionInfo, &mut FunctionArtifacts) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let func = self
+            .binary
+            .function_containing(addr)
+            .ok_or_else(|| format!("No function containing 0x{:x}", addr))?;
+        let mut cache = self.function_cache.borrow_mut();
+
+        let artifacts = match cache.entry(func.addr) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let decoded = decode_function(&self.binary, func)?;
+                entry.insert(FunctionArtifacts::new(decoded))
+            }
+        };
+
+        f(func, artifacts)
     }
 
     fn find_function(&self, addr: u64) -> Result<&FunctionInfo, String> {
@@ -633,13 +646,6 @@ fn resolved_name_value(
         Some(value) => Value::String(value.to_string()),
         None => Value::Null,
     }
-}
-
-fn percent(count: u64, total: u64, decimals: usize) -> String {
-    if total == 0 {
-        return format!("{:.*}%", decimals, 0.0);
-    }
-    format!("{:.*}%", decimals, count as f64 / total as f64 * 100.0)
 }
 
 fn data_view(addr: u64, bytes: &[u8], binary: &LoadedBinary, engine: &AeonEngine) -> Value {
@@ -774,6 +780,66 @@ fn render_instruction_listing(
     listing
 }
 
+fn render_decoded_listing(
+    decoded: &DecodedFunction,
+    binary: &LoadedBinary,
+    engine: &AeonEngine,
+    mode: ListingMode,
+) -> Vec<Value> {
+    let mut listing = Vec::new();
+
+    for instruction in &decoded.instructions {
+        let mut entry = json!({
+            "addr": format!("0x{:x}", instruction.addr),
+        });
+
+        if let Some(object) = entry.as_object_mut() {
+            if mode.include_asm() {
+                object.insert("asm".to_string(), Value::String(instruction.asm.clone()));
+            }
+            if mode.include_il() {
+                object.insert(
+                    "il".to_string(),
+                    Value::String(format!("{:?}", instruction.stmt)),
+                );
+                object.insert(
+                    "edges".to_string(),
+                    Value::Array(
+                        instruction
+                            .edges
+                            .iter()
+                            .map(|edge| Value::String(format!("0x{:x}", edge)))
+                            .collect(),
+                    ),
+                );
+            }
+        }
+
+        if instruction.valid {
+            annotate_instruction_entry(
+                &mut entry,
+                instruction.addr,
+                &instruction.stmt,
+                binary,
+                engine,
+            );
+        } else {
+            annotate_instruction_address(
+                &mut entry,
+                "addr",
+                instruction.addr,
+                None,
+                binary,
+                engine,
+            );
+        }
+
+        listing.push(entry);
+    }
+
+    listing
+}
+
 fn annotate_instruction_entry(
     entry: &mut Value,
     addr: u64,
@@ -902,4 +968,110 @@ fn annotate_instruction_address(
 fn parse_hex_value(value: &str) -> Option<u64> {
     let trimmed = value.trim_start_matches("0x").trim_start_matches("0X");
     u64::from_str_radix(trimmed, 16).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use serde_json::Value;
+
+    use super::AeonSession;
+
+    fn sample_binary_path() -> String {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        manifest_dir
+            .join("../../samples/hello_aarch64.elf")
+            .display()
+            .to_string()
+    }
+
+    fn session() -> AeonSession {
+        AeonSession::load(&sample_binary_path()).expect("sample binary should load")
+    }
+
+    fn has_stack_slot(value: &Value) -> bool {
+        match value {
+            Value::Object(map) => {
+                map.get("op")
+                    .and_then(Value::as_str)
+                    .is_some_and(|op| op == "stack_slot")
+                    || map.values().any(has_stack_slot)
+            }
+            Value::Array(items) => items.iter().any(has_stack_slot),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn reduced_il_json_exposes_block_shape_and_stack_slots() {
+        let session = session();
+        let reduced = session
+            .get_reduced_il(0x718)
+            .expect("reduced IL should succeed");
+
+        assert_eq!(reduced["artifact"], "reduced_il");
+        assert_eq!(reduced["function"], "0x718");
+        assert!(
+            reduced["block_count"]
+                .as_u64()
+                .is_some_and(|count| count >= 1),
+            "reduced IL should report block count"
+        );
+        assert!(
+            reduced["blocks"]
+                .as_array()
+                .is_some_and(|blocks| !blocks.is_empty()),
+            "reduced IL should include blocks"
+        );
+        assert!(
+            has_stack_slot(&reduced),
+            "reduced IL should expose stack_slot operands"
+        );
+    }
+
+    #[test]
+    fn ssa_json_exposes_metrics_and_stack_slots() {
+        let session = session();
+        let ssa = session
+            .get_ssa(0x718, false)
+            .expect("SSA view should succeed");
+
+        assert_eq!(ssa["artifact"], "ssa");
+        assert_eq!(ssa["optimized"], false);
+        assert!(
+            ssa["metrics"]["stack_slot_count"]
+                .as_u64()
+                .is_some_and(|count| count > 0),
+            "SSA metrics should count visible stack slots"
+        );
+        assert!(
+            has_stack_slot(&ssa),
+            "SSA JSON should expose stack_slot expressions"
+        );
+    }
+
+    #[test]
+    fn stack_frame_json_reports_saved_registers_and_slots() {
+        let session = session();
+        let frame = session
+            .get_stack_frame(0x7d8)
+            .expect("stack frame should succeed");
+
+        assert_eq!(frame["artifact"], "stack_frame");
+        assert_eq!(frame["detected"], true);
+        assert_eq!(frame["frame_size"], 32);
+        assert!(
+            frame["saved_regs"]
+                .as_array()
+                .is_some_and(|saved| saved.iter().any(|reg| reg["reg"] == "x29")),
+            "stack frame summary should expose saved registers"
+        );
+        assert!(
+            frame["slots"]
+                .as_array()
+                .is_some_and(|slots| !slots.is_empty()),
+            "stack frame summary should include visible stack slots"
+        );
+    }
 }

@@ -3,6 +3,7 @@
 //! downstream passes can use for direct memory references or symbol lookup.
 
 use aeonil::{BranchCond, Expr, Stmt};
+use std::cell::Cell;
 
 use crate::env::RegisterEnv;
 use crate::reduce_const::fold_expr;
@@ -11,75 +12,137 @@ use crate::reduce_const::fold_expr;
 /// Also handles the reversed operand order.
 /// Applied recursively to sub-expressions.
 fn fold_adr_add(expr: &Expr) -> Expr {
-    let folded = expr.map_subexprs(|e| fold_adr_add(e));
+    fold_adr_add_with_count(expr).0
+}
 
-    match &folded {
+fn fold_adr_add_with_count(expr: &Expr) -> (Expr, usize) {
+    let count = Cell::new(0usize);
+    let folded = expr.map_subexprs(|e| {
+        let (subexpr, subcount) = fold_adr_add_with_count(e);
+        count.set(count.get() + subcount);
+        subexpr
+    });
+
+    let folded = match &folded {
         Expr::Add(a, b) => match (a.as_ref(), b.as_ref()) {
             (Expr::AdrpImm(page), Expr::Imm(off)) | (Expr::Imm(off), Expr::AdrpImm(page)) => {
+                count.set(count.get() + 1);
                 Expr::Imm(page.wrapping_add(*off))
             }
             (Expr::AdrImm(addr), Expr::Imm(off)) | (Expr::Imm(off), Expr::AdrImm(addr)) => {
+                count.set(count.get() + 1);
                 Expr::Imm(addr.wrapping_add(*off))
             }
             _ => folded,
         },
         _ => folded,
-    }
+    };
+
+    (folded, count.get())
 }
 
 /// Resolve an expression: substitute registers from `env`, constant-fold,
 /// then fold ADRP/ADR + immediate additions.
 fn resolve_and_fold(expr: &Expr, env: &RegisterEnv) -> Expr {
+    resolve_and_fold_with_count(expr, env).0
+}
+
+fn resolve_and_fold_with_count(expr: &Expr, env: &RegisterEnv) -> (Expr, usize) {
     let resolved = env.resolve(expr);
     let folded = fold_expr(&resolved);
-    fold_adr_add(&folded)
+    fold_adr_add_with_count(&folded)
 }
 
 /// Resolve expressions inside a `BranchCond`.
 fn resolve_branch_cond(cond: &BranchCond, env: &RegisterEnv) -> BranchCond {
+    resolve_branch_cond_with_count(cond, env).0
+}
+
+fn resolve_branch_cond_with_count(cond: &BranchCond, env: &RegisterEnv) -> (BranchCond, usize) {
     match cond {
-        BranchCond::Flag(c) => BranchCond::Flag(*c),
-        BranchCond::Zero(e) => BranchCond::Zero(resolve_and_fold(e, env)),
-        BranchCond::NotZero(e) => BranchCond::NotZero(resolve_and_fold(e, env)),
-        BranchCond::BitZero(e, bit) => BranchCond::BitZero(resolve_and_fold(e, env), *bit),
-        BranchCond::BitNotZero(e, bit) => BranchCond::BitNotZero(resolve_and_fold(e, env), *bit),
-        BranchCond::Compare { cond, lhs, rhs } => BranchCond::Compare {
-            cond: *cond,
-            lhs: Box::new(resolve_and_fold(lhs, env)),
-            rhs: Box::new(resolve_and_fold(rhs, env)),
-        },
+        BranchCond::Flag(c) => (BranchCond::Flag(*c), 0),
+        BranchCond::Zero(e) => {
+            let (expr, count) = resolve_and_fold_with_count(e, env);
+            (BranchCond::Zero(expr), count)
+        }
+        BranchCond::NotZero(e) => {
+            let (expr, count) = resolve_and_fold_with_count(e, env);
+            (BranchCond::NotZero(expr), count)
+        }
+        BranchCond::BitZero(e, bit) => {
+            let (expr, count) = resolve_and_fold_with_count(e, env);
+            (BranchCond::BitZero(expr, *bit), count)
+        }
+        BranchCond::BitNotZero(e, bit) => {
+            let (expr, count) = resolve_and_fold_with_count(e, env);
+            (BranchCond::BitNotZero(expr, *bit), count)
+        }
+        BranchCond::Compare { cond, lhs, rhs } => {
+            let (lhs, lhs_count) = resolve_and_fold_with_count(lhs, env);
+            let (rhs, rhs_count) = resolve_and_fold_with_count(rhs, env);
+            (
+                BranchCond::Compare {
+                    cond: *cond,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
+                lhs_count + rhs_count,
+            )
+        }
     }
 }
 
 /// Resolve register references and fold constants in all expressions within a
 /// statement.  Used for statement types not handled specially in the main loop.
 fn resolve_stmt_exprs(stmt: Stmt, env: &RegisterEnv) -> Stmt {
+    resolve_stmt_exprs_with_count(stmt, env).0
+}
+
+fn resolve_stmt_exprs_with_count(stmt: Stmt, env: &RegisterEnv) -> (Stmt, usize) {
     match stmt {
-        Stmt::Branch { target } => Stmt::Branch {
-            target: resolve_and_fold(&target, env),
-        },
+        Stmt::Branch { target } => {
+            let (target, count) = resolve_and_fold_with_count(&target, env);
+            (Stmt::Branch { target }, count)
+        }
         Stmt::CondBranch {
             cond,
             target,
             fallthrough,
-        } => Stmt::CondBranch {
-            cond: resolve_branch_cond(&cond, env),
-            target: resolve_and_fold(&target, env),
-            fallthrough,
-        },
-        Stmt::SetFlags { expr } => Stmt::SetFlags {
-            expr: resolve_and_fold(&expr, env),
-        },
-        Stmt::Pair(a, b) => Stmt::Pair(
-            Box::new(resolve_stmt_exprs(*a, env)),
-            Box::new(resolve_stmt_exprs(*b, env)),
-        ),
-        Stmt::Intrinsic { name, operands } => Stmt::Intrinsic {
-            name,
-            operands: operands.iter().map(|e| resolve_and_fold(e, env)).collect(),
-        },
+        } => {
+            let (cond, cond_count) = resolve_branch_cond_with_count(&cond, env);
+            let (target, target_count) = resolve_and_fold_with_count(&target, env);
+            (
+                Stmt::CondBranch {
+                    cond,
+                    target,
+                    fallthrough,
+                },
+                cond_count + target_count,
+            )
+        }
+        Stmt::SetFlags { expr } => {
+            let (expr, count) = resolve_and_fold_with_count(&expr, env);
+            (Stmt::SetFlags { expr }, count)
+        }
+        Stmt::Pair(a, b) => {
+            let (a, a_count) = resolve_stmt_exprs_with_count(*a, env);
+            let (b, b_count) = resolve_stmt_exprs_with_count(*b, env);
+            (Stmt::Pair(Box::new(a), Box::new(b)), a_count + b_count)
+        }
+        Stmt::Intrinsic { name, operands } => {
+            let mut count = 0usize;
+            let operands = operands
+                .iter()
+                .map(|e| {
+                    let (operand, operand_count) = resolve_and_fold_with_count(e, env);
+                    count += operand_count;
+                    operand
+                })
+                .collect();
+            (Stmt::Intrinsic { name, operands }, count)
+        }
         // Ret, Nop, Barrier, Trap: no expressions to resolve
-        other => other,
+        other => (other, 0),
     }
 }
 
@@ -92,38 +155,48 @@ fn resolve_stmt_exprs(stmt: Stmt, env: &RegisterEnv) -> Stmt {
 /// known register values), constant-folds, and then applies the ADRP+ADD
 /// pattern match.
 pub fn resolve_adrp_add(stmts: Vec<Stmt>) -> Vec<Stmt> {
+    resolve_adrp_add_with_stats(stmts).0
+}
+
+pub(crate) fn resolve_adrp_add_with_stats(stmts: Vec<Stmt>) -> (Vec<Stmt>, usize) {
     let mut env = RegisterEnv::new();
     let mut result = Vec::with_capacity(stmts.len());
+    let mut resolutions = 0usize;
 
     for stmt in stmts {
         match stmt {
             Stmt::Assign { dst, src } => {
-                let folded = resolve_and_fold(&src, &env);
+                let (folded, count) = resolve_and_fold_with_count(&src, &env);
                 env.assign(dst.clone(), folded.clone());
                 result.push(Stmt::Assign { dst, src: folded });
+                resolutions += count;
             }
             Stmt::Store { addr, value, size } => {
-                let resolved_addr = resolve_and_fold(&addr, &env);
-                let resolved_value = resolve_and_fold(&value, &env);
+                let (resolved_addr, addr_count) = resolve_and_fold_with_count(&addr, &env);
+                let (resolved_value, value_count) = resolve_and_fold_with_count(&value, &env);
                 result.push(Stmt::Store {
                     addr: resolved_addr,
                     value: resolved_value,
                     size,
                 });
+                resolutions += addr_count + value_count;
             }
             Stmt::Call { target } => {
-                let resolved_target = resolve_and_fold(&target, &env);
+                let (resolved_target, count) = resolve_and_fold_with_count(&target, &env);
                 result.push(Stmt::Call {
                     target: resolved_target,
                 });
                 env.invalidate_caller_saved();
+                resolutions += count;
             }
             other => {
-                result.push(resolve_stmt_exprs(other, &env));
+                let (stmt, count) = resolve_stmt_exprs_with_count(other, &env);
+                result.push(stmt);
+                resolutions += count;
             }
         }
     }
-    result
+    (result, resolutions)
 }
 
 #[cfg(test)]

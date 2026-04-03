@@ -1,5 +1,15 @@
+use aeon::il::{BranchCond, Condition, Expr, Reg, Stmt};
+use aeon::AeonSession;
+use aeon_reduce::pipeline::{reduce_function_cfg_with_metrics, ReductionMetrics};
+use aeon_reduce::ssa::cfg::{build_cfg, Cfg};
+use aeon_reduce::ssa::construct::build_ssa;
+use aeon_reduce::ssa::pipeline::optimize_ssa;
+use aeon_reduce::ssa::validate::{validate_ssa, SsaValidationReport};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap};
+use std::fs;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CorpusEntry {
@@ -239,6 +249,612 @@ pub fn evaluate_constructor_object_layout(
             metadata: Value::Null,
         },
     })
+}
+
+struct FunctionArtifacts {
+    function_addr: u64,
+    binary_sha256: String,
+    function_sha256: String,
+    raw_cfg: Cfg,
+    reduced_cfg: Cfg,
+    metrics: ReductionMetrics,
+    validation: SsaValidationReport,
+}
+
+pub fn evaluate_reduced_il_golden(
+    binary_path: &str,
+    addr: u64,
+    golden_path: &str,
+) -> Result<EvaluationRun, Box<dyn std::error::Error>> {
+    let artifacts = load_function_artifacts(binary_path, addr)?;
+    let reduced_value = normalize_cfg_artifact(
+        artifacts.function_addr,
+        &artifacts.reduced_cfg,
+        Some(&artifacts.binary_sha256),
+        Some(&artifacts.function_sha256),
+    );
+    let raw_value = normalize_cfg_artifact(
+        artifacts.function_addr,
+        &artifacts.raw_cfg,
+        Some(&artifacts.binary_sha256),
+        Some(&artifacts.function_sha256),
+    );
+    let expected: Value = serde_json::from_slice(&fs::read(golden_path)?)?;
+    let expected = materialize_optional_golden_fields(expected, &reduced_value);
+    let matches = reduced_value == expected;
+    let outcome = if matches {
+        RunOutcome::Passed
+    } else {
+        RunOutcome::Failed
+    };
+
+    let mut evidence = vec![
+        EvidenceItem {
+            id: "ev-raw-il".to_string(),
+            kind: EvidenceKind::JsonArtifact,
+            label: format!("raw_il@0x{:x}", artifacts.function_addr),
+            value: raw_value,
+            provenance: vec![ProvenanceRef {
+                tool: "lift_function_instructions".to_string(),
+                locator: format!("{}:0x{:x}", binary_path, artifacts.function_addr),
+            }],
+        },
+        EvidenceItem {
+            id: "ev-reduced-il".to_string(),
+            kind: EvidenceKind::JsonArtifact,
+            label: format!("reduced_il@0x{:x}", artifacts.function_addr),
+            value: reduced_value.clone(),
+            provenance: vec![ProvenanceRef {
+                tool: "evaluate_reduced_il_golden".to_string(),
+                locator: format!("{}:0x{:x}", binary_path, artifacts.function_addr),
+            }],
+        },
+    ];
+
+    let mut evidence_ids = vec!["ev-reduced-il".to_string(), "ev-raw-il".to_string()];
+    if !matches {
+        evidence.push(EvidenceItem {
+            id: "ev-golden-diff".to_string(),
+            kind: EvidenceKind::JsonArtifact,
+            label: format!("golden_diff@0x{:x}", artifacts.function_addr),
+            value: json!({
+                "golden_path": golden_path,
+                "actual": reduced_value,
+                "expected": expected,
+                "differences": diff_json_values(&expected, &reduced_value, "$", 32),
+            }),
+            provenance: vec![ProvenanceRef {
+                tool: "evaluate_reduced_il_golden".to_string(),
+                locator: golden_path.to_string(),
+            }],
+        });
+        evidence_ids.push("ev-golden-diff".to_string());
+    }
+
+    Ok(EvaluationRun {
+        run_id: format!(
+            "reduced-il-golden:{}:0x{:x}",
+            binary_path, artifacts.function_addr
+        ),
+        task_id: format!("reduced-il-golden:0x{:x}", artifacts.function_addr),
+        agent: agent_descriptor(),
+        outcome,
+        claims: vec![Claim {
+            id: "claim-reduced-il-golden".to_string(),
+            statement: if matches {
+                format!(
+                    "Reduced IL for function 0x{:x} matches the checked-in golden.",
+                    artifacts.function_addr
+                )
+            } else {
+                format!(
+                    "Reduced IL for function 0x{:x} diverged from the checked-in golden.",
+                    artifacts.function_addr
+                )
+            },
+            confidence: Some(if matches { 0.99 } else { 0.1 }),
+            evidence_ids,
+            metadata: json!({
+                "binary_sha256": artifacts.binary_sha256,
+                "function_sha256": artifacts.function_sha256,
+                "golden_path": golden_path,
+            }),
+        }],
+        evidence,
+        metrics: RunMetrics {
+            duration_ms: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+            tool_calls: 1,
+            metadata: json!({
+                "binary_sha256": artifacts.binary_sha256,
+                "function_sha256": artifacts.function_sha256,
+                "golden_path": golden_path,
+            }),
+        },
+    })
+}
+
+pub fn evaluate_reduction_metrics(
+    binary_path: &str,
+    addr: u64,
+) -> Result<EvaluationRun, Box<dyn std::error::Error>> {
+    let artifacts = load_function_artifacts(binary_path, addr)?;
+    let metrics_value = reduction_metrics_value(&artifacts.metrics);
+    let validation_value = validation_report_value(&artifacts.validation);
+    let outcome = if artifacts.validation.is_valid {
+        RunOutcome::Passed
+    } else {
+        RunOutcome::Failed
+    };
+
+    Ok(EvaluationRun {
+        run_id: format!(
+            "reduction-metrics:{}:0x{:x}",
+            binary_path, artifacts.function_addr
+        ),
+        task_id: format!("reduction-metrics:0x{:x}", artifacts.function_addr),
+        agent: agent_descriptor(),
+        outcome,
+        claims: vec![Claim {
+            id: "claim-reduction-metrics".to_string(),
+            statement: if artifacts.validation.is_valid {
+                format!(
+                    "Reduction metrics and SSA validation completed successfully for function 0x{:x}.",
+                    artifacts.function_addr
+                )
+            } else {
+                format!(
+                    "SSA validation failed for function 0x{:x}.",
+                    artifacts.function_addr
+                )
+            },
+            confidence: Some(if artifacts.validation.is_valid {
+                0.95
+            } else {
+                0.05
+            }),
+            evidence_ids: vec![
+                "ev-metric-snapshot".to_string(),
+                "ev-ssa-validation".to_string(),
+            ],
+            metadata: json!({
+                "binary_sha256": artifacts.binary_sha256,
+                "function_sha256": artifacts.function_sha256,
+            }),
+        }],
+        evidence: vec![
+            EvidenceItem {
+                id: "ev-metric-snapshot".to_string(),
+                kind: EvidenceKind::JsonArtifact,
+                label: format!("metric_snapshot@0x{:x}", artifacts.function_addr),
+                value: metrics_value.clone(),
+                provenance: vec![ProvenanceRef {
+                    tool: "evaluate_reduction_metrics".to_string(),
+                    locator: format!("{}:0x{:x}", binary_path, artifacts.function_addr),
+                }],
+            },
+            EvidenceItem {
+                id: "ev-ssa-validation".to_string(),
+                kind: EvidenceKind::JsonArtifact,
+                label: format!("ssa_validation@0x{:x}", artifacts.function_addr),
+                value: validation_value.clone(),
+                provenance: vec![ProvenanceRef {
+                    tool: "validate_ssa".to_string(),
+                    locator: format!("{}:0x{:x}", binary_path, artifacts.function_addr),
+                }],
+            },
+        ],
+        metrics: RunMetrics {
+            duration_ms: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+            tool_calls: 1,
+            metadata: json!({
+                "metric_snapshot": metrics_value,
+                "ssa_validation": validation_value,
+            }),
+        },
+    })
+}
+
+fn agent_descriptor() -> AgentDescriptor {
+    AgentDescriptor {
+        name: "aeon-eval".to_string(),
+        model: None,
+        version: Some(env!("CARGO_PKG_VERSION").to_string()),
+    }
+}
+
+fn load_function_artifacts(
+    binary_path: &str,
+    addr: u64,
+) -> Result<FunctionArtifacts, Box<dyn std::error::Error>> {
+    let session = AeonSession::load(binary_path)?;
+    let func = session
+        .binary()
+        .function_containing(addr)
+        .ok_or_else(|| std::io::Error::other(format!("No function containing 0x{:x}", addr)))?;
+    let function_addr = func.addr;
+    let function_bytes = session
+        .binary()
+        .function_bytes(func)
+        .ok_or_else(|| std::io::Error::other("Function bytes out of range"))?;
+    let instructions = session
+        .lift_function_instructions(addr)
+        .map_err(std::io::Error::other)?;
+
+    let raw_cfg = build_cfg(&instructions);
+    let (reduced_cfg, metrics) = reduce_function_cfg_with_metrics(&instructions);
+    let mut optimized_ssa = build_ssa(&reduced_cfg);
+    optimize_ssa(&mut optimized_ssa);
+
+    Ok(FunctionArtifacts {
+        function_addr,
+        binary_sha256: sha256_hex(&fs::read(binary_path)?),
+        function_sha256: sha256_hex(function_bytes),
+        raw_cfg,
+        reduced_cfg,
+        metrics,
+        validation: validate_ssa(&optimized_ssa),
+    })
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+fn reduction_metrics_value(metrics: &ReductionMetrics) -> Value {
+    json!({
+        "eligible_stack_accesses": metrics.eligible_stack_accesses,
+        "stack_slots_recognized": metrics.stack_slots_recognized,
+        "adrp_resolutions": metrics.adrp_resolutions,
+        "flag_fusions": metrics.flag_fusions,
+        "movk_chain_resolutions": metrics.movk_chain_resolutions,
+        "ssa_vars_before_optimization": metrics.ssa_vars_before_optimization,
+        "ssa_vars_after_optimization": metrics.ssa_vars_after_optimization,
+        "intrinsic_instructions": metrics.intrinsic_instructions,
+        "proper_il_instructions": metrics.proper_il_instructions,
+        "intrinsic_to_proper_il_ratio": metrics.intrinsic_to_proper_il_ratio(),
+    })
+}
+
+fn validation_report_value(report: &SsaValidationReport) -> Value {
+    json!({
+        "is_valid": report.is_valid,
+        "issue_count": report.issues.len(),
+        "issues": report.issues.iter().map(|issue| {
+            json!({
+                "code": issue.code,
+                "block": issue.block.map(|block| hex_addr(block as u64)),
+                "stmt_idx": issue.stmt_idx,
+                "message": issue.message,
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn normalize_cfg_artifact(
+    function_addr: u64,
+    cfg: &Cfg,
+    binary_sha256: Option<&str>,
+    function_sha256: Option<&str>,
+) -> Value {
+    let addr_map: HashMap<_, _> = cfg
+        .blocks
+        .iter()
+        .map(|block| (block.id, block.addr))
+        .collect();
+    let mut blocks = cfg.blocks.iter().collect::<Vec<_>>();
+    blocks.sort_by_key(|block| block.addr);
+
+    json!({
+        "function": hex_addr(function_addr),
+        "binary_sha256": binary_sha256,
+        "function_sha256": function_sha256,
+        "blocks": blocks.into_iter().map(|block| {
+            let mut predecessors = block
+                .predecessors
+                .iter()
+                .filter_map(|pred| addr_map.get(pred).copied())
+                .collect::<Vec<_>>();
+            predecessors.sort_unstable();
+
+            let mut successors = block
+                .successors
+                .iter()
+                .filter_map(|succ| addr_map.get(succ).copied())
+                .collect::<Vec<_>>();
+            successors.sort_unstable();
+
+            json!({
+                "addr": hex_addr(block.addr),
+                "predecessors": predecessors.into_iter().map(hex_addr).collect::<Vec<_>>(),
+                "successors": successors.into_iter().map(hex_addr).collect::<Vec<_>>(),
+                "stmts": block.stmts.iter().map(normalize_stmt).collect::<Vec<_>>(),
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn normalize_stmt(stmt: &Stmt) -> Value {
+    match stmt {
+        Stmt::Assign { dst, src } => json!(["assign", normalize_reg(dst), normalize_expr(src)]),
+        Stmt::Store { addr, value, size } => {
+            json!(["store", normalize_expr(addr), normalize_expr(value), size])
+        }
+        Stmt::Branch { target } => json!(["branch", normalize_expr(target)]),
+        Stmt::CondBranch {
+            cond,
+            target,
+            fallthrough,
+        } => json!([
+            "cond_branch",
+            normalize_branch_cond(cond),
+            normalize_expr(target),
+            hex_addr(*fallthrough)
+        ]),
+        Stmt::Call { target } => json!(["call", normalize_expr(target)]),
+        Stmt::Ret => json!(["ret"]),
+        Stmt::Nop => json!(["nop"]),
+        Stmt::Pair(a, b) => json!(["pair", normalize_stmt(a), normalize_stmt(b)]),
+        Stmt::SetFlags { expr } => json!(["set_flags", normalize_expr(expr)]),
+        Stmt::Barrier(name) => json!(["barrier", name]),
+        Stmt::Trap => json!(["trap"]),
+        Stmt::Intrinsic { name, operands } => {
+            json!([
+                "intrinsic",
+                name,
+                operands.iter().map(normalize_expr).collect::<Vec<_>>()
+            ])
+        }
+    }
+}
+
+fn normalize_branch_cond(cond: &BranchCond) -> Value {
+    match cond {
+        BranchCond::Flag(condition) => json!(["flag", normalize_condition(*condition)]),
+        BranchCond::Zero(expr) => json!(["zero", normalize_expr(expr)]),
+        BranchCond::NotZero(expr) => json!(["not_zero", normalize_expr(expr)]),
+        BranchCond::BitZero(expr, bit) => json!(["bit_zero", normalize_expr(expr), bit]),
+        BranchCond::BitNotZero(expr, bit) => {
+            json!(["bit_not_zero", normalize_expr(expr), bit])
+        }
+        BranchCond::Compare { cond, lhs, rhs } => json!([
+            "compare",
+            normalize_condition(*cond),
+            normalize_expr(lhs),
+            normalize_expr(rhs)
+        ]),
+    }
+}
+
+fn normalize_expr(expr: &Expr) -> Value {
+    match expr {
+        Expr::Reg(reg) => json!(["reg", normalize_reg(reg)]),
+        Expr::Imm(value) => json!(["imm", hex_addr(*value)]),
+        Expr::FImm(value) => json!(["fimm", value]),
+        Expr::Load { addr, size } => json!(["load", normalize_expr(addr), size]),
+        Expr::Add(lhs, rhs) => json!(["add", normalize_expr(lhs), normalize_expr(rhs)]),
+        Expr::Sub(lhs, rhs) => json!(["sub", normalize_expr(lhs), normalize_expr(rhs)]),
+        Expr::Mul(lhs, rhs) => json!(["mul", normalize_expr(lhs), normalize_expr(rhs)]),
+        Expr::Div(lhs, rhs) => json!(["div", normalize_expr(lhs), normalize_expr(rhs)]),
+        Expr::UDiv(lhs, rhs) => json!(["udiv", normalize_expr(lhs), normalize_expr(rhs)]),
+        Expr::Neg(value) => json!(["neg", normalize_expr(value)]),
+        Expr::Abs(value) => json!(["abs", normalize_expr(value)]),
+        Expr::And(lhs, rhs) => json!(["and", normalize_expr(lhs), normalize_expr(rhs)]),
+        Expr::Or(lhs, rhs) => json!(["or", normalize_expr(lhs), normalize_expr(rhs)]),
+        Expr::Xor(lhs, rhs) => json!(["xor", normalize_expr(lhs), normalize_expr(rhs)]),
+        Expr::Not(value) => json!(["not", normalize_expr(value)]),
+        Expr::Shl(lhs, rhs) => json!(["shl", normalize_expr(lhs), normalize_expr(rhs)]),
+        Expr::Lsr(lhs, rhs) => json!(["lsr", normalize_expr(lhs), normalize_expr(rhs)]),
+        Expr::Asr(lhs, rhs) => json!(["asr", normalize_expr(lhs), normalize_expr(rhs)]),
+        Expr::Ror(lhs, rhs) => json!(["ror", normalize_expr(lhs), normalize_expr(rhs)]),
+        Expr::SignExtend { src, from_bits } => {
+            json!(["sign_extend", normalize_expr(src), from_bits])
+        }
+        Expr::ZeroExtend { src, from_bits } => {
+            json!(["zero_extend", normalize_expr(src), from_bits])
+        }
+        Expr::Extract { src, lsb, width } => {
+            json!(["extract", normalize_expr(src), lsb, width])
+        }
+        Expr::Insert {
+            dst,
+            src,
+            lsb,
+            width,
+        } => json!([
+            "insert",
+            normalize_expr(dst),
+            normalize_expr(src),
+            lsb,
+            width
+        ]),
+        Expr::FAdd(lhs, rhs) => json!(["fadd", normalize_expr(lhs), normalize_expr(rhs)]),
+        Expr::FSub(lhs, rhs) => json!(["fsub", normalize_expr(lhs), normalize_expr(rhs)]),
+        Expr::FMul(lhs, rhs) => json!(["fmul", normalize_expr(lhs), normalize_expr(rhs)]),
+        Expr::FDiv(lhs, rhs) => json!(["fdiv", normalize_expr(lhs), normalize_expr(rhs)]),
+        Expr::FNeg(value) => json!(["fneg", normalize_expr(value)]),
+        Expr::FAbs(value) => json!(["fabs", normalize_expr(value)]),
+        Expr::FSqrt(value) => json!(["fsqrt", normalize_expr(value)]),
+        Expr::FMax(lhs, rhs) => json!(["fmax", normalize_expr(lhs), normalize_expr(rhs)]),
+        Expr::FMin(lhs, rhs) => json!(["fmin", normalize_expr(lhs), normalize_expr(rhs)]),
+        Expr::FCvt(value) => json!(["fcvt", normalize_expr(value)]),
+        Expr::IntToFloat(value) => json!(["int_to_float", normalize_expr(value)]),
+        Expr::FloatToInt(value) => json!(["float_to_int", normalize_expr(value)]),
+        Expr::Clz(value) => json!(["clz", normalize_expr(value)]),
+        Expr::Cls(value) => json!(["cls", normalize_expr(value)]),
+        Expr::Rev(value) => json!(["rev", normalize_expr(value)]),
+        Expr::Rbit(value) => json!(["rbit", normalize_expr(value)]),
+        Expr::CondSelect {
+            cond,
+            if_true,
+            if_false,
+        } => json!([
+            "cond_select",
+            normalize_condition(*cond),
+            normalize_expr(if_true),
+            normalize_expr(if_false)
+        ]),
+        Expr::Compare { cond, lhs, rhs } => json!([
+            "compare",
+            normalize_condition(*cond),
+            normalize_expr(lhs),
+            normalize_expr(rhs)
+        ]),
+        Expr::StackSlot { offset, size } => json!(["stack_slot", offset, size]),
+        Expr::MrsRead(name) => json!(["mrs_read", name]),
+        Expr::Intrinsic { name, operands } => {
+            json!([
+                "intrinsic",
+                name,
+                operands.iter().map(normalize_expr).collect::<Vec<_>>()
+            ])
+        }
+        Expr::AdrpImm(value) => json!(["adrp_imm", hex_addr(*value)]),
+        Expr::AdrImm(value) => json!(["adr_imm", hex_addr(*value)]),
+    }
+}
+
+fn normalize_reg(reg: &Reg) -> String {
+    match reg {
+        Reg::X(n) => format!("x{}", n),
+        Reg::W(n) => format!("w{}", n),
+        Reg::SP => "sp".to_string(),
+        Reg::PC => "pc".to_string(),
+        Reg::XZR => "xzr".to_string(),
+        Reg::Flags => "flags".to_string(),
+        Reg::V(n) => format!("v{}", n),
+        Reg::Q(n) => format!("q{}", n),
+        Reg::D(n) => format!("d{}", n),
+        Reg::S(n) => format!("s{}", n),
+        Reg::H(n) => format!("h{}", n),
+        Reg::VByte(n) => format!("vbyte{}", n),
+    }
+}
+
+fn normalize_condition(condition: Condition) -> &'static str {
+    match condition {
+        Condition::EQ => "eq",
+        Condition::NE => "ne",
+        Condition::CS => "cs",
+        Condition::CC => "cc",
+        Condition::MI => "mi",
+        Condition::PL => "pl",
+        Condition::VS => "vs",
+        Condition::VC => "vc",
+        Condition::HI => "hi",
+        Condition::LS => "ls",
+        Condition::GE => "ge",
+        Condition::LT => "lt",
+        Condition::GT => "gt",
+        Condition::LE => "le",
+        Condition::AL => "al",
+        Condition::NV => "nv",
+    }
+}
+
+fn hex_addr(value: u64) -> String {
+    format!("0x{:x}", value)
+}
+
+fn diff_json_values(expected: &Value, actual: &Value, path: &str, remaining: usize) -> Vec<String> {
+    if remaining == 0 {
+        return Vec::new();
+    }
+    if expected == actual {
+        return Vec::new();
+    }
+
+    match (expected, actual) {
+        (Value::Object(expected_map), Value::Object(actual_map)) => {
+            let mut diffs = Vec::new();
+            let mut keys = BTreeMap::new();
+            for key in expected_map.keys() {
+                keys.insert(key.clone(), ());
+            }
+            for key in actual_map.keys() {
+                keys.insert(key.clone(), ());
+            }
+            for key in keys.keys() {
+                if diffs.len() >= remaining {
+                    break;
+                }
+                match (expected_map.get(key), actual_map.get(key)) {
+                    (Some(expected_child), Some(actual_child)) => {
+                        diffs.extend(diff_json_values(
+                            expected_child,
+                            actual_child,
+                            &format!("{}.{}", path, key),
+                            remaining - diffs.len(),
+                        ));
+                    }
+                    (None, Some(_)) => diffs.push(format!("{}.{} added", path, key)),
+                    (Some(_), None) => diffs.push(format!("{}.{} removed", path, key)),
+                    (None, None) => {}
+                }
+            }
+            diffs
+        }
+        (Value::Array(expected_items), Value::Array(actual_items)) => {
+            let max_len = expected_items.len().max(actual_items.len());
+            let mut diffs = Vec::new();
+            for index in 0..max_len {
+                if diffs.len() >= remaining {
+                    break;
+                }
+                match (expected_items.get(index), actual_items.get(index)) {
+                    (Some(expected_child), Some(actual_child)) => {
+                        diffs.extend(diff_json_values(
+                            expected_child,
+                            actual_child,
+                            &format!("{}[{}]", path, index),
+                            remaining - diffs.len(),
+                        ));
+                    }
+                    (None, Some(_)) => diffs.push(format!("{}[{}] added", path, index)),
+                    (Some(_), None) => diffs.push(format!("{}[{}] removed", path, index)),
+                    (None, None) => {}
+                }
+            }
+            diffs
+        }
+        _ => vec![format!("{} expected {} got {}", path, expected, actual)],
+    }
+}
+
+#[cfg(test)]
+fn normalize_reduced_instructions_artifact(
+    function_addr: u64,
+    instructions: &[(u64, Stmt, Vec<u64>)],
+) -> Value {
+    let cfg = aeon_reduce::pipeline::reduce_function_cfg(instructions);
+    normalize_cfg_artifact(function_addr, &cfg, None, None)
+}
+
+fn materialize_optional_golden_fields(mut expected: Value, actual: &Value) -> Value {
+    let Some(expected_obj) = expected.as_object_mut() else {
+        return expected;
+    };
+    let Some(actual_obj) = actual.as_object() else {
+        return expected;
+    };
+
+    for key in ["binary_sha256", "function_sha256"] {
+        match expected_obj.get(key) {
+            Some(Value::Null) | None => {
+                if let Some(actual_value) = actual_obj.get(key) {
+                    expected_obj.insert(key.to_string(), actual_value.clone());
+                }
+            }
+            Some(_) => {}
+        }
+    }
+
+    expected
 }
 
 #[cfg(test)]

@@ -22,6 +22,26 @@ fn main() {
                 }
             }
         }
+        Command::ReducedIlGolden {
+            binary_path,
+            addr,
+            golden_path,
+        } => match aeon_eval::evaluate_reduced_il_golden(&binary_path, addr, &golden_path) {
+            Ok(run) => serde_json::to_value(run).unwrap(),
+            Err(error) => {
+                eprintln!("{}", error);
+                std::process::exit(1);
+            }
+        },
+        Command::ReductionMetrics { binary_path, addr } => {
+            match aeon_eval::evaluate_reduction_metrics(&binary_path, addr) {
+                Ok(run) => serde_json::to_value(run).unwrap(),
+                Err(error) => {
+                    eprintln!("{}", error);
+                    std::process::exit(1);
+                }
+            }
+        }
         Command::Help => unreachable!(),
     };
 
@@ -29,7 +49,19 @@ fn main() {
 }
 
 enum Command {
-    ConstructorLayout { binary_path: String, addr: u64 },
+    ConstructorLayout {
+        binary_path: String,
+        addr: u64,
+    },
+    ReducedIlGolden {
+        binary_path: String,
+        addr: u64,
+        golden_path: String,
+    },
+    ReductionMetrics {
+        binary_path: String,
+        addr: u64,
+    },
     Help,
 }
 
@@ -53,6 +85,29 @@ fn parse_args() -> Result<Command, String> {
             let addr = parse_hex_addr(&addr_str)?;
             Ok(Command::ConstructorLayout { binary_path, addr })
         }
+        "reduced-il-golden" => {
+            let binary_path = args.next().ok_or_else(usage)?;
+            let addr_str = args.next().ok_or_else(usage)?;
+            let golden_path = args.next().ok_or_else(usage)?;
+            if args.next().is_some() {
+                return Err(usage());
+            }
+            let addr = parse_hex_addr(&addr_str)?;
+            Ok(Command::ReducedIlGolden {
+                binary_path,
+                addr,
+                golden_path,
+            })
+        }
+        "reduction-metrics" => {
+            let binary_path = args.next().ok_or_else(usage)?;
+            let addr_str = args.next().ok_or_else(usage)?;
+            if args.next().is_some() {
+                return Err(usage());
+            }
+            let addr = parse_hex_addr(&addr_str)?;
+            Ok(Command::ReductionMetrics { binary_path, addr })
+        }
         _ => Err(usage()),
     }
 }
@@ -63,5 +118,11 @@ fn parse_hex_addr(value: &str) -> Result<u64, String> {
 }
 
 fn usage() -> String {
-    ["Usage:", "  aeon-eval constructor-layout <binary> <addr>"].join("\n")
+    [
+        "Usage:",
+        "  aeon-eval constructor-layout <binary> <addr>",
+        "  aeon-eval reduced-il-golden <binary> <addr> <golden>",
+        "  aeon-eval reduction-metrics <binary> <addr>",
+    ]
+    .join("\n")
 }

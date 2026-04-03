@@ -73,8 +73,13 @@ fn compute_movk_mask(shifted_imm: u64) -> u64 {
 /// and whose shifted-immediate operand is a constant, the MOVK is folded into
 /// a single `Imm` assignment.
 pub fn resolve_movk_chains(stmts: Vec<Stmt>) -> Vec<Stmt> {
+    resolve_movk_chains_with_stats(stmts).0
+}
+
+pub(crate) fn resolve_movk_chains_with_stats(stmts: Vec<Stmt>) -> (Vec<Stmt>, usize) {
     let mut env = RegisterEnv::new();
     let mut result = Vec::with_capacity(stmts.len());
+    let mut resolutions = 0usize;
 
     for stmt in stmts {
         match &stmt {
@@ -93,6 +98,7 @@ pub fn resolve_movk_chains(stmts: Vec<Stmt>) -> Vec<Stmt> {
                             dst: dst.clone(),
                             src: folded,
                         });
+                        resolutions += 1;
                         continue;
                     }
                 }
@@ -115,7 +121,7 @@ pub fn resolve_movk_chains(stmts: Vec<Stmt>) -> Vec<Stmt> {
             _ => result.push(stmt),
         }
     }
-    result
+    (result, resolutions)
 }
 
 #[cfg(test)]

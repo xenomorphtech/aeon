@@ -15,3 +15,4 @@ pub mod sccp;
 /// CSE, dead branch elimination).
 pub mod types;
 pub mod use_def;
+pub mod validate;
