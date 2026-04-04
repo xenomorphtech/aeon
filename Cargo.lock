@@ -47,6 +47,7 @@ dependencies = [
  "aeon-reduce",
  "aeonil",
  "bad64",
+ "libc",
  "object",
  "serde",
  "serde_json",

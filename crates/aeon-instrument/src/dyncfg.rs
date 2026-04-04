@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 
 use aeon_jit::{JitCompiler, JitConfig, JitEntry, JitError};
-use aeonil::Stmt;
+use aeonil::{Expr, Reg, Stmt};
 
 use crate::context::MemoryProvider;
 
@@ -51,6 +51,49 @@ fn is_terminator(stmt: &Stmt) -> bool {
         Stmt::Pair(a, b) => is_terminator(a) || is_terminator(b),
         _ => false,
     }
+}
+
+/// Transform Call and Ret statements so the JIT returns control to the engine
+/// rather than trying to execute ARM64 addresses as x86_64 code.
+///
+/// - `Call { target }` → `Assign { X30 = return_addr }` + `Branch { target }`
+///   This mimics what BL does (sets LR, then jumps). The engine will naturally
+///   follow the call chain by compiling the callee's blocks.
+///
+/// - `Ret` → `Branch { target: Reg(X30) }`
+///   Instead of halting (returning 0), returns the LR value so the engine
+///   continues at the caller's return address. When LR=0 (top-level), this
+///   returns 0 which signals halt.
+fn transform_calls_and_rets(stmts: Vec<Stmt>, return_addr: u64) -> Vec<Stmt> {
+    let mut out = Vec::with_capacity(stmts.len() + 1);
+    for stmt in stmts {
+        match stmt {
+            Stmt::Call { target } => {
+                // Set LR = return address (instruction after the BL)
+                out.push(Stmt::Assign {
+                    dst: Reg::X(30),
+                    src: Expr::Imm(return_addr),
+                });
+                // Branch to callee — JIT returns target addr to engine
+                out.push(Stmt::Branch { target });
+            }
+            Stmt::Ret => {
+                // Return via LR — JIT returns X30 value to engine
+                out.push(Stmt::Branch {
+                    target: Expr::Reg(Reg::X(30)),
+                });
+            }
+            Stmt::Pair(a, b) => {
+                // Recursively transform pairs
+                let transformed = transform_calls_and_rets(vec![*a, *b], return_addr);
+                for s in transformed {
+                    out.push(s);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 impl DynCfg {
@@ -135,10 +178,15 @@ impl DynCfg {
         if !stmts.is_empty() && !is_terminator(stmts.last().unwrap()) {
             let next = addr + total_bytes as u64;
             stmts.push(Stmt::Branch {
-                target: aeonil::Expr::Imm(next),
+                target: Expr::Imm(next),
             });
             edges = vec![next];
         }
+
+        // Transform Call and Ret so the JIT returns control to the engine
+        // instead of trying to call ARM64 addresses as x86_64 code.
+        let return_addr = addr + total_bytes as u64;
+        let stmts = transform_calls_and_rets(stmts, return_addr);
 
         // Compile the block via aeon-jit
         let code_ptr = self.compiler.compile_block(addr, &stmts)?;
