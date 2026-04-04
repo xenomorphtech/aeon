@@ -39,6 +39,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "aeon-instrument"
+version = "0.1.0"
+dependencies = [
+ "aeon",
+ "aeon-jit",
+ "aeon-reduce",
+ "aeonil",
+ "bad64",
+ "object",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "aeon-jit"
 version = "0.1.0"
 dependencies = [
