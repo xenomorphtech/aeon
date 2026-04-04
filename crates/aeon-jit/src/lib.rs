@@ -3838,4 +3838,354 @@ mod tests {
         // (0xAABBCCDD << 16) | (0x11223344 >> 16) = 0xCCDD1122
         assert_eq!(ctx.x[0] as u32, 0xCCDD1122);
     }
+
+    // ── Flag condition tests ──────────────────────────────────────────
+    // Helper: compile a SetFlags(Sub(X0, X1)) + CondBranch block and
+    // return the branch target for the given register values.
+    fn branch_result(cond: Condition, x0: u64, x1: u64) -> u64 {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![
+            Stmt::SetFlags {
+                expr: Expr::Sub(Box::new(Expr::Reg(Reg::X(0))), Box::new(Expr::Reg(Reg::X(1)))),
+            },
+            Stmt::CondBranch {
+                cond: BranchCond::Flag(cond),
+                target: Expr::Imm(0x2000),
+                fallthrough: 0x1004,
+            },
+        ];
+        let code = compiler.compile_block(0x1000, &stmts).expect("compile");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+        let mut ctx = JitContext::default();
+        ctx.x[0] = x0;
+        ctx.x[1] = x1;
+        unsafe { func(&mut ctx) }
+    }
+
+    #[test]
+    fn flag_cond_eq_and_ne() {
+        // equal
+        assert_eq!(branch_result(Condition::EQ, 5, 5), 0x2000);
+        assert_eq!(branch_result(Condition::NE, 5, 5), 0x1004);
+        // not equal
+        assert_eq!(branch_result(Condition::EQ, 5, 3), 0x1004);
+        assert_eq!(branch_result(Condition::NE, 5, 3), 0x2000);
+    }
+
+    #[test]
+    fn flag_cond_cs_cc_unsigned_carry() {
+        // 5 - 3 = 2 → carry set (no borrow)
+        assert_eq!(branch_result(Condition::CS, 5, 3), 0x2000);
+        assert_eq!(branch_result(Condition::CC, 5, 3), 0x1004);
+        // 3 - 5 → borrow → carry clear
+        assert_eq!(branch_result(Condition::CS, 3, 5), 0x1004);
+        assert_eq!(branch_result(Condition::CC, 3, 5), 0x2000);
+    }
+
+    #[test]
+    fn flag_cond_mi_pl_negative() {
+        // 3 - 5 = -2 → negative
+        assert_eq!(branch_result(Condition::MI, 3, 5), 0x2000);
+        assert_eq!(branch_result(Condition::PL, 3, 5), 0x1004);
+        // 5 - 3 = 2 → positive
+        assert_eq!(branch_result(Condition::MI, 5, 3), 0x1004);
+        assert_eq!(branch_result(Condition::PL, 5, 3), 0x2000);
+        // 5 - 5 = 0 → not negative → PL
+        assert_eq!(branch_result(Condition::MI, 5, 5), 0x1004);
+        assert_eq!(branch_result(Condition::PL, 5, 5), 0x2000);
+    }
+
+    #[test]
+    fn flag_cond_hi_ls_unsigned_greater() {
+        // HI = unsigned higher (C && !Z)
+        assert_eq!(branch_result(Condition::HI, 5, 3), 0x2000);
+        assert_eq!(branch_result(Condition::LS, 5, 3), 0x1004);
+        // equal → not HI
+        assert_eq!(branch_result(Condition::HI, 5, 5), 0x1004);
+        assert_eq!(branch_result(Condition::LS, 5, 5), 0x2000);
+        // lower → not HI
+        assert_eq!(branch_result(Condition::HI, 3, 5), 0x1004);
+        assert_eq!(branch_result(Condition::LS, 3, 5), 0x2000);
+    }
+
+    #[test]
+    fn flag_cond_ge_lt_signed() {
+        // signed: 5 >= 3
+        assert_eq!(branch_result(Condition::GE, 5, 3), 0x2000);
+        assert_eq!(branch_result(Condition::LT, 5, 3), 0x1004);
+        // signed: 3 < 5
+        assert_eq!(branch_result(Condition::GE, 3, 5), 0x1004);
+        assert_eq!(branch_result(Condition::LT, 3, 5), 0x2000);
+        // equal → GE
+        assert_eq!(branch_result(Condition::GE, 5, 5), 0x2000);
+        assert_eq!(branch_result(Condition::LT, 5, 5), 0x1004);
+        // negative values: -1 (0xFFFF...) vs 1
+        let neg1 = u64::MAX; // -1 as signed
+        assert_eq!(branch_result(Condition::LT, neg1, 1), 0x2000);
+        assert_eq!(branch_result(Condition::GE, neg1, 1), 0x1004);
+    }
+
+    #[test]
+    fn flag_cond_gt_le_signed() {
+        // 5 > 3
+        assert_eq!(branch_result(Condition::GT, 5, 3), 0x2000);
+        assert_eq!(branch_result(Condition::LE, 5, 3), 0x1004);
+        // 3 <= 5
+        assert_eq!(branch_result(Condition::GT, 3, 5), 0x1004);
+        assert_eq!(branch_result(Condition::LE, 3, 5), 0x2000);
+        // equal → LE but not GT
+        assert_eq!(branch_result(Condition::GT, 5, 5), 0x1004);
+        assert_eq!(branch_result(Condition::LE, 5, 5), 0x2000);
+    }
+
+    #[test]
+    fn flag_cond_vs_vc_overflow() {
+        // Signed overflow: MAX_POSITIVE - (-1) = MAX+1 → overflow
+        let max_pos = i64::MAX as u64;   // 0x7FFFFFFFFFFFFFFF
+        let neg1 = u64::MAX;             // -1
+        assert_eq!(branch_result(Condition::VS, max_pos, neg1), 0x2000);
+        assert_eq!(branch_result(Condition::VC, max_pos, neg1), 0x1004);
+        // No overflow: 5 - 3 = 2
+        assert_eq!(branch_result(Condition::VS, 5, 3), 0x1004);
+        assert_eq!(branch_result(Condition::VC, 5, 3), 0x2000);
+    }
+
+    // ── Bitfield insert tests ─────────────────────────────────────────
+
+    #[test]
+    fn bitfield_ubfiz_insert() {
+        // UBFIZ X0, X1, #8, #4  → X0 = (X1 & 0xF) << 8
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Intrinsic {
+            name: "ubfiz".to_string(),
+            operands: vec![
+                Expr::Reg(Reg::X(0)),
+                Expr::Reg(Reg::X(1)),
+                Expr::Imm(8),
+                Expr::Imm(4),
+            ],
+        }];
+        let code = compiler.compile_block(0x1000, &stmts).expect("compile");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+        let mut ctx = JitContext::default();
+        ctx.x[1] = 0xAB;
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[0], 0x0B00); // (0xAB & 0xF) << 8 = 0xB << 8
+    }
+
+    #[test]
+    fn bitfield_sbfiz_signed_insert() {
+        // SBFIZ X0, X1, #4, #8  → X0 = sign_extend(X1[7:0]) << 4
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Intrinsic {
+            name: "sbfiz".to_string(),
+            operands: vec![
+                Expr::Reg(Reg::X(0)),
+                Expr::Reg(Reg::X(1)),
+                Expr::Imm(4),
+                Expr::Imm(8),
+            ],
+        }];
+        let code = compiler.compile_block(0x1000, &stmts).expect("compile");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+        // Positive value: 0x7F → sign_extend(0x7F, 8) = 0x7F, << 4 = 0x7F0
+        let mut ctx = JitContext::default();
+        ctx.x[1] = 0x7F;
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[0], 0x7F0);
+        // Negative value: 0x80 → sign_extend = 0xFFFFFFFFFFFFFF80, << 4
+        let mut ctx = JitContext::default();
+        ctx.x[1] = 0x80;
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[0], 0xFFFFFFFFFFFF8000_u64 as u64 >> 0 | 0xFFFFFFFFFFFFF800);
+        // Actually: sign_extend(0x80, 8) = 0xFFFFFFFFFFFFFF80, << 4 = 0xFFFFFFFFFFFFF800
+        assert_eq!(ctx.x[0], 0xFFFFFFFFFFFFF800);
+    }
+
+    #[test]
+    fn bitfield_bfi_insert_into_dest() {
+        // BFI X0, X1, #8, #4  → X0[11:8] = X1[3:0], other bits preserved
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Intrinsic {
+            name: "bfi".to_string(),
+            operands: vec![
+                Expr::Reg(Reg::X(0)),
+                Expr::Reg(Reg::X(1)),
+                Expr::Imm(8),
+                Expr::Imm(4),
+            ],
+        }];
+        let code = compiler.compile_block(0x1000, &stmts).expect("compile");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+        let mut ctx = JitContext::default();
+        ctx.x[0] = 0xFFFF_FFFF;
+        ctx.x[1] = 0x05;
+        unsafe { func(&mut ctx) };
+        // Bits [11:8] replaced with 0x5, rest unchanged
+        assert_eq!(ctx.x[0], 0xFFFFF5FF);
+    }
+
+    #[test]
+    fn bitfield_bfxil_extract_insert_low() {
+        // BFXIL X0, X1, #8, #4  → X0[3:0] = X1[11:8], other bits preserved
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Intrinsic {
+            name: "bfxil".to_string(),
+            operands: vec![
+                Expr::Reg(Reg::X(0)),
+                Expr::Reg(Reg::X(1)),
+                Expr::Imm(8),
+                Expr::Imm(4),
+            ],
+        }];
+        let code = compiler.compile_block(0x1000, &stmts).expect("compile");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+        let mut ctx = JitContext::default();
+        ctx.x[0] = 0xFFFF_FFF0;
+        ctx.x[1] = 0xABCD;
+        unsafe { func(&mut ctx) };
+        // X1[11:8] = 0xB, insert into X0[3:0] → 0xFFFF_FFFB
+        assert_eq!(ctx.x[0], 0xFFFF_FFFB);
+    }
+
+    // ── Float conversion tests ────────────────────────────────────────
+
+    #[test]
+    fn int_to_float_scvtf() {
+        // SCVTF D0, X1  → D0 = (double)X1_signed
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::D(0),
+            src: Expr::IntToFloat(Box::new(Expr::Reg(Reg::X(1)))),
+        }];
+        let code = compiler.compile_block(0x1000, &stmts).expect("compile");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+        let mut ctx = JitContext::default();
+        ctx.x[1] = 42;
+        unsafe { func(&mut ctx) };
+        let result = f64::from_le_bytes(ctx.simd[0][..8].try_into().unwrap());
+        assert_eq!(result, 42.0);
+        // Negative
+        let mut ctx = JitContext::default();
+        ctx.x[1] = (-7i64) as u64;
+        unsafe { func(&mut ctx) };
+        let result = f64::from_le_bytes(ctx.simd[0][..8].try_into().unwrap());
+        assert_eq!(result, -7.0);
+    }
+
+    #[test]
+    fn float_to_int_fcvtzs() {
+        // FCVTZS X0, D1  → X0 = (int64_t)D1 (truncate toward zero)
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(0),
+            src: Expr::FloatToInt(Box::new(Expr::Reg(Reg::D(1)))),
+        }];
+        let code = compiler.compile_block(0x1000, &stmts).expect("compile");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+        let mut ctx = JitContext::default();
+        ctx.simd[1][..8].copy_from_slice(&3.7f64.to_le_bytes());
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[0] as i64, 3);
+        // Negative
+        let mut ctx = JitContext::default();
+        ctx.simd[1][..8].copy_from_slice(&(-9.9f64).to_le_bytes());
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[0] as i64, -9);
+    }
+
+    #[test]
+    fn fcvt_f32_to_f64() {
+        // FCVT D0, S1  → promote f32 to f64
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::D(0),
+            src: Expr::FCvt(Box::new(Expr::Reg(Reg::S(2)))),
+        }];
+        let code = compiler.compile_block(0x1000, &stmts).expect("compile");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+        let mut ctx = JitContext::default();
+        ctx.simd[2][..4].copy_from_slice(&2.5f32.to_le_bytes());
+        unsafe { func(&mut ctx) };
+        let result = f64::from_le_bytes(ctx.simd[0][..8].try_into().unwrap());
+        assert_eq!(result, 2.5);
+    }
+
+    // ── CondSelect test ───────────────────────────────────────────────
+
+    #[test]
+    fn condselect_picks_correct_value() {
+        // SetFlags(Sub(X0, X1)) then CondSelect EQ → X2 if true, X3 if false
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![
+            Stmt::SetFlags {
+                expr: Expr::Sub(Box::new(Expr::Reg(Reg::X(0))), Box::new(Expr::Reg(Reg::X(1)))),
+            },
+            Stmt::Assign {
+                dst: Reg::X(4),
+                src: Expr::CondSelect {
+                    cond: Condition::EQ,
+                    if_true: Box::new(Expr::Reg(Reg::X(2))),
+                    if_false: Box::new(Expr::Reg(Reg::X(3))),
+                },
+            },
+            Stmt::Branch {
+                target: Expr::Imm(0),
+            },
+        ];
+        let code = compiler.compile_block(0x1000, &stmts).expect("compile");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+        // Equal: select if_true (X2)
+        let mut ctx = JitContext::default();
+        ctx.x[0] = 10;
+        ctx.x[1] = 10;
+        ctx.x[2] = 100;
+        ctx.x[3] = 200;
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[4], 100);
+        // Not equal: select if_false (X3)
+        let mut ctx = JitContext::default();
+        ctx.x[0] = 10;
+        ctx.x[1] = 20;
+        ctx.x[2] = 100;
+        ctx.x[3] = 200;
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[4], 200);
+    }
+
+    #[test]
+    fn condselect_lt_signed_comparison() {
+        // CondSelect LT with signed values
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![
+            Stmt::SetFlags {
+                expr: Expr::Sub(Box::new(Expr::Reg(Reg::X(0))), Box::new(Expr::Reg(Reg::X(1)))),
+            },
+            Stmt::Assign {
+                dst: Reg::X(2),
+                src: Expr::CondSelect {
+                    cond: Condition::LT,
+                    if_true: Box::new(Expr::Imm(1)),
+                    if_false: Box::new(Expr::Imm(0)),
+                },
+            },
+            Stmt::Branch {
+                target: Expr::Imm(0),
+            },
+        ];
+        let code = compiler.compile_block(0x1000, &stmts).expect("compile");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+        // -1 < 1 → LT true
+        let mut ctx = JitContext::default();
+        ctx.x[0] = u64::MAX; // -1
+        ctx.x[1] = 1;
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[2], 1);
+        // 5 < 3 → LT false
+        let mut ctx = JitContext::default();
+        ctx.x[0] = 5;
+        ctx.x[1] = 3;
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[2], 0);
+    }
 }
