@@ -4537,4 +4537,35 @@ mod tests {
         unsafe { func(&mut ctx) };
         assert_eq!(ctx.x[2], 0);
     }
+
+    #[test]
+    fn ngc_negate_with_carry() {
+        // NGC X0, X1 → X0 = -X1 - 1 + C
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![
+            // 5 - 3 → carry set (C=1)
+            Stmt::SetFlags {
+                expr: Expr::Sub(Box::new(Expr::Reg(Reg::X(2))), Box::new(Expr::Reg(Reg::X(3)))),
+            },
+            Stmt::Assign {
+                dst: Reg::X(0),
+                src: Expr::Intrinsic {
+                    name: "ngc".to_string(),
+                    operands: vec![Expr::Reg(Reg::X(1))],
+                },
+            },
+            Stmt::Branch {
+                target: Expr::Imm(0),
+            },
+        ];
+        let code = compiler.compile_block(0x1000, &stmts).expect("compile");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+        // C=1: NGC X0, 10 → -10 -1 + 1 = -10
+        let mut ctx = JitContext::default();
+        ctx.x[1] = 10;
+        ctx.x[2] = 5;
+        ctx.x[3] = 3;
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[0] as i64, -10);
+    }
 }
