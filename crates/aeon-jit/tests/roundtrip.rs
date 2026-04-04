@@ -14,6 +14,30 @@
 //! 5. Execute the JIT-compiled entry function and compare its `main` return
 //!    value against a native x86-64 wrapper that prints the same integer.
 //!
+//! # Test coverage (13 roundtrip samples, 51 unit tests in lib.rs)
+//!
+//! Instruction patterns exercised across all samples:
+//! - **Arithmetic**: ADD, SUB, MUL, SDIV, MADD, MSUB, SMULL (widening), NEG
+//! - **Bitwise**: AND, ORR, EOR, BIC, ORN, MVN, LSL, LSR, ASR, ROR
+//! - **Bitfield**: UBFX, SBFX, UBFIZ, SBFIZ, BFI, BFXIL, EXTR
+//! - **Load/store**: LDR, LDRB, LDRH, LDRSB, LDRSH, LDRSW, STR, STRB, STRH,
+//!   LDP, STP (incl. pre/post-index writeback)
+//! - **Branch/cond**: B, BL, RET, CBZ, CBNZ, B.cond (all 14 NZCV conditions),
+//!   CSEL, CSINC, CSINV, CSNEG
+//! - **Carry**: ADC, SBC, NGC
+//! - **Multiply-high**: SMULH, UMULH
+//! - **Compare**: CMP, CMN, TST, CCMP
+//! - **Move**: MOV, MOVZ, MOVN, MOVK, ADRP, ADR
+//! - **Extensions**: SXTW, SXTH, SXTB, UXTB, UXTH
+//! - **Float**: FADD, FSUB, FMUL, FDIV, FNEG, SCVTF, FCVTZS, FCVT,
+//!   FRINTZ, FRINTM, FRINTP, FNMADD, FNMSUB
+//! - **Misc**: CLZ, REV, REV16, REV32, RBIT, CNT, MRS/MSR (NZCV)
+//!
+//! Hash algorithm samples provide heavy stress of loops + bitwise + array
+//! indexing patterns: CRC32 (bit-level XOR/shift), FNV-1a (multiply chains),
+//! SHA-256 (rotates, 64 rounds), MD5 (left-rotates, 4 round functions),
+//! SipHash-2-4 (64-bit rotates, 24 MOVK for constants).
+//!
 //! To add a new case:
 //! - place a self-contained `*.c` sample in `samples/`;
 //! - add a `sample_test!(test_sample_<name>, SampleCase { ... });` entry;
