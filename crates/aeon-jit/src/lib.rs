@@ -1929,6 +1929,78 @@ impl LoweringState {
                     ty,
                 })
             }
+            // Carry arithmetic
+            "adc" => {
+                // ADC: Rd = Rn + Rm + C
+                if operands.len() < 2 {
+                    return Err(JitError::UnsupportedExpr("adc operand count"));
+                }
+                let ty = self.resolve_int_type(hint, Some(&operands[0]))?;
+                let lhs = self.lower_expr(module, builder, imports, &operands[0], Some(ty))?;
+                let lhs = self.coerce_int(builder, lhs, ty)?;
+                let rhs = self.lower_expr(module, builder, imports, &operands[1], Some(ty))?;
+                let rhs = self.coerce_int(builder, rhs, ty)?;
+                let flags = self.read_flags(builder)?;
+                let carry = self.extract_flag(builder, flags, 1);
+                let carry_ext = builder.ins().uextend(ty, carry);
+                let sum = builder.ins().iadd(lhs.value, rhs.value);
+                Ok(LoweredValue {
+                    value: builder.ins().iadd(sum, carry_ext),
+                    ty,
+                })
+            }
+            "sbc" => {
+                // SBC: Rd = Rn - Rm - !C = Rn + ~Rm + C
+                if operands.len() < 2 {
+                    return Err(JitError::UnsupportedExpr("sbc operand count"));
+                }
+                let ty = self.resolve_int_type(hint, Some(&operands[0]))?;
+                let lhs = self.lower_expr(module, builder, imports, &operands[0], Some(ty))?;
+                let lhs = self.coerce_int(builder, lhs, ty)?;
+                let rhs = self.lower_expr(module, builder, imports, &operands[1], Some(ty))?;
+                let rhs = self.coerce_int(builder, rhs, ty)?;
+                let flags = self.read_flags(builder)?;
+                let carry = self.extract_flag(builder, flags, 1);
+                let carry_ext = builder.ins().uextend(ty, carry);
+                let not_rhs = builder.ins().bnot(rhs.value);
+                let sum = builder.ins().iadd(lhs.value, not_rhs);
+                Ok(LoweredValue {
+                    value: builder.ins().iadd(sum, carry_ext),
+                    ty,
+                })
+            }
+            // Multiply high
+            "smulh" => {
+                // SMULH: Rd = (sext(Rn) * sext(Rm)) >> 64
+                if operands.len() < 2 {
+                    return Err(JitError::UnsupportedExpr("smulh operand count"));
+                }
+                let lhs = self.lower_expr(module, builder, imports, &operands[0], Some(types::I64))?;
+                let lhs = self.coerce_int(builder, lhs, types::I64)?;
+                let rhs = self.lower_expr(module, builder, imports, &operands[1], Some(types::I64))?;
+                let rhs = self.coerce_int(builder, rhs, types::I64)?;
+                // Cranelift doesn't have mulhi; emulate with 4 x 32-bit multiplies
+                let value = self.emit_smulh(builder, lhs.value, rhs.value)?;
+                Ok(LoweredValue {
+                    value,
+                    ty: types::I64,
+                })
+            }
+            "umulh" => {
+                // UMULH: Rd = (Rn * Rm) >> 64 (unsigned)
+                if operands.len() < 2 {
+                    return Err(JitError::UnsupportedExpr("umulh operand count"));
+                }
+                let lhs = self.lower_expr(module, builder, imports, &operands[0], Some(types::I64))?;
+                let lhs = self.coerce_int(builder, lhs, types::I64)?;
+                let rhs = self.lower_expr(module, builder, imports, &operands[1], Some(types::I64))?;
+                let rhs = self.coerce_int(builder, rhs, types::I64)?;
+                let value = self.emit_umulh(builder, lhs.value, rhs.value)?;
+                Ok(LoweredValue {
+                    value,
+                    ty: types::I64,
+                })
+            }
             "movk" => {
                 // MOVK: insert 16-bit immediate at a shifted position, keep other bits.
                 // operands[0] = Expr::Reg(Rd) (current value)
@@ -2058,6 +2130,46 @@ impl LoweringState {
                 // Other MSR targets: treat as nop
                 Ok(())
             }
+            "fccmp" | "fccmpe" => {
+                // FCCMP Sn, Sm, #nzcv, cond → if cond then flags=fcmp(Sn,Sm) else flags=nzcv
+                // operands: [Sn, Sm, nzcv_imm, cond_imm]
+                if operands.len() >= 4 {
+                    let nzcv_imm = match &operands[2] {
+                        Expr::Imm(v) => *v,
+                        _ => 0,
+                    };
+                    let cond_val = match &operands[3] {
+                        Expr::Imm(v) => *v as u8,
+                        _ => return Err(JitError::UnsupportedStmt("fccmp cond")),
+                    };
+                    let cond = self.condition_from_u8(cond_val)?;
+                    let flags = self.read_flags(builder)?;
+                    let cond_true = self.eval_flags_condition(builder, flags, cond)?;
+
+                    // Compute fcmp flags
+                    let ty = self.resolve_float_type(None, Some(&operands[0]))?;
+                    let a = self.lower_expr(module, builder, imports, &operands[0], Some(ty))?;
+                    let a = self.coerce_float(builder, a, ty)?;
+                    let b = self.lower_expr(module, builder, imports, &operands[1], Some(ty))?;
+                    let b = self.coerce_float(builder, b, ty)?;
+                    // Compute SUB-style flags from float comparison
+                    let fsub_result = builder.ins().fsub(a.value, b.value);
+                    let result_bits = if ty == types::F32 {
+                        let bits = builder.ins().bitcast(types::I32, MemFlags::new(), fsub_result);
+                        builder.ins().uextend(types::I64, bits)
+                    } else {
+                        builder.ins().bitcast(types::I64, MemFlags::new(), fsub_result)
+                    };
+                    let fcmp_flags = self.pack_nzcv(builder, result_bits, types::I64, None, None)?;
+
+                    // Select: if condition, use fcmp flags; else use immediate nzcv
+                    let imm_flags = builder.ins().iconst(types::I64, nzcv_imm as i64);
+                    let selected = builder.ins().select(cond_true, fcmp_flags, imm_flags);
+                    self.write_flags_value(builder, selected)?;
+                    return Ok(());
+                }
+                Ok(())
+            }
             // Bitfield operations: lift_intrinsic_all passes all operands
             // including destination, so operands[0] is the dest register.
             "ubfx" => {
@@ -2180,6 +2292,65 @@ impl LoweringState {
             }
             _ => Err(JitError::UnsupportedStmt("stmt intrinsic")),
         }
+    }
+
+    /// Emit unsigned 64×64→128 multiply, return upper 64 bits.
+    /// Uses the identity: (a_hi*2^32 + a_lo) * (b_hi*2^32 + b_lo)
+    ///   = a_hi*b_hi*2^64 + (a_hi*b_lo + a_lo*b_hi)*2^32 + a_lo*b_lo
+    /// Carefully tracks carries in the middle terms to avoid overflow.
+    fn emit_umulh(
+        &self,
+        builder: &mut FunctionBuilder<'_>,
+        a: Value,
+        b: Value,
+    ) -> Result<Value, JitError> {
+        let mask32 = builder.ins().iconst(types::I64, 0xFFFF_FFFF_i64);
+        let a_lo = builder.ins().band(a, mask32);
+        let a_hi = builder.ins().ushr_imm(a, 32);
+        let b_lo = builder.ins().band(b, mask32);
+        let b_hi = builder.ins().ushr_imm(b, 32);
+
+        // Four partial products (each fits in 64 bits since inputs are 32-bit)
+        let lo_lo = builder.ins().imul(a_lo, b_lo);
+        let lo_hi = builder.ins().imul(a_lo, b_hi);
+        let hi_lo = builder.ins().imul(a_hi, b_lo);
+        let hi_hi = builder.ins().imul(a_hi, b_hi);
+
+        // Add the middle terms carefully to detect carry.
+        // mid1 = lo_hi + (lo_lo >> 32) — cannot overflow since both ≤ 2^63
+        let lo_lo_upper = builder.ins().ushr_imm(lo_lo, 32);
+        let mid1 = builder.ins().iadd(lo_hi, lo_lo_upper);
+        // mid1_carry = mid1 >> 32 (upper bits from first mid accumulation)
+        let mid1_lo = builder.ins().band(mid1, mask32);
+
+        // mid2 = mid1_lo + hi_lo — cannot overflow since both ≤ 2^32 * (2^32-1)
+        let mid2 = builder.ins().iadd(mid1_lo, hi_lo);
+
+        // result_hi = hi_hi + (mid1 >> 32) + (mid2 >> 32)
+        let mid1_hi = builder.ins().ushr_imm(mid1, 32);
+        let mid2_hi = builder.ins().ushr_imm(mid2, 32);
+        let result = builder.ins().iadd(hi_hi, mid1_hi);
+        Ok(builder.ins().iadd(result, mid2_hi))
+    }
+
+    /// Emit signed 64×64→128 multiply, return upper 64 bits.
+    /// Uses umulh and adjusts: smulh(a,b) = umulh(a,b) - (a<0?b:0) - (b<0?a:0)
+    fn emit_smulh(
+        &self,
+        builder: &mut FunctionBuilder<'_>,
+        a: Value,
+        b: Value,
+    ) -> Result<Value, JitError> {
+        let umulh = self.emit_umulh(builder, a, b)?;
+
+        // Correction for signed: if a is negative, subtract b; if b is negative, subtract a
+        let zero = builder.ins().iconst(types::I64, 0);
+        let a_neg = builder.ins().icmp(IntCC::SignedLessThan, a, zero);
+        let b_neg = builder.ins().icmp(IntCC::SignedLessThan, b, zero);
+        let a_adj = builder.ins().select(a_neg, b, zero);
+        let b_adj = builder.ins().select(b_neg, a, zero);
+        let adjusted = builder.ins().isub(umulh, a_adj);
+        Ok(builder.ins().isub(adjusted, b_adj))
     }
 
     fn extract_bitfield_operands(
@@ -2724,6 +2895,28 @@ impl LoweringState {
             Condition::GT => Ok(FloatCC::GreaterThan),
             Condition::LE => Ok(FloatCC::LessThanOrEqual),
             _ => Err(JitError::UnsupportedCondition(cond)),
+        }
+    }
+
+    fn condition_from_u8(&self, val: u8) -> Result<Condition, JitError> {
+        match val {
+            0 => Ok(Condition::EQ),
+            1 => Ok(Condition::NE),
+            2 => Ok(Condition::CS),
+            3 => Ok(Condition::CC),
+            4 => Ok(Condition::MI),
+            5 => Ok(Condition::PL),
+            6 => Ok(Condition::VS),
+            7 => Ok(Condition::VC),
+            8 => Ok(Condition::HI),
+            9 => Ok(Condition::LS),
+            10 => Ok(Condition::GE),
+            11 => Ok(Condition::LT),
+            12 => Ok(Condition::GT),
+            13 => Ok(Condition::LE),
+            14 => Ok(Condition::AL),
+            15 => Ok(Condition::NV),
+            _ => Err(JitError::UnsupportedCondition(Condition::AL)),
         }
     }
 
@@ -4185,6 +4378,162 @@ mod tests {
         let mut ctx = JitContext::default();
         ctx.x[0] = 5;
         ctx.x[1] = 3;
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[2], 0);
+    }
+
+    #[test]
+    fn adc_add_with_carry() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        // Set carry flag, then ADC
+        let stmts = vec![
+            // Set flags with 0xFFFFFFFF + 1 → carry set
+            Stmt::SetFlags {
+                expr: Expr::Add(
+                    Box::new(Expr::Reg(Reg::W(2))),
+                    Box::new(Expr::Imm(1)),
+                ),
+            },
+            // W0 = ADC(W0, W1) = W0 + W1 + C
+            Stmt::Assign {
+                dst: Reg::W(0),
+                src: Expr::Intrinsic {
+                    name: "adc".to_string(),
+                    operands: vec![Expr::Reg(Reg::W(0)), Expr::Reg(Reg::W(1))],
+                },
+            },
+        ];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        ctx.x[0] = 10;
+        ctx.x[1] = 20;
+        ctx.x[2] = 0xFFFFFFFF; // will cause carry when +1
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[0] as u32, 31); // 10 + 20 + 1(carry)
+    }
+
+    #[test]
+    fn sbc_subtract_with_carry() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        // Set carry flag (= no borrow), then SBC
+        let stmts = vec![
+            // CMP 5, 3 → carry set (no borrow)
+            Stmt::SetFlags {
+                expr: Expr::Sub(
+                    Box::new(Expr::Reg(Reg::W(2))),
+                    Box::new(Expr::Reg(Reg::W(3))),
+                ),
+            },
+            // W0 = SBC(W0, W1) = W0 - W1 - !C = W0 + ~W1 + C
+            Stmt::Assign {
+                dst: Reg::W(0),
+                src: Expr::Intrinsic {
+                    name: "sbc".to_string(),
+                    operands: vec![Expr::Reg(Reg::W(0)), Expr::Reg(Reg::W(1))],
+                },
+            },
+        ];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        // With carry set: SBC = 100 - 30 - 0 = 70
+        let mut ctx = JitContext::default();
+        ctx.x[0] = 100;
+        ctx.x[1] = 30;
+        ctx.x[2] = 5; // > 3 → carry set
+        ctx.x[3] = 3;
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[0] as u32, 70);
+    }
+
+    #[test]
+    fn umulh_unsigned_multiply_high() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(2),
+            src: Expr::Intrinsic {
+                name: "umulh".to_string(),
+                operands: vec![Expr::Reg(Reg::X(0)), Expr::Reg(Reg::X(1))],
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        // Small values: upper 64 bits should be 0
+        let mut ctx = JitContext::default();
+        ctx.x[0] = 100;
+        ctx.x[1] = 200;
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[2], 0);
+
+        // Large values: 2^63 * 2 = 2^64, upper = 1
+        let mut ctx = JitContext::default();
+        ctx.x[0] = 1u64 << 63;
+        ctx.x[1] = 2;
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[2], 1);
+
+        // u64::MAX * u64::MAX: upper bits
+        let mut ctx = JitContext::default();
+        ctx.x[0] = u64::MAX;
+        ctx.x[1] = u64::MAX;
+        unsafe { func(&mut ctx) };
+        // (2^64-1)^2 = 2^128 - 2^65 + 1, upper 64 bits = 2^64 - 2 = 0xFFFFFFFFFFFFFFFE
+        assert_eq!(ctx.x[2], u64::MAX - 1);
+    }
+
+    #[test]
+    fn smulh_signed_multiply_high() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(2),
+            src: Expr::Intrinsic {
+                name: "smulh".to_string(),
+                operands: vec![Expr::Reg(Reg::X(0)), Expr::Reg(Reg::X(1))],
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        // Small positive: upper should be 0
+        let mut ctx = JitContext::default();
+        ctx.x[0] = 100;
+        ctx.x[1] = 200;
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[2], 0);
+
+        // -1 * 1 = -1, upper 64 bits = -1 (all ones)
+        let mut ctx = JitContext::default();
+        ctx.x[0] = u64::MAX; // -1 as i64
+        ctx.x[1] = 1;
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[2], u64::MAX); // -1
+
+        // i64::MIN * 2: (-2^63) * 2 = -2^64, upper = -1
+        let mut ctx = JitContext::default();
+        ctx.x[0] = 1u64 << 63; // i64::MIN
+        ctx.x[1] = 2;
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[2], u64::MAX); // -1
+
+        // Large positive: i64::MAX * 2 = 2^64 - 2, upper = 0
+        let mut ctx = JitContext::default();
+        ctx.x[0] = i64::MAX as u64;
+        ctx.x[1] = 2;
         unsafe { func(&mut ctx) };
         assert_eq!(ctx.x[2], 0);
     }

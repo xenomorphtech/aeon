@@ -351,17 +351,49 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         }
 
         // Carry ops
-        Op::ADC | Op::ADCS => {
+        Op::ADC => {
             ft(&mut edges, next_pc);
             lift_binary_intrinsic(operands, "adc")
         }
-        Op::SBC | Op::SBCS => {
+        Op::ADCS => {
+            ft(&mut edges, next_pc);
+            let dst = reg_op(operands, 0);
+            let a = expr_op(operands, 1);
+            let b = expr_op(operands, 2);
+            let expr = e_intrinsic("adc", vec![a.clone(), b.clone()]);
+            Stmt::Pair(
+                Box::new(Stmt::SetFlags { expr: expr.clone() }),
+                Box::new(Stmt::Assign { dst, src: expr }),
+            )
+        }
+        Op::SBC => {
             ft(&mut edges, next_pc);
             lift_binary_intrinsic(operands, "sbc")
         }
-        Op::NGC | Op::NGCS => {
+        Op::SBCS => {
+            ft(&mut edges, next_pc);
+            let dst = reg_op(operands, 0);
+            let a = expr_op(operands, 1);
+            let b = expr_op(operands, 2);
+            let expr = e_intrinsic("sbc", vec![a.clone(), b.clone()]);
+            Stmt::Pair(
+                Box::new(Stmt::SetFlags { expr: expr.clone() }),
+                Box::new(Stmt::Assign { dst, src: expr }),
+            )
+        }
+        Op::NGC => {
             ft(&mut edges, next_pc);
             lift_unary_intrinsic(operands, "ngc")
+        }
+        Op::NGCS => {
+            ft(&mut edges, next_pc);
+            let dst = reg_op(operands, 0);
+            let a = expr_op(operands, 1);
+            let expr = e_intrinsic("ngc", vec![a]);
+            Stmt::Pair(
+                Box::new(Stmt::SetFlags { expr: expr.clone() }),
+                Box::new(Stmt::Assign { dst, src: expr }),
+            )
         }
 
         // ── Logic ──────────────────────────────────────────────────
