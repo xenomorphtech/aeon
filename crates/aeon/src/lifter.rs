@@ -219,7 +219,7 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         }
         Op::ADDS => {
             ft(&mut edges, next_pc);
-            lift_binary(operands, e_add)
+            lift_binary_with_flags(operands, e_add)
         }
         Op::SUB => {
             ft(&mut edges, next_pc);
@@ -227,7 +227,7 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         }
         Op::SUBS => {
             ft(&mut edges, next_pc);
-            lift_binary(operands, e_sub)
+            lift_binary_with_flags(operands, e_sub)
         }
         Op::MUL => {
             ft(&mut edges, next_pc);
@@ -365,9 +365,13 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         }
 
         // ── Logic ──────────────────────────────────────────────────
-        Op::AND | Op::ANDS => {
+        Op::AND => {
             ft(&mut edges, next_pc);
             lift_binary(operands, e_and)
+        }
+        Op::ANDS => {
+            ft(&mut edges, next_pc);
+            lift_binary_with_flags(operands, e_and)
         }
         Op::ORR => {
             ft(&mut edges, next_pc);
@@ -377,7 +381,7 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
             ft(&mut edges, next_pc);
             lift_binary(operands, e_xor)
         }
-        Op::BIC | Op::BICS => {
+        Op::BIC => {
             ft(&mut edges, next_pc);
             let dst = reg_op(operands, 0);
             let a = expr_op(operands, 1);
@@ -386,6 +390,17 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
                 dst,
                 src: e_and(a, e_not(b)),
             }
+        }
+        Op::BICS => {
+            ft(&mut edges, next_pc);
+            let dst = reg_op(operands, 0);
+            let a = expr_op(operands, 1);
+            let b = expr_op(operands, 2);
+            let expr = e_and(a.clone(), e_not(b.clone()));
+            Stmt::Pair(
+                Box::new(Stmt::SetFlags { expr: expr.clone() }),
+                Box::new(Stmt::Assign { dst, src: expr }),
+            )
         }
         Op::ORN => {
             ft(&mut edges, next_pc);
@@ -1129,6 +1144,21 @@ fn lift_binary(operands: &[Operand], make: fn(Expr, Expr) -> Expr) -> Stmt {
         dst,
         src: make(a, b),
     }
+}
+
+fn lift_binary_with_flags(operands: &[Operand], make: fn(Expr, Expr) -> Expr) -> Stmt {
+    let dst = reg_op(operands, 0);
+    let a = expr_op(operands, 1);
+    let b = expr_op(operands, 2);
+    Stmt::Pair(
+        Box::new(Stmt::SetFlags {
+            expr: make(a.clone(), b.clone()),
+        }),
+        Box::new(Stmt::Assign {
+            dst,
+            src: make(a, b),
+        }),
+    )
 }
 
 fn lift_unary(operands: &[Operand], make: fn(Expr) -> Expr) -> Stmt {

@@ -498,7 +498,9 @@ impl LoweringState {
                     .trap(cranelift_codegen::ir::TrapCode::unwrap_user(1));
                 self.terminated = true;
             }
-            Stmt::Intrinsic { .. } => return Err(JitError::UnsupportedStmt("stmt intrinsic")),
+            Stmt::Intrinsic { name, operands } => {
+                self.lower_stmt_intrinsic(module, builder, imports, name, operands)?;
+            }
         }
         Ok(())
     }
@@ -975,8 +977,10 @@ impl LoweringState {
                     ty: types::I64,
                 })
             }
-            Expr::MrsRead(_) => Err(JitError::UnsupportedExpr("mrs_read")),
-            Expr::Intrinsic { .. } => Err(JitError::UnsupportedExpr("expr intrinsic")),
+            Expr::MrsRead(name) => self.lower_mrs_read(builder, name, hint),
+            Expr::Intrinsic { name, operands } => {
+                self.lower_expr_intrinsic(module, builder, imports, name, operands, hint)
+            }
         }
     }
 
@@ -1666,6 +1670,493 @@ impl LoweringState {
         self.sp.dirty = snapshot.sp;
         self.pc.dirty = snapshot.pc;
         self.flags.dirty = snapshot.flags;
+    }
+
+    fn lower_mrs_read(
+        &mut self,
+        builder: &mut FunctionBuilder<'_>,
+        name: &str,
+        hint: Option<Type>,
+    ) -> Result<LoweredValue, JitError> {
+        let ty = self.resolve_int_type(hint, None)?;
+        match name {
+            "nzcv" => {
+                // NZCV is stored as our flags field shifted to bits [31:28]
+                let flags = self.read_flags(builder)?;
+                let shifted = builder.ins().ishl_imm(flags, 28);
+                let value = if ty != types::I64 {
+                    builder.ins().ireduce(ty, shifted)
+                } else {
+                    shifted
+                };
+                Ok(LoweredValue { value, ty })
+            }
+            // Unknown system registers return 0
+            _ => Ok(LoweredValue {
+                value: builder.ins().iconst(ty, 0),
+                ty,
+            }),
+        }
+    }
+
+    fn lower_expr_intrinsic(
+        &mut self,
+        module: &mut JITModule,
+        builder: &mut FunctionBuilder<'_>,
+        imports: &Imports,
+        name: &str,
+        operands: &[Expr],
+        hint: Option<Type>,
+    ) -> Result<LoweredValue, JitError> {
+        match name {
+            // Bitwise vector operations (arrangement-independent)
+            "and" => self.lower_simd_binop(module, builder, imports, operands, |b, a, c| {
+                b.ins().band(a, c)
+            }),
+            "orr" => self.lower_simd_binop(module, builder, imports, operands, |b, a, c| {
+                b.ins().bor(a, c)
+            }),
+            "eor" => self.lower_simd_binop(module, builder, imports, operands, |b, a, c| {
+                b.ins().bxor(a, c)
+            }),
+            "orn" => self.lower_simd_binop(module, builder, imports, operands, |b, a, c| {
+                let not_c = b.ins().bnot(c);
+                b.ins().bor(a, not_c)
+            }),
+            "bic" => self.lower_simd_binop(module, builder, imports, operands, |b, a, c| {
+                let not_c = b.ins().bnot(c);
+                b.ins().band(a, not_c)
+            }),
+            "bsl" => {
+                // BSL: bitselect - result = (op1 & mask) | (op2 & ~mask)
+                // operands: [mask, op1, op2]
+                if operands.len() < 3 {
+                    return Err(JitError::UnsupportedExpr("bsl operand count"));
+                }
+                let mask = self.lower_expr(module, builder, imports, &operands[0], Some(I8X16))?;
+                let mask = self.coerce_value(builder, mask, I8X16)?;
+                let op1 = self.lower_expr(module, builder, imports, &operands[1], Some(I8X16))?;
+                let op1 = self.coerce_value(builder, op1, I8X16)?;
+                let op2 = self.lower_expr(module, builder, imports, &operands[2], Some(I8X16))?;
+                let op2 = self.coerce_value(builder, op2, I8X16)?;
+                Ok(LoweredValue {
+                    value: builder.ins().bitselect(mask.value, op1.value, op2.value),
+                    ty: I8X16,
+                })
+            }
+            "bit" => {
+                // BIT: dst = (src & mask) | (dst & ~mask)  (insert if bit set)
+                // operands: [dst, src, mask]
+                if operands.len() < 3 {
+                    return Err(JitError::UnsupportedExpr("bit operand count"));
+                }
+                let dst = self.lower_expr(module, builder, imports, &operands[0], Some(I8X16))?;
+                let dst = self.coerce_value(builder, dst, I8X16)?;
+                let src = self.lower_expr(module, builder, imports, &operands[1], Some(I8X16))?;
+                let src = self.coerce_value(builder, src, I8X16)?;
+                let mask = self.lower_expr(module, builder, imports, &operands[2], Some(I8X16))?;
+                let mask = self.coerce_value(builder, mask, I8X16)?;
+                Ok(LoweredValue {
+                    value: builder.ins().bitselect(mask.value, src.value, dst.value),
+                    ty: I8X16,
+                })
+            }
+            "bif" => {
+                // BIF: dst = (dst & mask) | (src & ~mask)  (insert if bit clear)
+                // operands: [dst, src, mask]
+                if operands.len() < 3 {
+                    return Err(JitError::UnsupportedExpr("bif operand count"));
+                }
+                let dst = self.lower_expr(module, builder, imports, &operands[0], Some(I8X16))?;
+                let dst = self.coerce_value(builder, dst, I8X16)?;
+                let src = self.lower_expr(module, builder, imports, &operands[1], Some(I8X16))?;
+                let src = self.coerce_value(builder, src, I8X16)?;
+                let mask = self.lower_expr(module, builder, imports, &operands[2], Some(I8X16))?;
+                let mask = self.coerce_value(builder, mask, I8X16)?;
+                // BIF is bitselect with inverted mask: select dst where mask=1, src where mask=0
+                Ok(LoweredValue {
+                    value: builder.ins().bitselect(mask.value, dst.value, src.value),
+                    ty: I8X16,
+                })
+            }
+            "mvn" | "not" => {
+                if operands.is_empty() {
+                    return Err(JitError::UnsupportedExpr("not operand count"));
+                }
+                let inner =
+                    self.lower_expr(module, builder, imports, &operands[0], Some(I8X16))?;
+                let inner = self.coerce_value(builder, inner, I8X16)?;
+                Ok(LoweredValue {
+                    value: builder.ins().bnot(inner.value),
+                    ty: I8X16,
+                })
+            }
+            // FP rounding intrinsics
+            "frintz" => self.lower_float_rounding_intrinsic(module, builder, imports, operands, hint, |b, v| {
+                b.ins().trunc(v)
+            }),
+            "frintm" => self.lower_float_rounding_intrinsic(module, builder, imports, operands, hint, |b, v| {
+                b.ins().floor(v)
+            }),
+            "frintp" => self.lower_float_rounding_intrinsic(module, builder, imports, operands, hint, |b, v| {
+                b.ins().ceil(v)
+            }),
+            "frintn" | "frinta" | "frintx" => {
+                self.lower_float_rounding_intrinsic(module, builder, imports, operands, hint, |b, v| {
+                    b.ins().nearest(v)
+                })
+            }
+            // FNMADD: -(a*b) + c  →  fneg(fma(a, b, fneg(c)))
+            // Actually: FNMADD rd, rn, rm, ra = -(rn*rm) - ra
+            "fnmadd" => {
+                if operands.len() < 3 {
+                    return Err(JitError::UnsupportedExpr("fnmadd operand count"));
+                }
+                let ty = self.resolve_float_type(hint, None)?;
+                let n = self.lower_expr(module, builder, imports, &operands[0], Some(ty))?;
+                let n = self.coerce_float(builder, n, ty)?;
+                let m = self.lower_expr(module, builder, imports, &operands[1], Some(ty))?;
+                let m = self.coerce_float(builder, m, ty)?;
+                let a = self.lower_expr(module, builder, imports, &operands[2], Some(ty))?;
+                let a = self.coerce_float(builder, a, ty)?;
+                // -(n*m) - a = fneg(fma(n, m, a))... actually just compute with basic ops
+                let prod = builder.ins().fmul(n.value, m.value);
+                let neg_prod = builder.ins().fneg(prod);
+                Ok(LoweredValue {
+                    value: builder.ins().fsub(neg_prod, a.value),
+                    ty,
+                })
+            }
+            // FNMSUB: (a*b) - c
+            // Actually: FNMSUB rd, rn, rm, ra = rn*rm - ra
+            "fnmsub" => {
+                if operands.len() < 3 {
+                    return Err(JitError::UnsupportedExpr("fnmsub operand count"));
+                }
+                let ty = self.resolve_float_type(hint, None)?;
+                let n = self.lower_expr(module, builder, imports, &operands[0], Some(ty))?;
+                let n = self.coerce_float(builder, n, ty)?;
+                let m = self.lower_expr(module, builder, imports, &operands[1], Some(ty))?;
+                let m = self.coerce_float(builder, m, ty)?;
+                let a = self.lower_expr(module, builder, imports, &operands[2], Some(ty))?;
+                let a = self.coerce_float(builder, a, ty)?;
+                let prod = builder.ins().fmul(n.value, m.value);
+                Ok(LoweredValue {
+                    value: builder.ins().fsub(prod, a.value),
+                    ty,
+                })
+            }
+            "movk" => {
+                // MOVK: insert 16-bit immediate at a shifted position, keep other bits.
+                // operands[0] = Expr::Reg(Rd) (current value)
+                // operands[1] = shifted immediate (already has LSL applied)
+                if operands.len() < 2 {
+                    return Err(JitError::UnsupportedExpr("movk operand count"));
+                }
+                let ty = self.resolve_int_type(hint, Some(&operands[0]))?;
+                let reg_val = self.lower_expr(module, builder, imports, &operands[0], Some(ty))?;
+                let reg_val = self.coerce_int(builder, reg_val, ty)?;
+                // Extract the shift amount from the expression tree
+                let (imm_val, shift_amount) = match &operands[1] {
+                    Expr::Shl(inner, shift) => {
+                        let v = self.lower_expr(module, builder, imports, inner, Some(ty))?;
+                        let v = self.coerce_int(builder, v, ty)?;
+                        let shift_imm = match shift.as_ref() {
+                            Expr::Imm(s) => *s as u8,
+                            _ => 0,
+                        };
+                        (v, shift_imm)
+                    }
+                    _ => {
+                        let v = self.lower_expr(module, builder, imports, &operands[1], Some(ty))?;
+                        let v = self.coerce_int(builder, v, ty)?;
+                        (v, 0u8)
+                    }
+                };
+                // mask = 0xFFFF << shift_amount
+                let mask_val = 0xFFFFu64 << shift_amount;
+                let mask = self.iconst(builder, ty, mask_val)?;
+                let inv_mask = self.iconst(builder, ty, !mask_val)?;
+                // Clear the 16-bit window, then insert the shifted immediate
+                let cleared = builder.ins().band(reg_val.value, inv_mask);
+                let shifted_imm = if shift_amount > 0 {
+                    let shift = builder.ins().iconst(ty, i64::from(shift_amount));
+                    builder.ins().ishl(imm_val.value, shift)
+                } else {
+                    imm_val.value
+                };
+                // Mask the shifted immediate to 16 bits at the right position
+                let masked_imm = builder.ins().band(shifted_imm, mask);
+                Ok(LoweredValue {
+                    value: builder.ins().bor(cleared, masked_imm),
+                    ty,
+                })
+            }
+            _ => Err(JitError::UnsupportedExpr("expr intrinsic")),
+        }
+    }
+
+    fn lower_simd_binop(
+        &mut self,
+        module: &mut JITModule,
+        builder: &mut FunctionBuilder<'_>,
+        imports: &Imports,
+        operands: &[Expr],
+        op: impl Fn(&mut FunctionBuilder<'_>, Value, Value) -> Value,
+    ) -> Result<LoweredValue, JitError> {
+        if operands.len() < 2 {
+            return Err(JitError::UnsupportedExpr("simd binop operand count"));
+        }
+        let lhs = self.lower_expr(module, builder, imports, &operands[0], Some(I8X16))?;
+        let lhs = self.coerce_value(builder, lhs, I8X16)?;
+        let rhs = self.lower_expr(module, builder, imports, &operands[1], Some(I8X16))?;
+        let rhs = self.coerce_value(builder, rhs, I8X16)?;
+        Ok(LoweredValue {
+            value: op(builder, lhs.value, rhs.value),
+            ty: I8X16,
+        })
+    }
+
+    fn lower_float_rounding_intrinsic(
+        &mut self,
+        module: &mut JITModule,
+        builder: &mut FunctionBuilder<'_>,
+        imports: &Imports,
+        operands: &[Expr],
+        hint: Option<Type>,
+        op: impl Fn(&mut FunctionBuilder<'_>, Value) -> Value,
+    ) -> Result<LoweredValue, JitError> {
+        if operands.is_empty() {
+            return Err(JitError::UnsupportedExpr("float rounding operand count"));
+        }
+        let ty = self.resolve_float_type(hint, Some(&operands[0]))?;
+        let inner = self.lower_expr(module, builder, imports, &operands[0], Some(ty))?;
+        let inner = self.coerce_float(builder, inner, ty)?;
+        Ok(LoweredValue {
+            value: op(builder, inner.value),
+            ty,
+        })
+    }
+
+    fn lower_stmt_intrinsic(
+        &mut self,
+        module: &mut JITModule,
+        builder: &mut FunctionBuilder<'_>,
+        imports: &Imports,
+        name: &str,
+        operands: &[Expr],
+    ) -> Result<(), JitError> {
+        match name {
+            "msr" => {
+                // MSR nzcv, Xn  →  write flags from register
+                // operands: [sysreg_intrinsic, value_expr]
+                if operands.len() >= 2 {
+                    if let Expr::Intrinsic {
+                        name: ref sr_name, ..
+                    } = operands[0]
+                    {
+                        if sr_name == "nzcv" {
+                            let value = self.lower_expr(
+                                module,
+                                builder,
+                                imports,
+                                &operands[1],
+                                Some(types::I64),
+                            )?;
+                            let value = self.coerce_int(builder, value, types::I64)?;
+                            // Extract NZCV from bits [31:28]
+                            let shifted = builder.ins().ushr_imm(value.value, 28);
+                            let masked = builder.ins().band_imm(shifted, 0xF);
+                            self.write_flags_value(builder, masked)?;
+                            return Ok(());
+                        }
+                    }
+                }
+                // Other MSR targets: treat as nop
+                Ok(())
+            }
+            // Bitfield operations: lift_intrinsic_all passes all operands
+            // including destination, so operands[0] is the dest register.
+            "ubfx" => {
+                // UBFX Rd, Rn, #lsb, #width → Rd = (Rn >> lsb) & mask(width)
+                self.lower_bitfield_stmt(module, builder, imports, operands, |this, b, src, lsb, width| {
+                    let ty = b.func.dfg.value_type(src);
+                    let shift = b.ins().iconst(ty, i64::from(lsb));
+                    let shifted = b.ins().ushr(src, shift);
+                    let mask = this.mask_for_width(b, ty, width)?;
+                    Ok(b.ins().band(shifted, mask))
+                })
+            }
+            "ubfiz" => {
+                // UBFIZ Rd, Rn, #lsb, #width → Rd = (Rn & mask(width)) << lsb
+                self.lower_bitfield_stmt(module, builder, imports, operands, |this, b, src, lsb, width| {
+                    let ty = b.func.dfg.value_type(src);
+                    let mask = this.mask_for_width(b, ty, width)?;
+                    let masked = b.ins().band(src, mask);
+                    let shift = b.ins().iconst(ty, i64::from(lsb));
+                    Ok(b.ins().ishl(masked, shift))
+                })
+            }
+            "sbfx" => {
+                // SBFX Rd, Rn, #lsb, #width → Rd = sign_extend((Rn >> lsb)[width-1:0])
+                self.lower_bitfield_stmt(module, builder, imports, operands, |_this, b, src, lsb, width| {
+                    let ty = b.func.dfg.value_type(src);
+                    let bits = ty.bits() as u8;
+                    let shift_right = b.ins().iconst(ty, i64::from(lsb));
+                    let shifted = b.ins().ushr(src, shift_right);
+                    // Sign-extend from `width` bits using shift-left then arithmetic-shift-right
+                    let sext_shift = b.ins().iconst(ty, i64::from(bits - width));
+                    let shl = b.ins().ishl(shifted, sext_shift);
+                    Ok(b.ins().sshr(shl, sext_shift))
+                })
+            }
+            "sbfiz" => {
+                // SBFIZ Rd, Rn, #lsb, #width → Rd = sign_extend(Rn[width-1:0]) << lsb
+                self.lower_bitfield_stmt(module, builder, imports, operands, |_this, b, src, lsb, width| {
+                    let ty = b.func.dfg.value_type(src);
+                    let bits = ty.bits() as u8;
+                    // Sign-extend from width bits
+                    let sext_shift = b.ins().iconst(ty, i64::from(bits - width));
+                    let shl = b.ins().ishl(src, sext_shift);
+                    let sext = b.ins().sshr(shl, sext_shift);
+                    let shift = b.ins().iconst(ty, i64::from(lsb));
+                    Ok(b.ins().ishl(sext, shift))
+                })
+            }
+            "bfi" => {
+                // BFI Rd, Rn, #lsb, #width → Rd[lsb+width-1:lsb] = Rn[width-1:0]
+                // This reads the current Rd and inserts bits from Rn
+                if operands.len() < 4 {
+                    return Err(JitError::UnsupportedStmt("bfi operand count"));
+                }
+                let (dst_reg, dst_val, src_val, lsb, width) =
+                    self.extract_bitfield_operands(module, builder, imports, operands)?;
+                let ty = builder.func.dfg.value_type(dst_val);
+                let width_mask = self.mask_for_width(builder, ty, width)?;
+                let shift = builder.ins().iconst(ty, i64::from(lsb));
+                let field_mask = builder.ins().ishl(width_mask, shift);
+                let all_ones = self.all_ones(builder, ty)?;
+                let inv_mask = builder.ins().bxor(field_mask, all_ones);
+                let cleared = builder.ins().band(dst_val, inv_mask);
+                let src_masked = builder.ins().band(src_val, width_mask);
+                let src_shifted = builder.ins().ishl(src_masked, shift);
+                let result = builder.ins().bor(cleared, src_shifted);
+                let result_ty = builder.func.dfg.value_type(result);
+                self.write_reg(builder, &dst_reg, LoweredValue { value: result, ty: result_ty })
+            }
+            "bfxil" => {
+                // BFXIL Rd, Rn, #lsb, #width → Rd[width-1:0] = Rn[lsb+width-1:lsb]
+                if operands.len() < 4 {
+                    return Err(JitError::UnsupportedStmt("bfxil operand count"));
+                }
+                let (dst_reg, dst_val, src_val, lsb, width) =
+                    self.extract_bitfield_operands(module, builder, imports, operands)?;
+                let ty = builder.func.dfg.value_type(dst_val);
+                let width_mask = self.mask_for_width(builder, ty, width)?;
+                let shift = builder.ins().iconst(ty, i64::from(lsb));
+                let extracted = builder.ins().ushr(src_val, shift);
+                let src_masked = builder.ins().band(extracted, width_mask);
+                let all_ones = self.all_ones(builder, ty)?;
+                let inv_mask = builder.ins().bxor(width_mask, all_ones);
+                let cleared = builder.ins().band(dst_val, inv_mask);
+                let result = builder.ins().bor(cleared, src_masked);
+                let result_ty = builder.func.dfg.value_type(result);
+                self.write_reg(builder, &dst_reg, LoweredValue { value: result, ty: result_ty })
+            }
+            "extr" => {
+                // EXTR Rd, Rn, Rm, #shift → Rd = (Rn:Rm >> shift)[reg_size-1:0]
+                if operands.len() < 4 {
+                    return Err(JitError::UnsupportedStmt("extr operand count"));
+                }
+                let dst_reg = match &operands[0] {
+                    Expr::Reg(r) => r.clone(),
+                    _ => return Err(JitError::UnsupportedStmt("extr dest")),
+                };
+                let hint = Some(reg_type(&dst_reg)?);
+                let ty = self.resolve_int_type(hint, None)?;
+                let hi = self.lower_expr(module, builder, imports, &operands[1], Some(ty))?;
+                let hi = self.coerce_int(builder, hi, ty)?;
+                let lo = self.lower_expr(module, builder, imports, &operands[2], Some(ty))?;
+                let lo = self.coerce_int(builder, lo, ty)?;
+                let shift_amt = match &operands[3] {
+                    Expr::Imm(v) => *v as u8,
+                    _ => return Err(JitError::UnsupportedStmt("extr shift")),
+                };
+                let bits = ty.bits() as u8;
+                let result = if shift_amt == 0 {
+                    lo.value
+                } else {
+                    // (hi << (bits - shift)) | (lo >> shift)
+                    let hi_shift = builder.ins().iconst(ty, i64::from(bits - shift_amt));
+                    let lo_shift = builder.ins().iconst(ty, i64::from(shift_amt));
+                    let hi_part = builder.ins().ishl(hi.value, hi_shift);
+                    let lo_part = builder.ins().ushr(lo.value, lo_shift);
+                    builder.ins().bor(hi_part, lo_part)
+                };
+                self.write_reg(builder, &dst_reg, LoweredValue { value: result, ty })
+            }
+            _ => Err(JitError::UnsupportedStmt("stmt intrinsic")),
+        }
+    }
+
+    fn extract_bitfield_operands(
+        &mut self,
+        module: &mut JITModule,
+        builder: &mut FunctionBuilder<'_>,
+        imports: &Imports,
+        operands: &[Expr],
+    ) -> Result<(Reg, Value, Value, u8, u8), JitError> {
+        let dst_reg = match &operands[0] {
+            Expr::Reg(r) => r.clone(),
+            _ => return Err(JitError::UnsupportedStmt("bitfield dest")),
+        };
+        let hint = Some(reg_type(&dst_reg)?);
+        let dst_val = self.lower_expr(module, builder, imports, &operands[0], hint)?;
+        let src_val = self.lower_expr(module, builder, imports, &operands[1], hint)?;
+        let ty = self.resolve_int_type(hint, None)?;
+        let dst_val = self.coerce_int(builder, dst_val, ty)?;
+        let src_val = self.coerce_int(builder, src_val, ty)?;
+        let lsb = match &operands[2] {
+            Expr::Imm(v) => *v as u8,
+            _ => return Err(JitError::UnsupportedStmt("bitfield lsb")),
+        };
+        let width = match &operands[3] {
+            Expr::Imm(v) => *v as u8,
+            _ => return Err(JitError::UnsupportedStmt("bitfield width")),
+        };
+        Ok((dst_reg, dst_val.value, src_val.value, lsb, width))
+    }
+
+    fn lower_bitfield_stmt(
+        &mut self,
+        module: &mut JITModule,
+        builder: &mut FunctionBuilder<'_>,
+        imports: &Imports,
+        operands: &[Expr],
+        compute: impl FnOnce(&mut Self, &mut FunctionBuilder<'_>, Value, u8, u8) -> Result<Value, JitError>,
+    ) -> Result<(), JitError> {
+        if operands.len() < 4 {
+            return Err(JitError::UnsupportedStmt("bitfield operand count"));
+        }
+        let dst_reg = match &operands[0] {
+            Expr::Reg(r) => r.clone(),
+            _ => return Err(JitError::UnsupportedStmt("bitfield dest")),
+        };
+        let hint = Some(reg_type(&dst_reg)?);
+        let ty = self.resolve_int_type(hint, None)?;
+        let src = self.lower_expr(module, builder, imports, &operands[1], Some(ty))?;
+        let src = self.coerce_int(builder, src, ty)?;
+        let lsb = match &operands[2] {
+            Expr::Imm(v) => *v as u8,
+            _ => return Err(JitError::UnsupportedStmt("bitfield lsb")),
+        };
+        let width = match &operands[3] {
+            Expr::Imm(v) => *v as u8,
+            _ => return Err(JitError::UnsupportedStmt("bitfield width")),
+        };
+        let result = compute(self, builder, src.value, lsb, width)?;
+        let result_ty = builder.func.dfg.value_type(result);
+        self.write_reg(builder, &dst_reg, LoweredValue { value: result, ty: result_ty })
     }
 
     fn flush_scalars(&mut self, builder: &mut FunctionBuilder<'_>) -> Result<(), JitError> {
@@ -2442,5 +2933,408 @@ mod tests {
         let next = unsafe { func(&mut ctx) };
         assert_eq!(ctx.x[2], payload.as_ptr() as u64 + 2);
         assert_eq!(next, 0x400650);
+    }
+
+    #[test]
+    fn mrs_nzcv_reads_flags_shifted() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        // Set flags, then read NZCV into a register
+        let stmts = vec![
+            Stmt::SetFlags {
+                expr: Expr::Sub(Box::new(Expr::Reg(Reg::X(0))), Box::new(Expr::Reg(Reg::X(1)))),
+            },
+            Stmt::Assign {
+                dst: Reg::X(2),
+                src: Expr::MrsRead("nzcv".to_string()),
+            },
+        ];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        // 5 - 3 = 2: positive, no zero, carry set (no borrow), no overflow
+        // NZCV = 0b0010 → flags = 0x2, MRS nzcv → 0x2 << 28 = 0x20000000
+        let mut ctx = JitContext::default();
+        ctx.x[0] = 5;
+        ctx.x[1] = 3;
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.flags, 0x2); // C set
+        assert_eq!(ctx.x[2], 0x2000_0000);
+
+        // 3 - 3 = 0: zero, carry set, no negative, no overflow
+        // NZCV = 0b0110 → flags = 0x6, MRS nzcv → 0x6 << 28 = 0x60000000
+        let mut ctx = JitContext::default();
+        ctx.x[0] = 3;
+        ctx.x[1] = 3;
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.flags, 0x6); // Z and C set
+        assert_eq!(ctx.x[2], 0x6000_0000);
+    }
+
+    #[test]
+    fn mrs_unknown_returns_zero() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(0),
+            src: Expr::MrsRead("tpidr_el0".to_string()),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        ctx.x[0] = 0xDEAD;
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[0], 0);
+    }
+
+    #[test]
+    fn msr_nzcv_writes_flags() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        // MSR nzcv, x0 → write flags from x0 bits [31:28]
+        let stmts = vec![Stmt::Intrinsic {
+            name: "msr".to_string(),
+            operands: vec![
+                Expr::Intrinsic {
+                    name: "nzcv".to_string(),
+                    operands: vec![],
+                },
+                Expr::Reg(Reg::X(0)),
+            ],
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        // Set NZCV = 0b1010 (N=1, Z=0, C=1, V=0) → x0 = 0xA0000000
+        let mut ctx = JitContext::default();
+        ctx.x[0] = 0xA000_0000;
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.flags, 0xA); // N=1, C=1
+
+        // Set NZCV = 0b0100 (Z only) → x0 = 0x40000000
+        let mut ctx = JitContext::default();
+        ctx.x[0] = 0x4000_0000;
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.flags, 0x4); // Z=1
+    }
+
+    #[test]
+    fn simd_vector_and() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::V(2),
+            src: Expr::Intrinsic {
+                name: "and".to_string(),
+                operands: vec![Expr::Reg(Reg::V(0)), Expr::Reg(Reg::V(1))],
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        ctx.simd[0] = [0xFF; 16];
+        ctx.simd[1] = [0x0F; 16];
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.simd[2], [0x0F; 16]);
+    }
+
+    #[test]
+    fn simd_vector_orr() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::V(2),
+            src: Expr::Intrinsic {
+                name: "orr".to_string(),
+                operands: vec![Expr::Reg(Reg::V(0)), Expr::Reg(Reg::V(1))],
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        ctx.simd[0] = [0xF0; 16];
+        ctx.simd[1] = [0x0F; 16];
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.simd[2], [0xFF; 16]);
+    }
+
+    #[test]
+    fn simd_vector_eor() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::V(2),
+            src: Expr::Intrinsic {
+                name: "eor".to_string(),
+                operands: vec![Expr::Reg(Reg::V(0)), Expr::Reg(Reg::V(1))],
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        ctx.simd[0] = [0xFF; 16];
+        ctx.simd[1] = [0xAA; 16];
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.simd[2], [0x55; 16]);
+    }
+
+    #[test]
+    fn simd_vector_bic() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::V(2),
+            src: Expr::Intrinsic {
+                name: "bic".to_string(),
+                operands: vec![Expr::Reg(Reg::V(0)), Expr::Reg(Reg::V(1))],
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        ctx.simd[0] = [0xFF; 16];
+        ctx.simd[1] = [0x0F; 16];
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.simd[2], [0xF0; 16]);
+    }
+
+    #[test]
+    fn simd_vector_orn() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::V(2),
+            src: Expr::Intrinsic {
+                name: "orn".to_string(),
+                operands: vec![Expr::Reg(Reg::V(0)), Expr::Reg(Reg::V(1))],
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        ctx.simd[0] = [0x00; 16];
+        ctx.simd[1] = [0x0F; 16];
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.simd[2], [0xF0; 16]); // 0x00 | ~0x0F = 0xF0
+    }
+
+    #[test]
+    fn simd_vector_not() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::V(1),
+            src: Expr::Intrinsic {
+                name: "not".to_string(),
+                operands: vec![Expr::Reg(Reg::V(0))],
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        ctx.simd[0] = [0xAA; 16];
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.simd[1], [0x55; 16]);
+    }
+
+    #[test]
+    fn simd_bsl_bitselect() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        // BSL v0, v1, v2 → (v0 & v1) | (~v0 & v2)
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::V(3),
+            src: Expr::Intrinsic {
+                name: "bsl".to_string(),
+                operands: vec![
+                    Expr::Reg(Reg::V(0)), // mask
+                    Expr::Reg(Reg::V(1)), // if bit set
+                    Expr::Reg(Reg::V(2)), // if bit clear
+                ],
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        ctx.simd[0] = [0xF0; 16]; // mask: upper nibble from v1, lower from v2
+        ctx.simd[1] = [0xAA; 16]; // source 1
+        ctx.simd[2] = [0x55; 16]; // source 2
+        unsafe { func(&mut ctx) };
+        // (0xF0 & 0xAA) | (~0xF0 & 0x55) = 0xA0 | 0x05 = 0xA5
+        assert_eq!(ctx.simd[3], [0xA5; 16]);
+    }
+
+    #[test]
+    fn float_rounding_frintz_truncate() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::D(1),
+            src: Expr::Intrinsic {
+                name: "frintz".to_string(),
+                operands: vec![Expr::Reg(Reg::D(0))],
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        ctx.simd[0] = [0; 16];
+        ctx.simd[0][..8].copy_from_slice(&3.7f64.to_le_bytes());
+        unsafe { func(&mut ctx) };
+        let result = f64::from_le_bytes(ctx.simd[1][..8].try_into().unwrap());
+        assert_eq!(result, 3.0);
+
+        // Negative truncation
+        ctx.simd[0][..8].copy_from_slice(&(-2.9f64).to_le_bytes());
+        unsafe { func(&mut ctx) };
+        let result = f64::from_le_bytes(ctx.simd[1][..8].try_into().unwrap());
+        assert_eq!(result, -2.0);
+    }
+
+    #[test]
+    fn float_rounding_frintm_floor() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::D(1),
+            src: Expr::Intrinsic {
+                name: "frintm".to_string(),
+                operands: vec![Expr::Reg(Reg::D(0))],
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        ctx.simd[0] = [0; 16];
+        ctx.simd[0][..8].copy_from_slice(&(-2.3f64).to_le_bytes());
+        unsafe { func(&mut ctx) };
+        let result = f64::from_le_bytes(ctx.simd[1][..8].try_into().unwrap());
+        assert_eq!(result, -3.0);
+    }
+
+    #[test]
+    fn float_rounding_frintp_ceil() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::D(1),
+            src: Expr::Intrinsic {
+                name: "frintp".to_string(),
+                operands: vec![Expr::Reg(Reg::D(0))],
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        ctx.simd[0] = [0; 16];
+        ctx.simd[0][..8].copy_from_slice(&2.3f64.to_le_bytes());
+        unsafe { func(&mut ctx) };
+        let result = f64::from_le_bytes(ctx.simd[1][..8].try_into().unwrap());
+        assert_eq!(result, 3.0);
+    }
+
+    #[test]
+    fn fnmadd_neg_mul_sub() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        // FNMADD: -(n*m) - a
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::D(3),
+            src: Expr::Intrinsic {
+                name: "fnmadd".to_string(),
+                operands: vec![
+                    Expr::Reg(Reg::D(0)),
+                    Expr::Reg(Reg::D(1)),
+                    Expr::Reg(Reg::D(2)),
+                ],
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        ctx.simd[0] = [0; 16];
+        ctx.simd[1] = [0; 16];
+        ctx.simd[2] = [0; 16];
+        ctx.simd[0][..8].copy_from_slice(&2.0f64.to_le_bytes());
+        ctx.simd[1][..8].copy_from_slice(&3.0f64.to_le_bytes());
+        ctx.simd[2][..8].copy_from_slice(&1.0f64.to_le_bytes());
+        unsafe { func(&mut ctx) };
+        // -(2*3) - 1 = -7
+        let result = f64::from_le_bytes(ctx.simd[3][..8].try_into().unwrap());
+        assert_eq!(result, -7.0);
+    }
+
+    #[test]
+    fn fnmsub_mul_sub() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        // FNMSUB: n*m - a
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::D(3),
+            src: Expr::Intrinsic {
+                name: "fnmsub".to_string(),
+                operands: vec![
+                    Expr::Reg(Reg::D(0)),
+                    Expr::Reg(Reg::D(1)),
+                    Expr::Reg(Reg::D(2)),
+                ],
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        ctx.simd[0] = [0; 16];
+        ctx.simd[1] = [0; 16];
+        ctx.simd[2] = [0; 16];
+        ctx.simd[0][..8].copy_from_slice(&2.0f64.to_le_bytes());
+        ctx.simd[1][..8].copy_from_slice(&3.0f64.to_le_bytes());
+        ctx.simd[2][..8].copy_from_slice(&1.0f64.to_le_bytes());
+        unsafe { func(&mut ctx) };
+        // 2*3 - 1 = 5
+        let result = f64::from_le_bytes(ctx.simd[3][..8].try_into().unwrap());
+        assert_eq!(result, 5.0);
     }
 }
