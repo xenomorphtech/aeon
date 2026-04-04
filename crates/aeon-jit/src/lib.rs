@@ -335,6 +335,14 @@ struct LoweringState {
     vbyte_regs: [SimdVar; 32],
 }
 
+#[derive(Clone, Copy)]
+struct ScalarDirtySnapshot {
+    x_regs: [bool; 31],
+    sp: bool,
+    pc: bool,
+    flags: bool,
+}
+
 impl LoweringState {
     fn new(
         ctx_ptr: Value,
@@ -427,6 +435,10 @@ impl LoweringState {
                 fallthrough,
             } => {
                 let cond = self.lower_branch_cond(module, builder, imports, cond)?;
+                // Each arm must flush the same pending register state. Flushing
+                // the first arm clears dirty bits, so restore them before
+                // lowering the fallthrough arm.
+                let dirty_snapshot = self.snapshot_scalar_dirty();
                 let then_block = builder.create_block();
                 let else_block = builder.create_block();
                 builder.ins().brif(cond, then_block, &[], else_block, &[]);
@@ -439,6 +451,7 @@ impl LoweringState {
                 builder.ins().return_(&[target.value]);
                 builder.seal_block(then_block);
 
+                self.restore_scalar_dirty(dirty_snapshot);
                 builder.switch_to_block(else_block);
                 let fallthrough = builder.ins().iconst(types::I64, *fallthrough as i64);
                 self.write_pc_value(builder, fallthrough)?;
@@ -1637,6 +1650,24 @@ impl LoweringState {
         }
     }
 
+    fn snapshot_scalar_dirty(&self) -> ScalarDirtySnapshot {
+        ScalarDirtySnapshot {
+            x_regs: std::array::from_fn(|index| self.x_regs[index].dirty),
+            sp: self.sp.dirty,
+            pc: self.pc.dirty,
+            flags: self.flags.dirty,
+        }
+    }
+
+    fn restore_scalar_dirty(&mut self, snapshot: ScalarDirtySnapshot) {
+        for (slot, dirty) in self.x_regs.iter_mut().zip(snapshot.x_regs) {
+            slot.dirty = dirty;
+        }
+        self.sp.dirty = snapshot.sp;
+        self.pc.dirty = snapshot.pc;
+        self.flags.dirty = snapshot.flags;
+    }
+
     fn flush_scalars(&mut self, builder: &mut FunctionBuilder<'_>) -> Result<(), JitError> {
         for index in 0..31 {
             if self.x_regs[index].dirty {
@@ -2309,5 +2340,107 @@ mod tests {
             (&mut slot as *mut u64) as u64
         );
         assert_eq!(LAST_WRITE_VALUE.load(Ordering::SeqCst), 12);
+    }
+
+    #[test]
+    fn branches_on_ne_after_64bit_compare() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![
+            Stmt::SetFlags {
+                expr: Expr::Sub(Box::new(Expr::Reg(Reg::X(2))), Box::new(Expr::Reg(Reg::X(3)))),
+            },
+            Stmt::CondBranch {
+                cond: BranchCond::Flag(Condition::NE),
+                target: Expr::Imm(0x2000),
+                fallthrough: 0x1004,
+            },
+        ];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        ctx.x[2] = 1;
+        ctx.x[3] = 2;
+        let next = unsafe { func(&mut ctx) };
+        assert_eq!(next, 0x2000);
+
+        let mut ctx = JitContext::default();
+        ctx.x[2] = 2;
+        ctx.x[3] = 2;
+        let next = unsafe { func(&mut ctx) };
+        assert_eq!(next, 0x1004);
+    }
+
+    #[test]
+    fn executes_checksum_loop_block_with_post_index_load() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![
+            Stmt::Assign {
+                dst: Reg::W(1),
+                src: Expr::Lsr(Box::new(Expr::Reg(Reg::W(0))), Box::new(Expr::Imm(1))),
+            },
+            Stmt::Assign {
+                dst: Reg::W(0),
+                src: Expr::Xor(
+                    Box::new(Expr::Reg(Reg::W(1))),
+                    Box::new(Expr::Shl(
+                        Box::new(Expr::Reg(Reg::W(0))),
+                        Box::new(Expr::Imm(3)),
+                    )),
+                ),
+            },
+            Stmt::Pair(
+                Box::new(Stmt::Assign {
+                    dst: Reg::W(1),
+                    src: Expr::Load {
+                        addr: Box::new(Expr::Reg(Reg::X(2))),
+                        size: 1,
+                    },
+                }),
+                Box::new(Stmt::Assign {
+                    dst: Reg::X(2),
+                    src: Expr::Add(Box::new(Expr::Reg(Reg::X(2))), Box::new(Expr::Imm(1))),
+                }),
+            ),
+            Stmt::Assign {
+                dst: Reg::W(0),
+                src: Expr::Xor(
+                    Box::new(Expr::Reg(Reg::W(1))),
+                    Box::new(Expr::Reg(Reg::W(0))),
+                ),
+            },
+            Stmt::SetFlags {
+                expr: Expr::Sub(Box::new(Expr::Reg(Reg::X(2))), Box::new(Expr::Reg(Reg::X(3)))),
+            },
+            Stmt::CondBranch {
+                cond: BranchCond::Flag(Condition::NE),
+                target: Expr::Imm(0x400638),
+                fallthrough: 0x400650,
+            },
+        ];
+
+        let code = compiler
+            .compile_block(0x400638, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let payload = [5u8, 6u8];
+        let mut ctx = JitContext::default();
+        ctx.x[0] = 19_088_312;
+        ctx.x[2] = payload.as_ptr() as u64;
+        ctx.x[3] = ctx.x[2] + 2;
+
+        let next = unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[2], payload.as_ptr() as u64 + 1);
+        assert_eq!(ctx.x[0], 160_152_601);
+        assert_eq!(ctx.flags, 0x8);
+        assert_eq!(next, 0x400638);
+
+        let next = unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[2], payload.as_ptr() as u64 + 2);
+        assert_eq!(next, 0x400650);
     }
 }

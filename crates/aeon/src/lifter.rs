@@ -1182,7 +1182,12 @@ fn lift_load(operands: &[Operand], explicit_size: u8, signed: bool) -> Stmt {
     } else {
         load_expr
     };
-    Stmt::Assign { dst, src }
+    let stmt = Stmt::Assign { dst, src };
+    if let Some(mem) = operands.get(1) {
+        wrap_mem_writeback(mem, stmt)
+    } else {
+        stmt
+    }
 }
 
 fn lift_load_pair(operands: &[Operand], signed: bool) -> Stmt {
@@ -1210,7 +1215,7 @@ fn lift_load_pair(operands: &[Operand], signed: bool) -> Stmt {
     } else {
         load2
     };
-    Stmt::Pair(
+    let stmt = Stmt::Pair(
         Box::new(Stmt::Assign {
             dst: dst1,
             src: src1,
@@ -1219,7 +1224,12 @@ fn lift_load_pair(operands: &[Operand], signed: bool) -> Stmt {
             dst: dst2,
             src: src2,
         }),
-    )
+    );
+    if let Some(mem) = operands.get(2) {
+        wrap_mem_writeback(mem, stmt)
+    } else {
+        stmt
+    }
 }
 
 fn lift_store(operands: &[Operand], explicit_size: u8) -> Stmt {
@@ -1234,10 +1244,15 @@ fn lift_store(operands: &[Operand], explicit_size: u8) -> Stmt {
     } else {
         Expr::Imm(0)
     };
-    Stmt::Store {
+    let stmt = Stmt::Store {
         addr,
         value: value_expr,
         size,
+    };
+    if let Some(mem) = operands.get(1) {
+        wrap_mem_writeback(mem, stmt)
+    } else {
+        stmt
     }
 }
 
@@ -1270,7 +1285,7 @@ fn lift_store_pair(operands: &[Operand]) -> Stmt {
     } else {
         Expr::Imm(0)
     };
-    Stmt::Pair(
+    let stmt = Stmt::Pair(
         Box::new(Stmt::Store {
             addr: addr.clone(),
             value: val1,
@@ -1281,7 +1296,12 @@ fn lift_store_pair(operands: &[Operand]) -> Stmt {
             value: val2,
             size,
         }),
-    )
+    );
+    if let Some(mem) = operands.get(2) {
+        wrap_mem_writeback(mem, stmt)
+    } else {
+        stmt
+    }
 }
 
 fn lift_csel(operands: &[Operand], make: fn(Expr, Expr, Condition) -> Expr) -> Stmt {
@@ -1516,6 +1536,28 @@ fn mem_to_addr(op: &Operand) -> Expr {
             e_add(base, idx)
         }
         _ => Expr::Imm(0),
+    }
+}
+
+fn wrap_mem_writeback(mem: &Operand, stmt: Stmt) -> Stmt {
+    match mem_writeback(mem) {
+        Some((dst, src)) => Stmt::Pair(Box::new(stmt), Box::new(Stmt::Assign { dst, src })),
+        None => stmt,
+    }
+}
+
+fn mem_writeback(mem: &Operand) -> Option<(Reg, Expr)> {
+    match mem {
+        Operand::MemPreIdx { reg, imm } | Operand::MemPostIdxImm { reg, imm } => {
+            let reg = reg_from_bad64(*reg)?;
+            Some((reg.clone(), e_add(Expr::Reg(reg), Expr::Imm(imm_to_u64(imm)))))
+        }
+        Operand::MemPostIdxReg(regs) => {
+            let base = reg_from_bad64(regs[0])?;
+            let offset = reg_from_bad64(regs[1])?;
+            Some((base.clone(), e_add(Expr::Reg(base), Expr::Reg(offset))))
+        }
+        _ => None,
     }
 }
 
@@ -1986,6 +2028,84 @@ mod tests {
                     Expr::Imm(0xd),
                 ),
             }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_ldrb_post_index_with_base_writeback() {
+        let pc = 0x3000;
+        let result = lift_word(0x3840_1441, pc); // ldrb w1, [x2], #1
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Pair(
+                Box::new(Stmt::Assign {
+                    dst: Reg::W(1),
+                    src: e_load(Expr::Reg(Reg::X(2)), 1),
+                }),
+                Box::new(Stmt::Assign {
+                    dst: Reg::X(2),
+                    src: e_add(Expr::Reg(Reg::X(2)), Expr::Imm(1)),
+                }),
+            )
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_stp_pre_index_with_sp_writeback() {
+        let pc = 0x4000;
+        let sp_minus_32 = e_add(Expr::Reg(Reg::SP), Expr::Imm((-32i64) as u64));
+        let result = lift_word(0xa9be_7bfd, pc); // stp x29, x30, [sp, #-32]!
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Pair(
+                Box::new(Stmt::Pair(
+                    Box::new(Stmt::Store {
+                        addr: sp_minus_32.clone(),
+                        value: Expr::Reg(Reg::X(29)),
+                        size: 8,
+                    }),
+                    Box::new(Stmt::Store {
+                        addr: e_add(sp_minus_32.clone(), Expr::Imm(8)),
+                        value: Expr::Reg(Reg::X(30)),
+                        size: 8,
+                    }),
+                )),
+                Box::new(Stmt::Assign {
+                    dst: Reg::SP,
+                    src: sp_minus_32,
+                }),
+            )
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_ldp_post_index_with_sp_writeback() {
+        let pc = 0x5000;
+        let result = lift_word(0xa8c2_7bfd, pc); // ldp x29, x30, [sp], #32
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Pair(
+                Box::new(Stmt::Pair(
+                    Box::new(Stmt::Assign {
+                        dst: Reg::X(29),
+                        src: e_load(Expr::Reg(Reg::SP), 8),
+                    }),
+                    Box::new(Stmt::Assign {
+                        dst: Reg::X(30),
+                        src: e_load(e_add(Expr::Reg(Reg::SP), Expr::Imm(8)), 8),
+                    }),
+                )),
+                Box::new(Stmt::Assign {
+                    dst: Reg::SP,
+                    src: e_add(Expr::Reg(Reg::SP), Expr::Imm(32)),
+                }),
+            )
         );
         assert_eq!(result.edges, vec![pc + 4]);
     }
