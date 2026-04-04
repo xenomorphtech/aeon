@@ -13,7 +13,7 @@ use std::process::Command;
 use std::sync::Mutex;
 
 use aeon::elf::{load_elf, LoadedBinary};
-use aeon_instrument::context::{ElfMemory, LiveContext, MemoryProvider, SnapshotMemory};
+use aeon_instrument::context::{ElfMemory, LiveContext};
 use aeon_instrument::engine::{InstrumentEngine, StopReason};
 use aeon_instrument::symbolic::Invariant;
 
@@ -178,82 +178,6 @@ fn engine_for_sample(
     ctx.regs.x[30] = 0; // LR=0 → RET halts
 
     (InstrumentEngine::new(ctx), mapped, stack)
-}
-
-// ── Debug: verify setup ─────────────────────────────────────────────
-
-#[test]
-fn debug_compile_first_block() {
-    let _lock = TEST_LOCK.lock().unwrap();
-    let elf_path = compile_sample("samples/hello_aarch64.c");
-    let binary = load_elf(elf_path.to_str().unwrap()).expect("load ELF");
-    let entry = symbol_address(&elf_path, "main");
-
-    eprintln!("entry=0x{:x}", entry);
-    for (i, seg) in binary.segments.iter().enumerate() {
-        eprintln!(
-            "segment[{}]: vaddr=0x{:x} filesz=0x{:x} memsz=0x{:x} foff=0x{:x}",
-            i, seg.vaddr, seg.file_size, seg.mem_size, seg.file_offset
-        );
-    }
-
-    let mapped = MappedSegments::map(&binary);
-    eprintln!("mapped {} regions", mapped.regions.len());
-
-    // Verify instruction bytes are readable at the entry vaddr
-    let instr_bytes = unsafe { std::slice::from_raw_parts(entry as *const u8, 4) };
-    let word = u32::from_le_bytes(instr_bytes[..4].try_into().unwrap());
-    eprintln!("first instruction at 0x{:x}: 0x{:08x}", entry, word);
-
-    // Try SnapshotMemory read
-    let mut snapshot = SnapshotMemory::new();
-    for seg in &binary.segments {
-        if seg.file_size > 0 {
-            let start = seg.file_offset as usize;
-            let end = start + seg.file_size as usize;
-            if end <= binary.data.len() {
-                let mut data = binary.data[start..end].to_vec();
-                if seg.mem_size > seg.file_size {
-                    data.resize(seg.mem_size as usize, 0);
-                }
-                snapshot.add_region(seg.vaddr, data);
-            }
-        }
-    }
-    let snap_bytes = snapshot.read(entry, 4).expect("read from snapshot");
-    let snap_word = u32::from_le_bytes(snap_bytes[..4].try_into().unwrap());
-    eprintln!("snapshot read at 0x{:x}: 0x{:08x}", entry, snap_word);
-    assert_eq!(word, snap_word, "mmap'd and snapshot should match");
-
-    // Try to compile first block
-    use aeon_instrument::dyncfg::DynCfg;
-    let mut cfg = DynCfg::new();
-    let block = cfg.get_or_compile(entry, &snapshot).expect("compile block");
-    eprintln!(
-        "compiled block at 0x{:x}: {} bytes, {} successors",
-        block.addr,
-        block.size_bytes,
-        block.static_successors.len()
-    );
-
-    // Try executing via the engine for 1 step
-    let elf_mem = ElfMemory::from_loaded(binary);
-    let stack_size: usize = 1 << 20;
-    let stack = vec![0u8; stack_size];
-    let sp = (stack.as_ptr() as u64 + stack_size as u64 - 0x100) & !0xf;
-
-    let mut ctx = LiveContext::new(Box::new(elf_mem));
-    ctx.set_pc(entry);
-    ctx.regs.sp = sp;
-    ctx.regs.x[30] = 0;
-
-    let mut engine = InstrumentEngine::new(ctx);
-    engine.config.max_steps = 50_000;
-    eprintln!("running engine...");
-    let reason = engine.run();
-    eprintln!("engine stopped: {:?}", reason);
-    eprintln!("trace blocks: {}", engine.trace().blocks.len());
-    eprintln!("x0: {}", engine.context.regs.x[0]);
 }
 
 // ── hello_aarch64: full pipeline ─────────────────────────────────────
