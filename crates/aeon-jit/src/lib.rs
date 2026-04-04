@@ -1846,6 +1846,89 @@ impl LoweringState {
                     ty,
                 })
             }
+            // Byte reversal within halfwords/words
+            "rev16" => {
+                // REV16: reverse bytes within each 16-bit halfword
+                if operands.is_empty() {
+                    return Err(JitError::UnsupportedExpr("rev16 operand count"));
+                }
+                let ty = self.resolve_int_type(hint, Some(&operands[0]))?;
+                let inner = self.lower_expr(module, builder, imports, &operands[0], Some(ty))?;
+                let inner = self.coerce_int(builder, inner, ty)?;
+                // Swap adjacent bytes: (x & 0x00FF00FF...) << 8 | (x & 0xFF00FF00...) >> 8
+                let mask_lo = if ty == types::I32 { 0x00FF00FFu64 } else { 0x00FF00FF00FF00FFu64 };
+                let mask_hi = if ty == types::I32 { 0xFF00FF00u64 } else { 0xFF00FF00FF00FF00u64 };
+                let m_lo = self.iconst(builder, ty, mask_lo)?;
+                let m_hi = self.iconst(builder, ty, mask_hi)?;
+                let lo = builder.ins().band(inner.value, m_lo);
+                let hi = builder.ins().band(inner.value, m_hi);
+                let lo_shifted = builder.ins().ishl_imm(lo, 8);
+                let hi_shifted = builder.ins().ushr_imm(hi, 8);
+                Ok(LoweredValue {
+                    value: builder.ins().bor(lo_shifted, hi_shifted),
+                    ty,
+                })
+            }
+            "rev32" => {
+                // REV32: reverse bytes within each 32-bit word (for 64-bit registers)
+                if operands.is_empty() {
+                    return Err(JitError::UnsupportedExpr("rev32 operand count"));
+                }
+                let ty = self.resolve_int_type(hint, Some(&operands[0]))?;
+                let inner = self.lower_expr(module, builder, imports, &operands[0], Some(ty))?;
+                let inner = self.coerce_int(builder, inner, ty)?;
+                if ty == types::I32 {
+                    // For 32-bit, this is just bswap
+                    Ok(LoweredValue {
+                        value: builder.ins().bswap(inner.value),
+                        ty,
+                    })
+                } else {
+                    // For 64-bit: bswap each 32-bit half, then swap the halves back
+                    let swapped = builder.ins().bswap(inner.value);
+                    // bswap reverses all 8 bytes; we want to reverse within each 32-bit word
+                    // So rotate by 32 to swap the two words back to original position
+                    let thirty_two = builder.ins().iconst(ty, 32);
+                    Ok(LoweredValue {
+                        value: builder.ins().rotr(swapped, thirty_two),
+                        ty,
+                    })
+                }
+            }
+            "cnt" => {
+                // CNT: population count (count set bits)
+                if operands.is_empty() {
+                    return Err(JitError::UnsupportedExpr("cnt operand count"));
+                }
+                let ty = self.resolve_int_type(hint, Some(&operands[0]))?;
+                let inner = self.lower_expr(module, builder, imports, &operands[0], Some(ty))?;
+                let inner = self.coerce_int(builder, inner, ty)?;
+                Ok(LoweredValue {
+                    value: builder.ins().popcnt(inner.value),
+                    ty,
+                })
+            }
+            "ngc" => {
+                // NGC: negate with carry: Rd = 0 - Rm - !C
+                // In the simplified form: Rd = -Rm - 1 + C
+                if operands.is_empty() {
+                    return Err(JitError::UnsupportedExpr("ngc operand count"));
+                }
+                let ty = self.resolve_int_type(hint, Some(&operands[0]))?;
+                let inner = self.lower_expr(module, builder, imports, &operands[0], Some(ty))?;
+                let inner = self.coerce_int(builder, inner, ty)?;
+                let flags = self.read_flags(builder)?;
+                let carry = self.extract_flag(builder, flags, 1);
+                let carry_ext = builder.ins().uextend(ty, carry);
+                let zero = builder.ins().iconst(ty, 0);
+                let neg = builder.ins().isub(zero, inner.value);
+                let minus_one = builder.ins().iconst(ty, -1i64);
+                let neg_minus_not_carry = builder.ins().iadd(neg, minus_one);
+                Ok(LoweredValue {
+                    value: builder.ins().iadd(neg_minus_not_carry, carry_ext),
+                    ty,
+                })
+            }
             "movk" => {
                 // MOVK: insert 16-bit immediate at a shifted position, keep other bits.
                 // operands[0] = Expr::Reg(Rd) (current value)
@@ -2320,10 +2403,14 @@ impl LoweringState {
             | Expr::Cls(inner)
             | Expr::Rev(inner)
             | Expr::Rbit(inner)
-            | Expr::SignExtend { src: inner, .. }
-            | Expr::ZeroExtend { src: inner, .. } => {
+            => {
                 self.infer_expr_type(inner).or(Some(types::I64))
             }
+            // Sign/zero-extend always widen: a SignExtend{W(n), 32} inside a
+            // widening multiply must infer as I64 so the multiply produces 64
+            // bits.  If the source is already 64-bit the extend is a no-op, so
+            // returning I64 is safe in all cases.
+            Expr::SignExtend { .. } | Expr::ZeroExtend { .. } => Some(types::I64),
             Expr::Extract { width, .. } => int_type_for_bits(u16::from(*width)),
             Expr::Insert { dst, .. } => self.infer_expr_type(dst),
             Expr::FAdd(lhs, rhs)
@@ -3336,5 +3423,419 @@ mod tests {
         // 2*3 - 1 = 5
         let result = f64::from_le_bytes(ctx.simd[3][..8].try_into().unwrap());
         assert_eq!(result, 5.0);
+    }
+
+    #[test]
+    fn smull_widening_multiply_positive_values() {
+        // SMULL pattern: X2 = Mul(SignExtend(W0, 32), SignExtend(W1, 32))
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(2),
+            src: Expr::Mul(
+                Box::new(Expr::SignExtend {
+                    src: Box::new(Expr::Reg(Reg::W(0))),
+                    from_bits: 32,
+                }),
+                Box::new(Expr::SignExtend {
+                    src: Box::new(Expr::Reg(Reg::W(1))),
+                    from_bits: 32,
+                }),
+            ),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        // 100 * 200 = 20000
+        let mut ctx = JitContext::default();
+        ctx.x[0] = 100;
+        ctx.x[1] = 200;
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[2], 20000);
+    }
+
+    #[test]
+    fn smull_widening_multiply_negative_operand() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(2),
+            src: Expr::Mul(
+                Box::new(Expr::SignExtend {
+                    src: Box::new(Expr::Reg(Reg::W(0))),
+                    from_bits: 32,
+                }),
+                Box::new(Expr::SignExtend {
+                    src: Box::new(Expr::Reg(Reg::W(1))),
+                    from_bits: 32,
+                }),
+            ),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        // (-5) * 3 = -15
+        let mut ctx = JitContext::default();
+        ctx.x[0] = (-5i32) as u32 as u64;
+        ctx.x[1] = 3;
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[2] as i64, -15);
+    }
+
+    #[test]
+    fn smull_lsr_div_by_3_magic_constant() {
+        // Real div-by-3 pattern from compiled C code:
+        //   SMULL X2, W3, W6    → X2 = sext(W3) * sext(W6)
+        //   LSR   X2, X2, #32  → X2 = X2 >> 32 (unsigned)
+        //   SUB   W2, W2, W3, ASR #31
+        //   ADD   W2, W2, W2, LSL #1
+        //   SUBS  W2, W3, W2   → remainder = val - quotient*3
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let magic: u32 = 0x55555556; // magic constant for signed div by 3
+        let stmts = vec![
+            // X2 = smull(W3, W6)
+            Stmt::Assign {
+                dst: Reg::X(2),
+                src: Expr::Mul(
+                    Box::new(Expr::SignExtend {
+                        src: Box::new(Expr::Reg(Reg::W(3))),
+                        from_bits: 32,
+                    }),
+                    Box::new(Expr::SignExtend {
+                        src: Box::new(Expr::Reg(Reg::W(6))),
+                        from_bits: 32,
+                    }),
+                ),
+            },
+            // X2 = X2 >> 32
+            Stmt::Assign {
+                dst: Reg::X(2),
+                src: Expr::Lsr(Box::new(Expr::Reg(Reg::X(2))), Box::new(Expr::Imm(32))),
+            },
+            // W2 = W2 - (W3 >> 31)  (adjust for negative)
+            Stmt::Assign {
+                dst: Reg::W(2),
+                src: Expr::Sub(
+                    Box::new(Expr::Reg(Reg::W(2))),
+                    Box::new(Expr::Asr(
+                        Box::new(Expr::Reg(Reg::W(3))),
+                        Box::new(Expr::Imm(31)),
+                    )),
+                ),
+            },
+            // W2 = W2 + W2 * 2 = W2 * 3 (quotient * 3)
+            Stmt::Assign {
+                dst: Reg::W(2),
+                src: Expr::Add(
+                    Box::new(Expr::Reg(Reg::W(2))),
+                    Box::new(Expr::Shl(
+                        Box::new(Expr::Reg(Reg::W(2))),
+                        Box::new(Expr::Imm(1)),
+                    )),
+                ),
+            },
+            // W2 = W3 - W2 (remainder)
+            Stmt::Assign {
+                dst: Reg::W(2),
+                src: Expr::Sub(
+                    Box::new(Expr::Reg(Reg::W(3))),
+                    Box::new(Expr::Reg(Reg::W(2))),
+                ),
+            },
+        ];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        // Test various values modulo 3 (C-style truncating modulo)
+        for val in [0i32, 1, 2, 3, 4, 5, 6, 7, 47, 100, -1, -3, -7] {
+            let mut ctx = JitContext::default();
+            ctx.x[3] = val as u32 as u64;
+            ctx.x[6] = magic as u64;
+            unsafe { func(&mut ctx) };
+            let remainder = ctx.x[2] as u32 as i32;
+            let expected = val % 3; // C-style truncating modulo
+            assert_eq!(
+                remainder, expected,
+                "val={val}: got remainder {remainder}, expected {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn smull_both_negative() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(2),
+            src: Expr::Mul(
+                Box::new(Expr::SignExtend {
+                    src: Box::new(Expr::Reg(Reg::W(0))),
+                    from_bits: 32,
+                }),
+                Box::new(Expr::SignExtend {
+                    src: Box::new(Expr::Reg(Reg::W(1))),
+                    from_bits: 32,
+                }),
+            ),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        // (-1000) * (-2000) = 2000000
+        let mut ctx = JitContext::default();
+        ctx.x[0] = (-1000i32) as u32 as u64;
+        ctx.x[1] = (-2000i32) as u32 as u64;
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[2], 2_000_000);
+    }
+
+    #[test]
+    fn smull_large_values_upper_bits() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![
+            // X2 = smull(W0, W1)
+            Stmt::Assign {
+                dst: Reg::X(2),
+                src: Expr::Mul(
+                    Box::new(Expr::SignExtend {
+                        src: Box::new(Expr::Reg(Reg::W(0))),
+                        from_bits: 32,
+                    }),
+                    Box::new(Expr::SignExtend {
+                        src: Box::new(Expr::Reg(Reg::W(1))),
+                        from_bits: 32,
+                    }),
+                ),
+            },
+            // X3 = X2 >> 32 (upper 32 bits)
+            Stmt::Assign {
+                dst: Reg::X(3),
+                src: Expr::Lsr(Box::new(Expr::Reg(Reg::X(2))), Box::new(Expr::Imm(32))),
+            },
+        ];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        // i32::MAX * 2 = 4294967294 which needs upper bits
+        let mut ctx = JitContext::default();
+        ctx.x[0] = 0x7FFFFFFF; // i32::MAX
+        ctx.x[1] = 2;
+        unsafe { func(&mut ctx) };
+        let product = ctx.x[2] as i64;
+        assert_eq!(product, 2 * 0x7FFFFFFF_i64);
+        assert_eq!(ctx.x[3], 0); // upper 32 bits are 0 (positive product)
+
+        // i32::MIN * 2 — negative product, upper bits should be 0xFFFFFFFF
+        let mut ctx = JitContext::default();
+        ctx.x[0] = 0x80000000; // i32::MIN
+        ctx.x[1] = 2;
+        unsafe { func(&mut ctx) };
+        let product = ctx.x[2] as i64;
+        assert_eq!(product, -2i64 * 0x80000000i64); // -4294967296
+        assert_eq!(ctx.x[3], 0xFFFFFFFF); // upper 32 bits of negative result
+    }
+
+    #[test]
+    fn rev16_swaps_bytes_in_halfwords() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::W(0),
+            src: Expr::Intrinsic {
+                name: "rev16".to_string(),
+                operands: vec![Expr::Reg(Reg::W(1))],
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        ctx.x[1] = 0xAABBCCDD;
+        unsafe { func(&mut ctx) };
+        // Swap bytes in each halfword: 0xAABB→0xBBAA, 0xCCDD→0xDDCC
+        assert_eq!(ctx.x[0] as u32, 0xBBAADDCC);
+    }
+
+    #[test]
+    fn rev32_reverses_bytes_in_words() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::W(0),
+            src: Expr::Intrinsic {
+                name: "rev32".to_string(),
+                operands: vec![Expr::Reg(Reg::W(1))],
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        ctx.x[1] = 0xAABBCCDD;
+        unsafe { func(&mut ctx) };
+        // Reverse bytes in 32-bit word: 0xDDCCBBAA
+        assert_eq!(ctx.x[0] as u32, 0xDDCCBBAA);
+    }
+
+    #[test]
+    fn cnt_popcount() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::W(0),
+            src: Expr::Intrinsic {
+                name: "cnt".to_string(),
+                operands: vec![Expr::Reg(Reg::W(1))],
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        ctx.x[1] = 0xFF; // 8 bits set
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[0] as u32, 8);
+
+        ctx.x[1] = 0xAAAAAAAA; // 16 bits set
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[0] as u32, 16);
+
+        ctx.x[1] = 0;
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[0] as u32, 0);
+    }
+
+    #[test]
+    fn movk_builds_constant() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        // Build 0x55555556 via MOV + MOVK (as the lifter does)
+        let stmts = vec![
+            Stmt::Assign {
+                dst: Reg::W(0),
+                src: Expr::Imm(0x5556),
+            },
+            Stmt::Assign {
+                dst: Reg::W(0),
+                src: Expr::Intrinsic {
+                    name: "movk".to_string(),
+                    operands: vec![
+                        Expr::Reg(Reg::W(0)),
+                        Expr::Shl(Box::new(Expr::Imm(0x5555)), Box::new(Expr::Imm(16))),
+                    ],
+                },
+            },
+        ];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[0] as u32, 0x55555556);
+    }
+
+    #[test]
+    fn bitfield_ubfx_extract() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        // UBFX W0, W1, #4, #8 → extract 8 bits starting at bit 4
+        let stmts = vec![Stmt::Intrinsic {
+            name: "ubfx".to_string(),
+            operands: vec![
+                Expr::Reg(Reg::W(0)),
+                Expr::Reg(Reg::W(1)),
+                Expr::Imm(4),
+                Expr::Imm(8),
+            ],
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        ctx.x[1] = 0xDEAD_BEF0;
+        unsafe { func(&mut ctx) };
+        // Extract 8 bits from bit 4: (0xBEF0 >> 4) & 0xFF = 0xEF
+        assert_eq!(ctx.x[0] as u32, 0xEF);
+    }
+
+    #[test]
+    fn bitfield_sbfx_signed_extract() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        // SBFX W0, W1, #4, #8 → signed extract
+        let stmts = vec![Stmt::Intrinsic {
+            name: "sbfx".to_string(),
+            operands: vec![
+                Expr::Reg(Reg::W(0)),
+                Expr::Reg(Reg::W(1)),
+                Expr::Imm(4),
+                Expr::Imm(8),
+            ],
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        // Extract 8 bits from bit 4, value = 0xFF (sign bit set → -1)
+        let mut ctx = JitContext::default();
+        ctx.x[1] = 0xFF0; // bits [11:4] = 0xFF
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[0] as u32 as i32, -1); // 0xFF sign-extended = -1
+
+        // Extract 8 bits from bit 4, value = 0x7F (positive)
+        let mut ctx = JitContext::default();
+        ctx.x[1] = 0x7F0; // bits [11:4] = 0x7F
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[0] as u32, 0x7F);
+    }
+
+    #[test]
+    fn bitfield_extr_rotate() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        // EXTR W0, W1, W2, #16 → (W1:W2 >> 16)[31:0]
+        let stmts = vec![Stmt::Intrinsic {
+            name: "extr".to_string(),
+            operands: vec![
+                Expr::Reg(Reg::W(0)),
+                Expr::Reg(Reg::W(1)),
+                Expr::Reg(Reg::W(2)),
+                Expr::Imm(16),
+            ],
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        ctx.x[1] = 0xAABBCCDD;
+        ctx.x[2] = 0x11223344;
+        unsafe { func(&mut ctx) };
+        // (0xAABBCCDD << 16) | (0x11223344 >> 16) = 0xCCDD1122
+        assert_eq!(ctx.x[0] as u32, 0xCCDD1122);
     }
 }

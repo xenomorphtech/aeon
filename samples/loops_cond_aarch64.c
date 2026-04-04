@@ -20,14 +20,15 @@ static int collatz_steps(int n) {
 }
 
 static int nested_sum(int rows, int cols) {
-    /* nested for-loops with conditional accumulation using bitwise tests */
+    /* nested for-loops with conditional accumulation — the modulo triggers
+       a widening-multiply (SMULL) pattern for division by constant */
     int sum = 0;
     for (int r = 0; r < rows; r++) {
         for (int c = 0; c < cols; c++) {
             int val = r * cols + c;
-            if ((val & 3) == 0) {
+            if (val % 3 == 0) {
                 sum += val;
-            } else if ((val & 1) != 0) {
+            } else if (val % 3 == 1) {
                 sum -= val >> 1;
             } else {
                 sum ^= val;

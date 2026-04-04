@@ -810,7 +810,7 @@ sample_test!(
     SampleCase {
         source: "samples/loops_cond_aarch64.c",
         entry_symbol: "main",
-        expected_return: Some(300),
+        expected_return: Some(504),
         min_lifted_functions: 5,
         min_direct_call_sites: 7,
     }
@@ -846,5 +846,62 @@ sample_test!(
         expected_return: Some(336532132),
         min_lifted_functions: 8,
         min_direct_call_sites: 8,
+    }
+);
+
+// ── Hash algorithm samples ────────────────────────────────────────────
+
+sample_test!(
+    test_sample_hash_crc32_aarch64,
+    SampleCase {
+        source: "samples/hash_crc32_aarch64.c",
+        entry_symbol: "main",
+        expected_return: Some(1397587366),
+        min_lifted_functions: 3,
+        min_direct_call_sites: 4,
+    }
+);
+
+sample_test!(
+    test_sample_hash_fnv1a_aarch64,
+    SampleCase {
+        source: "samples/hash_fnv1a_aarch64.c",
+        entry_symbol: "main",
+        expected_return: Some(1176015575),
+        min_lifted_functions: 4,
+        min_direct_call_sites: 7,
+    }
+);
+
+sample_test!(
+    test_sample_hash_sha256_aarch64,
+    SampleCase {
+        source: "samples/hash_sha256_aarch64.c",
+        entry_symbol: "main",
+        expected_return: Some(1267851199),
+        min_lifted_functions: 10,
+        min_direct_call_sites: 20,
+    }
+);
+
+sample_test!(
+    test_sample_hash_md5_aarch64,
+    SampleCase {
+        source: "samples/hash_md5_aarch64.c",
+        entry_symbol: "main",
+        expected_return: Some(1984371815),
+        min_lifted_functions: 8,
+        min_direct_call_sites: 10,
+    }
+);
+
+sample_test!(
+    test_sample_hash_siphash_aarch64,
+    SampleCase {
+        source: "samples/hash_siphash_aarch64.c",
+        entry_symbol: "main",
+        expected_return: Some(873003949),
+        min_lifted_functions: 4,
+        min_direct_call_sites: 16,
     }
 );
