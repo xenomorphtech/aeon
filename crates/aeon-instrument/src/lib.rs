@@ -17,6 +17,7 @@
 
 pub mod context;
 pub mod dyncfg;
-pub mod trace;
-pub mod symbolic;
 pub mod engine;
+pub mod snapshot;
+pub mod symbolic;
+pub mod trace;

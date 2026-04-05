@@ -9,6 +9,8 @@ aeonil = { path = "../aeonil" }
 aeon-jit = { path = "../aeon-jit" }
 aeon-reduce = { path = "../aeon-reduce" }
 bad64 = "0.6"
+bincode = "1"
+libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

@@ -9,13 +9,14 @@
 //   let invariants = engine.fold();
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 
 use aeon_jit::JitContext;
 
 use crate::context::LiveContext;
-use crate::dyncfg::DynCfg;
+use crate::dyncfg::{BlockTerminator, DynCfg};
 use crate::symbolic::{FoldResult, SymbolicFolder};
-use crate::trace::{BlockTrace, MemoryAccess, RegSnapshot, TraceLog};
+use crate::trace::{BlockTrace, MemoryAccess, RegSnapshot, TraceLog, TraceWriter};
 
 /// Configuration for the instrumentation engine.
 pub struct EngineConfig {
@@ -27,6 +28,16 @@ pub struct EngineConfig {
     pub max_block_visits: u64,
     /// Stop at these addresses (breakpoints).
     pub breakpoints: Vec<u64>,
+    /// Inclusive start / exclusive end of code PCs to trace.
+    /// When execution leaves this range, tracing stops cleanly.
+    pub code_range: Option<(u64, u64)>,
+    /// Optional alias base mapping for normalized code pointers.
+    /// Example: JIT analysis space 0x10000000 → live runtime module base.
+    pub code_alias_base: Option<(u64, u64)>,
+    /// Path to write disk-backed trace. None = in-memory only.
+    pub trace_output: Option<PathBuf>,
+    /// How often to drain in-memory blocks when disk tracing is active.
+    pub drain_interval: u64,
 }
 
 impl Default for EngineConfig {
@@ -36,6 +47,10 @@ impl Default for EngineConfig {
             max_memory_ops: 1_000_000,
             max_block_visits: 1_000,
             breakpoints: Vec::new(),
+            code_range: None,
+            code_alias_base: None,
+            trace_output: None,
+            drain_interval: 4096,
         }
     }
 }
@@ -47,10 +62,13 @@ pub enum StopReason {
     MaxMemoryOps,
     MaxBlockVisits(u64),
     Breakpoint(u64),
+    CodeRangeExit(u64),
     UnmappedMemory(u64),
     LiftError(u64, String),
     /// Execution reached a halt/return.
     Halted,
+    /// Trace I/O error.
+    IoError(String),
 }
 
 // Thread-local storage for collecting memory accesses from JIT callbacks.
@@ -106,6 +124,7 @@ pub struct InstrumentEngine {
     pub cfg: DynCfg,
     pub trace: TraceLog,
     pub config: EngineConfig,
+    trace_writer: Option<TraceWriter>,
 }
 
 impl InstrumentEngine {
@@ -115,6 +134,7 @@ impl InstrumentEngine {
             cfg: DynCfg::new(),
             trace: TraceLog::new(),
             config: EngineConfig::default(),
+            trace_writer: None,
         }
     }
 
@@ -125,6 +145,29 @@ impl InstrumentEngine {
 
     /// Run the engine until a stop condition is met.
     pub fn run(&mut self) -> StopReason {
+        // Create trace writer if configured
+        if self.trace_writer.is_none() {
+            if let Some(ref path) = self.config.trace_output {
+                match TraceWriter::create(path) {
+                    Ok(w) => self.trace_writer = Some(w),
+                    Err(e) => {
+                        return StopReason::IoError(format!("failed to create trace file: {}", e))
+                    }
+                }
+            }
+        }
+
+        let reason = self.run_inner();
+
+        // Final flush
+        if let Some(ref mut writer) = self.trace_writer {
+            let _ = writer.flush();
+        }
+
+        reason
+    }
+
+    fn run_inner(&mut self) -> StopReason {
         // Install memory trace callbacks
         self.cfg
             .compiler_mut()
@@ -137,6 +180,13 @@ impl InstrumentEngine {
 
         loop {
             let pc = self.context.pc();
+
+            // Stop cleanly when execution leaves the selected code range.
+            if let Some((start, end)) = self.config.code_range {
+                if pc < start || pc >= end {
+                    return StopReason::CodeRangeExit(pc);
+                }
+            }
 
             // Check breakpoints
             if self.config.breakpoints.contains(&pc) {
@@ -154,18 +204,18 @@ impl InstrumentEngine {
                 return StopReason::MaxMemoryOps;
             }
 
-            // Check block visit count
-            let visits = self.trace.traces_for_block(pc).len() as u64;
+            // Check block visit count (uses persistent counter, survives drains)
+            let visits = self.trace.block_visit_count(pc);
             if visits >= self.config.max_block_visits {
                 return StopReason::MaxBlockVisits(pc);
             }
 
             // Get or compile the block
-            let (entry, block_addr) = match self.cfg.get_or_compile(pc, self.context.memory.as_ref())
-            {
-                Ok(b) => (b.entry, b.addr),
-                Err(e) => return StopReason::LiftError(pc, format!("{:?}", e)),
-            };
+            let (entry, block_addr, terminator) =
+                match self.cfg.get_or_compile(pc, self.context.memory.as_ref()) {
+                    Ok(b) => (b.entry, b.addr, b.terminator),
+                    Err(e) => return StopReason::LiftError(pc, format!("{:?}", e)),
+                };
 
             // Capture entry register snapshot
             let entry_regs = RegSnapshot::from(&self.context.regs);
@@ -176,7 +226,21 @@ impl InstrumentEngine {
             MEMORY_TRACE.with(|t| t.borrow_mut().clear());
 
             // Execute the JIT-compiled block
-            let next_pc = unsafe { entry(&mut self.context.regs as *mut JitContext) };
+            let mut next_pc = unsafe { entry(&mut self.context.regs as *mut JitContext) };
+
+            if matches!(
+                terminator,
+                BlockTerminator::DynamicBranch
+                    | BlockTerminator::DynamicCall
+                    | BlockTerminator::Return
+            ) {
+                if let Some(normalized_lr) = self.normalize_code_addr(self.context.regs.x[30]) {
+                    self.context.regs.x[30] = normalized_lr;
+                }
+                if let Some(normalized_next_pc) = self.normalize_code_addr(next_pc) {
+                    next_pc = normalized_next_pc;
+                }
+            }
 
             // Capture exit register snapshot
             let exit_regs = RegSnapshot::from(&self.context.regs);
@@ -185,7 +249,7 @@ impl InstrumentEngine {
             let memory_accesses = MEMORY_TRACE.with(|t| std::mem::take(&mut *t.borrow_mut()));
 
             // Build and record the block trace
-            let visit_count = self.trace.traces_for_block(block_addr).len() as u64 + 1;
+            let visit_count = self.trace.block_visit_count(block_addr) + 1;
             let block_trace = BlockTrace {
                 addr: block_addr,
                 entry_regs,
@@ -196,6 +260,22 @@ impl InstrumentEngine {
                 seq: self.trace.next_seq(),
             };
             self.trace.record_block(block_trace);
+
+            // Write to disk if configured
+            if let Some(ref mut writer) = self.trace_writer {
+                let block = self.trace.blocks.last().unwrap();
+                if let Err(e) = writer.write_block(block) {
+                    return StopReason::IoError(format!("trace write: {}", e));
+                }
+
+                // Periodically drain in-memory blocks to bound RAM
+                if steps > 0 && steps % self.config.drain_interval == 0 {
+                    if let Err(e) = writer.flush() {
+                        return StopReason::IoError(format!("trace flush: {}", e));
+                    }
+                    self.trace.drain_blocks();
+                }
+            }
 
             // Update PC from JIT return value
             // JIT returns 0 for Ret (halt), or the next PC for branches
@@ -213,6 +293,11 @@ impl InstrumentEngine {
         &self.trace
     }
 
+    /// Access the trace writer (if disk-backed tracing is active).
+    pub fn trace_writer(&self) -> Option<&TraceWriter> {
+        self.trace_writer.as_ref()
+    }
+
     /// Run symbolic folding on the collected trace.
     pub fn fold(&self) -> FoldResult {
         SymbolicFolder::fold(&self.trace)
@@ -222,16 +307,76 @@ impl InstrumentEngine {
     pub fn discovered_blocks(&self) -> usize {
         self.cfg.block_count()
     }
+
+    fn normalize_code_addr(&self, addr: u64) -> Option<u64> {
+        let code_range = self.config.code_range?;
+        for candidate in self.code_addr_candidates(addr) {
+            if candidate >= code_range.0 && candidate < code_range.1 {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    fn code_addr_candidates(&self, addr: u64) -> [u64; 5] {
+        let top_byte_cleared = addr & 0x00ff_ffff_ffff_ffff;
+        let top_16_cleared = addr & 0x0000_ffff_ffff_ffff;
+        let alias_from_raw = self.apply_code_alias(addr);
+        let alias_from_top_byte = self.apply_code_alias(top_byte_cleared);
+        let alias_from_top_16 = self.apply_code_alias(top_16_cleared);
+        [
+            addr,
+            top_byte_cleared,
+            top_16_cleared,
+            alias_from_raw.unwrap_or(addr),
+            alias_from_top_byte.unwrap_or(alias_from_top_16.unwrap_or(addr)),
+        ]
+    }
+
+    fn apply_code_alias(&self, addr: u64) -> Option<u64> {
+        let (from_base, to_base) = self.config.code_alias_base?;
+        let offset = addr.checked_sub(from_base)?;
+        to_base.checked_add(offset)
+    }
 }
 
 impl Drop for InstrumentEngine {
     fn drop(&mut self) {
         // Clear global callbacks to avoid dangling references
-        self.cfg
-            .compiler_mut()
-            .set_memory_read_callback(None);
-        self.cfg
-            .compiler_mut()
-            .set_memory_write_callback(None);
+        self.cfg.compiler_mut().set_memory_read_callback(None);
+        self.cfg.compiler_mut().set_memory_write_callback(None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::SnapshotMemory;
+
+    fn empty_engine() -> InstrumentEngine {
+        InstrumentEngine::new(LiveContext::new(Box::new(SnapshotMemory::new())))
+    }
+
+    #[test]
+    fn normalize_code_addr_maps_analysis_base_into_runtime_range() {
+        let mut engine = empty_engine();
+        let runtime_base = 0x7600_0000_00u64;
+        engine.config.code_range = Some((runtime_base + 0x120000, runtime_base + 0x180000));
+        engine.config.code_alias_base = Some((0x1000_0000, runtime_base));
+
+        let normalized = engine.normalize_code_addr(0x1012_3456);
+        assert_eq!(normalized, Some(runtime_base + 0x123456));
+    }
+
+    #[test]
+    fn normalize_code_addr_strips_pointer_tag_before_alias_mapping() {
+        let mut engine = empty_engine();
+        let runtime_base = 0x7600_0000_00u64;
+        engine.config.code_range = Some((runtime_base + 0x120000, runtime_base + 0x180000));
+        engine.config.code_alias_base = Some((0x1000_0000, runtime_base));
+
+        let tagged = 0xab00_0000_1012_3456u64;
+        let normalized = engine.normalize_code_addr(tagged);
+        assert_eq!(normalized, Some(runtime_base + 0x123456));
     }
 }

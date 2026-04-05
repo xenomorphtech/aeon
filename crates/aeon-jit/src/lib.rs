@@ -32,6 +32,9 @@ pub struct JitContext {
     pub pc: u64,
     pub flags: u64,
     pub simd: [[u8; 16]; 32],
+    /// Thread-local storage base (tpidr_el0). Set this to a valid address
+    /// before execution if the target binary reads TLS (stack canaries, etc).
+    pub tpidr_el0: u64,
 }
 
 #[derive(Debug)]
@@ -1691,6 +1694,20 @@ impl LoweringState {
                 };
                 Ok(LoweredValue { value, ty })
             }
+            "tpidr_el0" => {
+                // Load from JitContext.tpidr_el0
+                let offset = offset_of!(JitContext, tpidr_el0) as i32;
+                let value =
+                    builder
+                        .ins()
+                        .load(types::I64, MemFlags::trusted(), self.ctx_ptr, offset);
+                let value = if ty != types::I64 {
+                    builder.ins().ireduce(ty, value)
+                } else {
+                    value
+                };
+                Ok(LoweredValue { value, ty })
+            }
             // Unknown system registers return 0
             _ => Ok(LoweredValue {
                 value: builder.ins().iconst(ty, 0),
@@ -1783,8 +1800,7 @@ impl LoweringState {
                 if operands.is_empty() {
                     return Err(JitError::UnsupportedExpr("not operand count"));
                 }
-                let inner =
-                    self.lower_expr(module, builder, imports, &operands[0], Some(I8X16))?;
+                let inner = self.lower_expr(module, builder, imports, &operands[0], Some(I8X16))?;
                 let inner = self.coerce_value(builder, inner, I8X16)?;
                 Ok(LoweredValue {
                     value: builder.ins().bnot(inner.value),
@@ -1792,20 +1808,38 @@ impl LoweringState {
                 })
             }
             // FP rounding intrinsics
-            "frintz" => self.lower_float_rounding_intrinsic(module, builder, imports, operands, hint, |b, v| {
-                b.ins().trunc(v)
-            }),
-            "frintm" => self.lower_float_rounding_intrinsic(module, builder, imports, operands, hint, |b, v| {
-                b.ins().floor(v)
-            }),
-            "frintp" => self.lower_float_rounding_intrinsic(module, builder, imports, operands, hint, |b, v| {
-                b.ins().ceil(v)
-            }),
-            "frintn" | "frinta" | "frintx" => {
-                self.lower_float_rounding_intrinsic(module, builder, imports, operands, hint, |b, v| {
-                    b.ins().nearest(v)
-                })
-            }
+            "frintz" => self.lower_float_rounding_intrinsic(
+                module,
+                builder,
+                imports,
+                operands,
+                hint,
+                |b, v| b.ins().trunc(v),
+            ),
+            "frintm" => self.lower_float_rounding_intrinsic(
+                module,
+                builder,
+                imports,
+                operands,
+                hint,
+                |b, v| b.ins().floor(v),
+            ),
+            "frintp" => self.lower_float_rounding_intrinsic(
+                module,
+                builder,
+                imports,
+                operands,
+                hint,
+                |b, v| b.ins().ceil(v),
+            ),
+            "frintn" | "frinta" | "frintx" => self.lower_float_rounding_intrinsic(
+                module,
+                builder,
+                imports,
+                operands,
+                hint,
+                |b, v| b.ins().nearest(v),
+            ),
             // FNMADD: -(a*b) + c  →  fneg(fma(a, b, fneg(c)))
             // Actually: FNMADD rd, rn, rm, ra = -(rn*rm) - ra
             "fnmadd" => {
@@ -1856,8 +1890,16 @@ impl LoweringState {
                 let inner = self.lower_expr(module, builder, imports, &operands[0], Some(ty))?;
                 let inner = self.coerce_int(builder, inner, ty)?;
                 // Swap adjacent bytes: (x & 0x00FF00FF...) << 8 | (x & 0xFF00FF00...) >> 8
-                let mask_lo = if ty == types::I32 { 0x00FF00FFu64 } else { 0x00FF00FF00FF00FFu64 };
-                let mask_hi = if ty == types::I32 { 0xFF00FF00u64 } else { 0xFF00FF00FF00FF00u64 };
+                let mask_lo = if ty == types::I32 {
+                    0x00FF00FFu64
+                } else {
+                    0x00FF00FF00FF00FFu64
+                };
+                let mask_hi = if ty == types::I32 {
+                    0xFF00FF00u64
+                } else {
+                    0xFF00FF00FF00FF00u64
+                };
                 let m_lo = self.iconst(builder, ty, mask_lo)?;
                 let m_hi = self.iconst(builder, ty, mask_hi)?;
                 let lo = builder.ins().band(inner.value, m_lo);
@@ -1975,9 +2017,11 @@ impl LoweringState {
                 if operands.len() < 2 {
                     return Err(JitError::UnsupportedExpr("smulh operand count"));
                 }
-                let lhs = self.lower_expr(module, builder, imports, &operands[0], Some(types::I64))?;
+                let lhs =
+                    self.lower_expr(module, builder, imports, &operands[0], Some(types::I64))?;
                 let lhs = self.coerce_int(builder, lhs, types::I64)?;
-                let rhs = self.lower_expr(module, builder, imports, &operands[1], Some(types::I64))?;
+                let rhs =
+                    self.lower_expr(module, builder, imports, &operands[1], Some(types::I64))?;
                 let rhs = self.coerce_int(builder, rhs, types::I64)?;
                 // Cranelift doesn't have mulhi; emulate with 4 x 32-bit multiplies
                 let value = self.emit_smulh(builder, lhs.value, rhs.value)?;
@@ -1991,9 +2035,11 @@ impl LoweringState {
                 if operands.len() < 2 {
                     return Err(JitError::UnsupportedExpr("umulh operand count"));
                 }
-                let lhs = self.lower_expr(module, builder, imports, &operands[0], Some(types::I64))?;
+                let lhs =
+                    self.lower_expr(module, builder, imports, &operands[0], Some(types::I64))?;
                 let lhs = self.coerce_int(builder, lhs, types::I64)?;
-                let rhs = self.lower_expr(module, builder, imports, &operands[1], Some(types::I64))?;
+                let rhs =
+                    self.lower_expr(module, builder, imports, &operands[1], Some(types::I64))?;
                 let rhs = self.coerce_int(builder, rhs, types::I64)?;
                 let value = self.emit_umulh(builder, lhs.value, rhs.value)?;
                 Ok(LoweredValue {
@@ -2023,7 +2069,8 @@ impl LoweringState {
                         (v, shift_imm)
                     }
                     _ => {
-                        let v = self.lower_expr(module, builder, imports, &operands[1], Some(ty))?;
+                        let v =
+                            self.lower_expr(module, builder, imports, &operands[1], Some(ty))?;
                         let v = self.coerce_int(builder, v, ty)?;
                         (v, 0u8)
                     }
@@ -2155,12 +2202,17 @@ impl LoweringState {
                     // Compute SUB-style flags from float comparison
                     let fsub_result = builder.ins().fsub(a.value, b.value);
                     let result_bits = if ty == types::F32 {
-                        let bits = builder.ins().bitcast(types::I32, MemFlags::new(), fsub_result);
+                        let bits = builder
+                            .ins()
+                            .bitcast(types::I32, MemFlags::new(), fsub_result);
                         builder.ins().uextend(types::I64, bits)
                     } else {
-                        builder.ins().bitcast(types::I64, MemFlags::new(), fsub_result)
+                        builder
+                            .ins()
+                            .bitcast(types::I64, MemFlags::new(), fsub_result)
                     };
-                    let fcmp_flags = self.pack_nzcv(builder, result_bits, types::I64, None, None)?;
+                    let fcmp_flags =
+                        self.pack_nzcv(builder, result_bits, types::I64, None, None)?;
 
                     // Select: if condition, use fcmp flags; else use immediate nzcv
                     let imm_flags = builder.ins().iconst(types::I64, nzcv_imm as i64);
@@ -2174,49 +2226,73 @@ impl LoweringState {
             // including destination, so operands[0] is the dest register.
             "ubfx" => {
                 // UBFX Rd, Rn, #lsb, #width → Rd = (Rn >> lsb) & mask(width)
-                self.lower_bitfield_stmt(module, builder, imports, operands, |this, b, src, lsb, width| {
-                    let ty = b.func.dfg.value_type(src);
-                    let shift = b.ins().iconst(ty, i64::from(lsb));
-                    let shifted = b.ins().ushr(src, shift);
-                    let mask = this.mask_for_width(b, ty, width)?;
-                    Ok(b.ins().band(shifted, mask))
-                })
+                self.lower_bitfield_stmt(
+                    module,
+                    builder,
+                    imports,
+                    operands,
+                    |this, b, src, lsb, width| {
+                        let ty = b.func.dfg.value_type(src);
+                        let shift = b.ins().iconst(ty, i64::from(lsb));
+                        let shifted = b.ins().ushr(src, shift);
+                        let mask = this.mask_for_width(b, ty, width)?;
+                        Ok(b.ins().band(shifted, mask))
+                    },
+                )
             }
             "ubfiz" => {
                 // UBFIZ Rd, Rn, #lsb, #width → Rd = (Rn & mask(width)) << lsb
-                self.lower_bitfield_stmt(module, builder, imports, operands, |this, b, src, lsb, width| {
-                    let ty = b.func.dfg.value_type(src);
-                    let mask = this.mask_for_width(b, ty, width)?;
-                    let masked = b.ins().band(src, mask);
-                    let shift = b.ins().iconst(ty, i64::from(lsb));
-                    Ok(b.ins().ishl(masked, shift))
-                })
+                self.lower_bitfield_stmt(
+                    module,
+                    builder,
+                    imports,
+                    operands,
+                    |this, b, src, lsb, width| {
+                        let ty = b.func.dfg.value_type(src);
+                        let mask = this.mask_for_width(b, ty, width)?;
+                        let masked = b.ins().band(src, mask);
+                        let shift = b.ins().iconst(ty, i64::from(lsb));
+                        Ok(b.ins().ishl(masked, shift))
+                    },
+                )
             }
             "sbfx" => {
                 // SBFX Rd, Rn, #lsb, #width → Rd = sign_extend((Rn >> lsb)[width-1:0])
-                self.lower_bitfield_stmt(module, builder, imports, operands, |_this, b, src, lsb, width| {
-                    let ty = b.func.dfg.value_type(src);
-                    let bits = ty.bits() as u8;
-                    let shift_right = b.ins().iconst(ty, i64::from(lsb));
-                    let shifted = b.ins().ushr(src, shift_right);
-                    // Sign-extend from `width` bits using shift-left then arithmetic-shift-right
-                    let sext_shift = b.ins().iconst(ty, i64::from(bits - width));
-                    let shl = b.ins().ishl(shifted, sext_shift);
-                    Ok(b.ins().sshr(shl, sext_shift))
-                })
+                self.lower_bitfield_stmt(
+                    module,
+                    builder,
+                    imports,
+                    operands,
+                    |_this, b, src, lsb, width| {
+                        let ty = b.func.dfg.value_type(src);
+                        let bits = ty.bits() as u8;
+                        let shift_right = b.ins().iconst(ty, i64::from(lsb));
+                        let shifted = b.ins().ushr(src, shift_right);
+                        // Sign-extend from `width` bits using shift-left then arithmetic-shift-right
+                        let sext_shift = b.ins().iconst(ty, i64::from(bits - width));
+                        let shl = b.ins().ishl(shifted, sext_shift);
+                        Ok(b.ins().sshr(shl, sext_shift))
+                    },
+                )
             }
             "sbfiz" => {
                 // SBFIZ Rd, Rn, #lsb, #width → Rd = sign_extend(Rn[width-1:0]) << lsb
-                self.lower_bitfield_stmt(module, builder, imports, operands, |_this, b, src, lsb, width| {
-                    let ty = b.func.dfg.value_type(src);
-                    let bits = ty.bits() as u8;
-                    // Sign-extend from width bits
-                    let sext_shift = b.ins().iconst(ty, i64::from(bits - width));
-                    let shl = b.ins().ishl(src, sext_shift);
-                    let sext = b.ins().sshr(shl, sext_shift);
-                    let shift = b.ins().iconst(ty, i64::from(lsb));
-                    Ok(b.ins().ishl(sext, shift))
-                })
+                self.lower_bitfield_stmt(
+                    module,
+                    builder,
+                    imports,
+                    operands,
+                    |_this, b, src, lsb, width| {
+                        let ty = b.func.dfg.value_type(src);
+                        let bits = ty.bits() as u8;
+                        // Sign-extend from width bits
+                        let sext_shift = b.ins().iconst(ty, i64::from(bits - width));
+                        let shl = b.ins().ishl(src, sext_shift);
+                        let sext = b.ins().sshr(shl, sext_shift);
+                        let shift = b.ins().iconst(ty, i64::from(lsb));
+                        Ok(b.ins().ishl(sext, shift))
+                    },
+                )
             }
             "bfi" => {
                 // BFI Rd, Rn, #lsb, #width → Rd[lsb+width-1:lsb] = Rn[width-1:0]
@@ -2237,7 +2313,14 @@ impl LoweringState {
                 let src_shifted = builder.ins().ishl(src_masked, shift);
                 let result = builder.ins().bor(cleared, src_shifted);
                 let result_ty = builder.func.dfg.value_type(result);
-                self.write_reg(builder, &dst_reg, LoweredValue { value: result, ty: result_ty })
+                self.write_reg(
+                    builder,
+                    &dst_reg,
+                    LoweredValue {
+                        value: result,
+                        ty: result_ty,
+                    },
+                )
             }
             "bfxil" => {
                 // BFXIL Rd, Rn, #lsb, #width → Rd[width-1:0] = Rn[lsb+width-1:lsb]
@@ -2256,7 +2339,14 @@ impl LoweringState {
                 let cleared = builder.ins().band(dst_val, inv_mask);
                 let result = builder.ins().bor(cleared, src_masked);
                 let result_ty = builder.func.dfg.value_type(result);
-                self.write_reg(builder, &dst_reg, LoweredValue { value: result, ty: result_ty })
+                self.write_reg(
+                    builder,
+                    &dst_reg,
+                    LoweredValue {
+                        value: result,
+                        ty: result_ty,
+                    },
+                )
             }
             "extr" => {
                 // EXTR Rd, Rn, Rm, #shift → Rd = (Rn:Rm >> shift)[reg_size-1:0]
@@ -2387,7 +2477,13 @@ impl LoweringState {
         builder: &mut FunctionBuilder<'_>,
         imports: &Imports,
         operands: &[Expr],
-        compute: impl FnOnce(&mut Self, &mut FunctionBuilder<'_>, Value, u8, u8) -> Result<Value, JitError>,
+        compute: impl FnOnce(
+            &mut Self,
+            &mut FunctionBuilder<'_>,
+            Value,
+            u8,
+            u8,
+        ) -> Result<Value, JitError>,
     ) -> Result<(), JitError> {
         if operands.len() < 4 {
             return Err(JitError::UnsupportedStmt("bitfield operand count"));
@@ -2410,7 +2506,14 @@ impl LoweringState {
         };
         let result = compute(self, builder, src.value, lsb, width)?;
         let result_ty = builder.func.dfg.value_type(result);
-        self.write_reg(builder, &dst_reg, LoweredValue { value: result, ty: result_ty })
+        self.write_reg(
+            builder,
+            &dst_reg,
+            LoweredValue {
+                value: result,
+                ty: result_ty,
+            },
+        )
     }
 
     fn flush_scalars(&mut self, builder: &mut FunctionBuilder<'_>) -> Result<(), JitError> {
@@ -2573,10 +2676,7 @@ impl LoweringState {
             | Expr::Clz(inner)
             | Expr::Cls(inner)
             | Expr::Rev(inner)
-            | Expr::Rbit(inner)
-            => {
-                self.infer_expr_type(inner).or(Some(types::I64))
-            }
+            | Expr::Rbit(inner) => self.infer_expr_type(inner).or(Some(types::I64)),
             // Sign/zero-extend always widen: a SignExtend{W(n), 32} inside a
             // widening multiply must infer as I64 so the multiply produces 64
             // bits.  If the source is already 64-bit the extend is a no-op, so
@@ -3118,7 +3218,10 @@ mod tests {
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![
             Stmt::SetFlags {
-                expr: Expr::Sub(Box::new(Expr::Reg(Reg::X(2))), Box::new(Expr::Reg(Reg::X(3)))),
+                expr: Expr::Sub(
+                    Box::new(Expr::Reg(Reg::X(2))),
+                    Box::new(Expr::Reg(Reg::X(3))),
+                ),
             },
             Stmt::CondBranch {
                 cond: BranchCond::Flag(Condition::NE),
@@ -3184,7 +3287,10 @@ mod tests {
                 ),
             },
             Stmt::SetFlags {
-                expr: Expr::Sub(Box::new(Expr::Reg(Reg::X(2))), Box::new(Expr::Reg(Reg::X(3)))),
+                expr: Expr::Sub(
+                    Box::new(Expr::Reg(Reg::X(2))),
+                    Box::new(Expr::Reg(Reg::X(3))),
+                ),
             },
             Stmt::CondBranch {
                 cond: BranchCond::Flag(Condition::NE),
@@ -3221,7 +3327,10 @@ mod tests {
         // Set flags, then read NZCV into a register
         let stmts = vec![
             Stmt::SetFlags {
-                expr: Expr::Sub(Box::new(Expr::Reg(Reg::X(0))), Box::new(Expr::Reg(Reg::X(1)))),
+                expr: Expr::Sub(
+                    Box::new(Expr::Reg(Reg::X(0))),
+                    Box::new(Expr::Reg(Reg::X(1))),
+                ),
             },
             Stmt::Assign {
                 dst: Reg::X(2),
@@ -3254,7 +3363,7 @@ mod tests {
     }
 
     #[test]
-    fn mrs_unknown_returns_zero() {
+    fn mrs_tpidr_el0_reads_from_context() {
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![Stmt::Assign {
             dst: Reg::X(0),
@@ -3267,9 +3376,15 @@ mod tests {
         let func: JitEntry = unsafe { std::mem::transmute(code) };
 
         let mut ctx = JitContext::default();
-        ctx.x[0] = 0xDEAD;
+        ctx.tpidr_el0 = 0x1234_5678_ABCD_0000;
         unsafe { func(&mut ctx) };
-        assert_eq!(ctx.x[0], 0);
+        assert_eq!(ctx.x[0], 0x1234_5678_ABCD_0000);
+
+        // Default (0) should also work
+        let mut ctx2 = JitContext::default();
+        ctx2.x[0] = 0xDEAD;
+        unsafe { func(&mut ctx2) };
+        assert_eq!(ctx2.x[0], 0);
     }
 
     #[test]
@@ -4039,7 +4154,10 @@ mod tests {
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![
             Stmt::SetFlags {
-                expr: Expr::Sub(Box::new(Expr::Reg(Reg::X(0))), Box::new(Expr::Reg(Reg::X(1)))),
+                expr: Expr::Sub(
+                    Box::new(Expr::Reg(Reg::X(0))),
+                    Box::new(Expr::Reg(Reg::X(1))),
+                ),
             },
             Stmt::CondBranch {
                 cond: BranchCond::Flag(cond),
@@ -4134,8 +4252,8 @@ mod tests {
     #[test]
     fn flag_cond_vs_vc_overflow() {
         // Signed overflow: MAX_POSITIVE - (-1) = MAX+1 → overflow
-        let max_pos = i64::MAX as u64;   // 0x7FFFFFFFFFFFFFFF
-        let neg1 = u64::MAX;             // -1
+        let max_pos = i64::MAX as u64; // 0x7FFFFFFFFFFFFFFF
+        let neg1 = u64::MAX; // -1
         assert_eq!(branch_result(Condition::VS, max_pos, neg1), 0x2000);
         assert_eq!(branch_result(Condition::VC, max_pos, neg1), 0x1004);
         // No overflow: 5 - 3 = 2
@@ -4190,7 +4308,10 @@ mod tests {
         let mut ctx = JitContext::default();
         ctx.x[1] = 0x80;
         unsafe { func(&mut ctx) };
-        assert_eq!(ctx.x[0], 0xFFFFFFFFFFFF8000_u64 as u64 >> 0 | 0xFFFFFFFFFFFFF800);
+        assert_eq!(
+            ctx.x[0],
+            0xFFFFFFFFFFFF8000_u64 as u64 >> 0 | 0xFFFFFFFFFFFFF800
+        );
         // Actually: sign_extend(0x80, 8) = 0xFFFFFFFFFFFFFF80, << 4 = 0xFFFFFFFFFFFFF800
         assert_eq!(ctx.x[0], 0xFFFFFFFFFFFFF800);
     }
@@ -4312,7 +4433,10 @@ mod tests {
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![
             Stmt::SetFlags {
-                expr: Expr::Sub(Box::new(Expr::Reg(Reg::X(0))), Box::new(Expr::Reg(Reg::X(1)))),
+                expr: Expr::Sub(
+                    Box::new(Expr::Reg(Reg::X(0))),
+                    Box::new(Expr::Reg(Reg::X(1))),
+                ),
             },
             Stmt::Assign {
                 dst: Reg::X(4),
@@ -4352,7 +4476,10 @@ mod tests {
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![
             Stmt::SetFlags {
-                expr: Expr::Sub(Box::new(Expr::Reg(Reg::X(0))), Box::new(Expr::Reg(Reg::X(1)))),
+                expr: Expr::Sub(
+                    Box::new(Expr::Reg(Reg::X(0))),
+                    Box::new(Expr::Reg(Reg::X(1))),
+                ),
             },
             Stmt::Assign {
                 dst: Reg::X(2),
@@ -4389,10 +4516,7 @@ mod tests {
         let stmts = vec![
             // Set flags with 0xFFFFFFFF + 1 → carry set
             Stmt::SetFlags {
-                expr: Expr::Add(
-                    Box::new(Expr::Reg(Reg::W(2))),
-                    Box::new(Expr::Imm(1)),
-                ),
+                expr: Expr::Add(Box::new(Expr::Reg(Reg::W(2))), Box::new(Expr::Imm(1))),
             },
             // W0 = ADC(W0, W1) = W0 + W1 + C
             Stmt::Assign {
@@ -4545,7 +4669,10 @@ mod tests {
         let stmts = vec![
             // 5 - 3 → carry set (C=1)
             Stmt::SetFlags {
-                expr: Expr::Sub(Box::new(Expr::Reg(Reg::X(2))), Box::new(Expr::Reg(Reg::X(3)))),
+                expr: Expr::Sub(
+                    Box::new(Expr::Reg(Reg::X(2))),
+                    Box::new(Expr::Reg(Reg::X(3))),
+                ),
             },
             Stmt::Assign {
                 dst: Reg::X(0),

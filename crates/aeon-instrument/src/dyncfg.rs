@@ -28,8 +28,20 @@ pub struct CompiledBlock {
     pub entry: JitEntry,
     pub stmts: Vec<Stmt>,
     pub size_bytes: usize,
+    pub terminator: BlockTerminator,
     /// Statically known successors (direct branches).
     pub static_successors: Vec<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlockTerminator {
+    DirectBranch,
+    DynamicBranch,
+    DirectCall,
+    DynamicCall,
+    Return,
+    CondBranch,
+    Trap,
 }
 
 /// Lazily-expanding CFG backed by aeon lifter + JIT.
@@ -50,6 +62,24 @@ fn is_terminator(stmt: &Stmt) -> bool {
         | Stmt::Trap => true,
         Stmt::Pair(a, b) => is_terminator(a) || is_terminator(b),
         _ => false,
+    }
+}
+
+fn classify_terminator(stmt: &Stmt) -> Option<BlockTerminator> {
+    match stmt {
+        Stmt::Branch { target } => match target {
+            Expr::Imm(_) => Some(BlockTerminator::DirectBranch),
+            _ => Some(BlockTerminator::DynamicBranch),
+        },
+        Stmt::CondBranch { .. } => Some(BlockTerminator::CondBranch),
+        Stmt::Call { target } => match target {
+            Expr::Imm(_) => Some(BlockTerminator::DirectCall),
+            _ => Some(BlockTerminator::DynamicCall),
+        },
+        Stmt::Ret => Some(BlockTerminator::Return),
+        Stmt::Trap => Some(BlockTerminator::Trap),
+        Stmt::Pair(a, b) => classify_terminator(b).or_else(|| classify_terminator(a)),
+        _ => None,
     }
 }
 
@@ -121,15 +151,14 @@ impl DynCfg {
         }
 
         if let Some(_err) = self.failed.get(&addr) {
-            return Err(JitError::UnsupportedStmt(
-                "previously failed address",
-            ));
+            return Err(JitError::UnsupportedStmt("previously failed address"));
         }
 
         let mut stmts = Vec::new();
         let mut pc = addr;
         let mut edges = Vec::new();
         let mut total_bytes = 0usize;
+        let mut terminator = None;
 
         // Max instructions per block to prevent runaway lifting
         const MAX_BLOCK_INSNS: usize = 256;
@@ -161,11 +190,14 @@ impl DynCfg {
             // Lift to AeonIL
             let result = aeon::lifter::lift(&insn, pc, next_pc);
 
-            let terminator = is_terminator(&result.stmt);
+            let is_term = is_terminator(&result.stmt);
+            if is_term {
+                terminator = classify_terminator(&result.stmt);
+            }
             stmts.push(result.stmt);
             total_bytes += 4;
 
-            if terminator {
+            if is_term {
                 edges = result.edges;
                 break;
             }
@@ -181,6 +213,7 @@ impl DynCfg {
                 target: Expr::Imm(next),
             });
             edges = vec![next];
+            terminator = Some(BlockTerminator::DirectBranch);
         }
 
         // Transform Call and Ret so the JIT returns control to the engine
@@ -197,6 +230,7 @@ impl DynCfg {
             entry,
             stmts,
             size_bytes: total_bytes,
+            terminator: terminator.unwrap_or(BlockTerminator::Trap),
             static_successors: edges,
         };
 
