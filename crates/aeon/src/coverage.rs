@@ -109,13 +109,34 @@ pub fn analyze_lift_coverage(text: &[u8], base_addr: u64) -> CoverageStats {
 }
 
 fn classify_stmt(stmt: &Stmt) -> StatementClass {
-    if matches!(stmt, Stmt::Nop) {
+    if stmt_is_nop_like(stmt) {
         StatementClass::Nop
     } else if stmt_contains_intrinsic(stmt) {
         StatementClass::Intrinsic
     } else {
         StatementClass::ProperIl
     }
+}
+
+fn stmt_is_nop_like(stmt: &Stmt) -> bool {
+    matches!(stmt, Stmt::Nop)
+        || matches!(
+            stmt,
+            Stmt::Intrinsic { name, .. }
+                if matches!(
+                    name.as_str(),
+                    "nop"
+                        | "yield"
+                        | "hint"
+                        | "paciasp"
+                        | "autiasp"
+                        | "bti"
+                        | "xpaclri"
+                        | "prfm"
+                        | "prfum"
+                        | "clrex"
+                )
+        )
 }
 
 fn stmt_contains_intrinsic(stmt: &Stmt) -> bool {
@@ -235,21 +256,15 @@ mod tests {
 
         assert_eq!(stats.total_instructions, 5);
         assert_eq!(stats.decode_errors, 0);
-        assert_eq!(stats.intrinsic, 3);
+        assert_eq!(stats.intrinsic, 2);
         assert_eq!(stats.nop, 1);
-        assert_eq!(stats.proper_il, 1);
+        assert_eq!(stats.proper_il, 2);
         assert_eq!(
             stats.intrinsic_opcode_breakdown,
-            vec![
-                OpcodeFrequency {
-                    opcode: "movk".to_string(),
-                    count: 2,
-                },
-                OpcodeFrequency {
-                    opcode: "ubfx".to_string(),
-                    count: 1,
-                },
-            ]
+            vec![OpcodeFrequency {
+                opcode: "movk".to_string(),
+                count: 2,
+            }]
         );
     }
 }

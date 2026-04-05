@@ -484,7 +484,12 @@ impl LoweringState {
                 builder.ins().return_(&[ret]);
                 self.terminated = true;
             }
-            Stmt::Nop | Stmt::Barrier(_) => {}
+            Stmt::Nop => return Err(JitError::UnsupportedStmt("nop")),
+            Stmt::Barrier(kind) => {
+                if !is_supported_barrier(kind) {
+                    return Err(JitError::UnsupportedStmt("barrier"));
+                }
+            }
             Stmt::Pair(lhs, rhs) => {
                 self.lower_stmt(module, builder, imports, lhs)?;
                 if !self.terminated {
@@ -2149,6 +2154,8 @@ impl LoweringState {
         operands: &[Expr],
     ) -> Result<(), JitError> {
         match name {
+            "nop" | "yield" | "hint" | "paciasp" | "autiasp" | "bti" | "xpaclri" | "prfm"
+            | "prfum" | "clrex" => Ok(()),
             "msr" => {
                 // MSR nzcv, Xn  →  write flags from register
                 // operands: [sysreg_intrinsic, value_expr]
@@ -2174,8 +2181,7 @@ impl LoweringState {
                         }
                     }
                 }
-                // Other MSR targets: treat as nop
-                Ok(())
+                Err(JitError::UnsupportedStmt("msr target"))
             }
             "fccmp" | "fccmpe" => {
                 // FCCMP Sn, Sm, #nzcv, cond → if cond then flags=fcmp(Sn,Sm) else flags=nzcv
@@ -2220,7 +2226,7 @@ impl LoweringState {
                     self.write_flags_value(builder, selected)?;
                     return Ok(());
                 }
-                Ok(())
+                Err(JitError::UnsupportedStmt("fccmp operand count"))
             }
             // Bitfield operations: lift_intrinsic_all passes all operands
             // including destination, so operands[0] is the dest register.
@@ -3076,6 +3082,10 @@ fn reg_type(reg: &Reg) -> Result<Type, JitError> {
     }
 }
 
+fn is_supported_barrier(kind: &str) -> bool {
+    matches!(kind, "dmb" | "dsb" | "isb")
+}
+
 fn type_for_memory_size(size: u8) -> Result<Type, JitError> {
     match size {
         1 => Ok(types::I8),
@@ -3418,6 +3428,67 @@ mod tests {
         ctx.x[0] = 0x4000_0000;
         unsafe { func(&mut ctx) };
         assert_eq!(ctx.flags, 0x4); // Z=1
+    }
+
+    #[test]
+    fn compile_block_rejects_nop() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let err = compiler
+            .compile_block(0x1000, &[Stmt::Nop])
+            .expect_err("nop should fail fast");
+        assert!(matches!(err, JitError::UnsupportedStmt("nop")));
+    }
+
+    #[test]
+    fn compile_block_allows_supported_barrier() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let code = compiler
+            .compile_block(
+                0x1000,
+                &[
+                    Stmt::Barrier("dmb".to_string()),
+                    Stmt::Assign {
+                        dst: Reg::X(0),
+                        src: Expr::Imm(0x1234),
+                    },
+                ],
+            )
+            .expect("supported barrier should compile");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[0], 0x1234);
+    }
+
+    #[test]
+    fn compile_block_rejects_unknown_barrier() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let err = compiler
+            .compile_block(0x1000, &[Stmt::Barrier("unknown".to_string())])
+            .expect_err("unknown barrier should fail fast");
+        assert!(matches!(err, JitError::UnsupportedStmt("barrier")));
+    }
+
+    #[test]
+    fn compile_block_rejects_non_nzcv_msr() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let err = compiler
+            .compile_block(
+                0x1000,
+                &[Stmt::Intrinsic {
+                    name: "msr".to_string(),
+                    operands: vec![
+                        Expr::Intrinsic {
+                            name: "tpidr_el0".to_string(),
+                            operands: vec![],
+                        },
+                        Expr::Reg(Reg::X(0)),
+                    ],
+                }],
+            )
+            .expect_err("non-nzcv msr should fail fast");
+        assert!(matches!(err, JitError::UnsupportedStmt("msr target")));
     }
 
     #[test]

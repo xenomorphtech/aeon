@@ -51,6 +51,12 @@
             before: null,
             after: null,
         },
+        freeze: {
+            armed: false,
+            triggered: false,
+            challenge: null,
+            info: null,
+        },
     };
 
     var PTR_MASK = ptr('0x00FFFFFFFFFFFFFF');
@@ -63,6 +69,7 @@
     var STALKER_REPEAT_SAMPLE = 256;
     var MEMDUMP_MAX_REGION = 50 * 1024 * 1024;
     var MEMDUMP_DEVICE_DIR = '/data/local/tmp/aeon_capture/memdump';
+    var FREEZE_STATUS_PATH = '/data/local/tmp/aeon_capture/freeze.json';
     var MEMDUMP_CHUNK = 0x10000;
     var originalCallCertExport = null;
 
@@ -121,6 +128,7 @@
             read: new NativeFunction(libc.getExportByName('read'), 'long', ['int', 'pointer', 'long']),
             close: new NativeFunction(libc.getExportByName('close'), 'int', ['int']),
             mkdir: new NativeFunction(libc.getExportByName('mkdir'), 'int', ['pointer', 'int']),
+            kill: new NativeFunction(libc.getExportByName('kill'), 'int', ['int', 'int']),
         };
         return memdumpGetLibc._cache;
     }
@@ -163,6 +171,11 @@
         lc.write(fd, buf, str.length);
         lc.close(fd);
         return true;
+    }
+
+    function writeFreezeStatus(status) {
+        memdumpMkdir('/data/local/tmp/aeon_capture');
+        memdumpWriteStr(FREEZE_STATUS_PATH, JSON.stringify(status, null, 2));
     }
 
     function memdumpReadMaps() {
@@ -1127,6 +1140,58 @@
         });
     };
 
+    globalThis.__jitGateFreezeArm = function (challenge) {
+        state.freeze.armed = true;
+        state.freeze.triggered = false;
+        state.freeze.challenge = challenge || null;
+        state.freeze.info = null;
+        if (!state.currentBase) {
+            installForRange(chooseTrapRange());
+        }
+        if (state.currentBase && state.currentSize) {
+            var currentRange = findExecRangeFor(state.currentBase) || chooseTrapRange();
+            ensureTrapProtection(currentRange);
+        }
+        var status = {
+            status: 'armed',
+            timestamp: (new Date()).toISOString(),
+            pid: Process.id,
+            challenge: state.freeze.challenge,
+            corridor: state.currentBase ? state.currentBase.toString() : null,
+            corridorSize: state.currentSize,
+            freeze_status_path: FREEZE_STATUS_PATH,
+        };
+        writeFreezeStatus(status);
+        console.log('[CAPTURE] [GATE] freeze ARMED challenge=' + (state.freeze.challenge || '<none>'));
+        return JSON.stringify(status);
+    };
+
+    globalThis.__jitGateFreezeClear = function () {
+        state.freeze.armed = false;
+        state.freeze.triggered = false;
+        state.freeze.challenge = null;
+        state.freeze.info = null;
+        var status = {
+            status: 'disarmed',
+            timestamp: (new Date()).toISOString(),
+            pid: Process.id,
+            freeze_status_path: FREEZE_STATUS_PATH,
+        };
+        writeFreezeStatus(status);
+        console.log('[CAPTURE] [GATE] freeze DISARMED');
+        return JSON.stringify(status);
+    };
+
+    globalThis.__jitGateFreezeStatus = function () {
+        return JSON.stringify({
+            armed: state.freeze.armed,
+            triggered: state.freeze.triggered,
+            challenge: state.freeze.challenge,
+            info: state.freeze.info,
+            freeze_status_path: FREEZE_STATUS_PATH,
+        });
+    };
+
     globalThis.__jitGateMemdumpListFiles = function () {
         var lc = memdumpGetLibc();
         var opendir = new NativeFunction(
@@ -1218,6 +1283,50 @@
                     noteFailure('memdump before snapshot', e);
                     state.memdump.before = { error: String(e) };
                 }
+            }
+            if (state.freeze.armed && !state.freeze.triggered) {
+                state.freeze.armed = false;
+                state.freeze.triggered = true;
+                state.freeze.info = {
+                    status: 'triggered',
+                    timestamp: (new Date()).toISOString(),
+                    pid: Process.id,
+                    thread_id: threadId || null,
+                    challenge: state.freeze.challenge,
+                    type: event.type,
+                    address: event.address,
+                    pc: event.pc,
+                    lr: event.lr,
+                    registers: details.context ? captureRegs(details.context) : null,
+                    page: event.page,
+                    edge: event.edge,
+                    trap_count: trapCount,
+                    freeze_status_path: FREEZE_STATUS_PATH,
+                };
+                writeFreezeStatus(state.freeze.info);
+                console.log('[CAPTURE] [GATE] FREEZE TRIGGERED pid=' + Process.id +
+                            ' thread=' + (threadId === null || threadId === undefined ? 'unknown' : threadId) +
+                            ' pc=' + event.pc +
+                            ' challenge=' + (state.freeze.challenge || '<none>') +
+                            ' status=' + FREEZE_STATUS_PATH);
+                try {
+                    memdumpGetLibc().kill(Process.id, 19);
+                } catch (e) {
+                    noteFailure('freeze SIGSTOP', e);
+                    state.freeze.triggered = false;
+                    state.freeze.armed = true;
+                    state.freeze.info = {
+                        status: 'error',
+                        timestamp: (new Date()).toISOString(),
+                        pid: Process.id,
+                        thread_id: threadId || null,
+                        pc: event.pc,
+                        error: String(e),
+                        freeze_status_path: FREEZE_STATUS_PATH,
+                    };
+                    writeFreezeStatus(state.freeze.info);
+                }
+                return true;
             }
             if (!activatePage(pageBase)) {
                 return false;

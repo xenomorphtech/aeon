@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use aeon::emulation::{
     execute_block, BackingStore, BlockExecutionResult, BlockStop, MemoryCellId, MemoryLocation,
-    MemoryReadObservation, MemoryValueSource, MemoryWriteObservation, Value,
+    MemoryReadObservation, MemoryValueSource, MemoryWriteObservation, MissingMemoryPolicy, Value,
 };
 use aeon::lifter;
 use aeon_instrument::context::{ElfMemory, MemoryProvider, SnapshotMemory};
@@ -29,10 +29,19 @@ fn main() {
     };
 
     let setup = match cli.mode {
-        Mode::Synthetic => build_synthetic_setup(cli.report_out.clone(), cli.code_range),
-        Mode::ProcessSnapshot(ref dir) => {
-            build_process_snapshot_setup(dir, cli.report_out.clone(), cli.code_range)
-        }
+        Mode::Synthetic => build_synthetic_setup(
+            cli.report_out.clone(),
+            cli.code_range,
+            cli.pc_override,
+            &cli.reg_overrides,
+        ),
+        Mode::ProcessSnapshot(ref dir) => build_process_snapshot_setup(
+            dir,
+            cli.report_out.clone(),
+            cli.code_range,
+            cli.pc_override,
+            &cli.reg_overrides,
+        ),
     };
 
     let setup = match setup {
@@ -43,7 +52,12 @@ fn main() {
         }
     };
 
-    let report = match run_replay(setup, cli.max_blocks, cli.max_block_visits) {
+    let report = match run_replay(
+        setup,
+        cli.max_blocks,
+        cli.max_block_visits,
+        cli.missing_memory_policy,
+    ) {
         Ok(report) => report,
         Err(err) => {
             eprintln!("replay error: {err}");
@@ -78,6 +92,13 @@ fn main() {
     }
     println!("blocks:        {}", report.blocks.len());
     println!("stop:          {}", report.stop_reason);
+    println!(
+        "summary:       concrete={} symbolic={}",
+        report.summary.concrete_blocks, report.summary.symbolic_blocks
+    );
+    if let Some(first) = &report.summary.first_symbolic_block {
+        println!("first symbolic: {}", first);
+    }
     println!("report:        {}", report.report_path.display());
 
     if let Some(last) = report.blocks.last() {
@@ -99,16 +120,19 @@ fn main() {
 fn usage() {
     eprintln!("usage:");
     eprintln!(
-        "  cargo run -p aeon-instrument --example il_snapshot_replay -- synthetic [--max-blocks N] [--max-block-visits N] [--code-range start end] [--report-out path]"
+        "  cargo run -p aeon-instrument --example il_snapshot_replay -- synthetic [--pc addr] [--reg name value] [--missing-memory stop|symbolic] [--max-blocks N] [--max-block-visits N] [--code-range start end] [--report-out path]"
     );
     eprintln!(
-        "  cargo run -p aeon-instrument --example il_snapshot_replay -- snapshot <dir> [--max-blocks N] [--max-block-visits N] [--code-range start end] [--report-out path]"
+        "  cargo run -p aeon-instrument --example il_snapshot_replay -- snapshot <dir> [--pc addr] [--reg name value] [--missing-memory stop|symbolic] [--max-blocks N] [--max-block-visits N] [--code-range start end] [--report-out path]"
     );
 }
 
 #[derive(Debug, Clone)]
 struct Cli {
     mode: Mode,
+    pc_override: Option<u64>,
+    reg_overrides: Vec<(Reg, u64)>,
+    missing_memory_policy: MissingMemoryPolicy,
     max_blocks: u64,
     max_block_visits: u64,
     code_range: Option<(u64, u64)>,
@@ -147,6 +171,9 @@ impl Cli {
 
         let mut max_blocks = 32u64;
         let mut max_block_visits = 8u64;
+        let mut pc_override = None;
+        let mut reg_overrides = Vec::new();
+        let mut missing_memory_policy = MissingMemoryPolicy::Stop;
         let mut code_range = None;
         let mut report_out = match &mode {
             Mode::Synthetic => std::env::temp_dir().join("aeon_il_synthetic_report.json"),
@@ -167,6 +194,30 @@ impl Cli {
                         .get(idx + 1)
                         .ok_or_else(|| "--max-block-visits requires a value".to_string())?;
                     max_block_visits = parse_u64(value)?;
+                    idx += 2;
+                }
+                "--pc" => {
+                    let value = args
+                        .get(idx + 1)
+                        .ok_or_else(|| "--pc requires an address".to_string())?;
+                    pc_override = Some(parse_u64(value)?);
+                    idx += 2;
+                }
+                "--reg" => {
+                    let name = args
+                        .get(idx + 1)
+                        .ok_or_else(|| "--reg requires a register name and value".to_string())?;
+                    let value = args
+                        .get(idx + 2)
+                        .ok_or_else(|| "--reg requires a register name and value".to_string())?;
+                    reg_overrides.push((parse_reg(name)?, parse_u64(value)?));
+                    idx += 3;
+                }
+                "--missing-memory" => {
+                    let value = args
+                        .get(idx + 1)
+                        .ok_or_else(|| "--missing-memory requires stop or symbolic".to_string())?;
+                    missing_memory_policy = parse_missing_memory_policy(value)?;
                     idx += 2;
                 }
                 "--code-range" => {
@@ -199,6 +250,9 @@ impl Cli {
 
         Ok(Self {
             mode,
+            pc_override,
+            reg_overrides,
+            missing_memory_policy,
             max_blocks,
             max_block_visits,
             code_range,
@@ -278,6 +332,7 @@ impl SnapshotBackingStore {
 
     fn region_summary(&self, location: &MemoryLocation) -> Option<String> {
         let addr = match location {
+            MemoryLocation::Unknown => return None,
             MemoryLocation::Absolute(addr) => *addr,
             MemoryLocation::StackSlot(_) => return None,
         };
@@ -382,9 +437,17 @@ struct ReplayReport {
     start_pc: String,
     code_range: Option<[String; 2]>,
     stop_reason: String,
+    summary: ReplaySummary,
     blocks: Vec<BlockReport>,
     final_registers: Vec<RegisterReport>,
     final_memory: Vec<MemoryReport>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReplaySummary {
+    concrete_blocks: usize,
+    symbolic_blocks: usize,
+    first_symbolic_block: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -392,6 +455,10 @@ struct BlockReport {
     addr: String,
     stop: String,
     next_pc: Option<String>,
+    symbolic: bool,
+    first_symbolic_source: Option<String>,
+    downstream_concrete_blocks: usize,
+    downstream_symbolic_blocks: usize,
     reads: Vec<ReadReport>,
     writes: Vec<WriteReport>,
     changed_registers: Vec<RegisterReport>,
@@ -434,6 +501,7 @@ fn run_replay(
     setup: ReplaySetup,
     max_blocks: u64,
     max_block_visits: u64,
+    missing_memory_policy: MissingMemoryPolicy,
 ) -> Result<ReplayReport, String> {
     let mut registers = setup.registers;
     let mut memory_overlay = BTreeMap::<MemoryCellId, Value>::new();
@@ -481,11 +549,14 @@ fn run_replay(
         let previous_registers = registers.clone();
         let initial_registers = std::mem::take(&mut registers);
         let initial_memory = std::mem::take(&mut memory_overlay);
+        let incoming_symbolic_source =
+            first_symbolic_input_source(&initial_registers, &initial_memory);
         let result = execute_block(
             &block.stmts,
             initial_registers,
             initial_memory,
             &setup.backing_store,
+            missing_memory_policy,
             BLOCK_STEP_BUDGET,
         );
 
@@ -502,7 +573,13 @@ fn run_replay(
         }
 
         let changed_registers = diff_registers(&previous_registers, &result.final_registers);
-        let block_report = block_report(&block, &result, &setup.backing_store, changed_registers);
+        let block_report = block_report(
+            &block,
+            &result,
+            &setup.backing_store,
+            changed_registers,
+            incoming_symbolic_source,
+        );
 
         registers = result.final_registers;
         memory_overlay = result.final_memory;
@@ -547,6 +624,7 @@ fn run_replay(
     }
 
     let final_registers = register_reports(&registers);
+    annotate_block_symbolic_summary(&mut blocks);
     let mut final_memory: Vec<_> = memory_overlay
         .iter()
         .map(|(id, value)| MemoryReport {
@@ -566,6 +644,7 @@ fn run_replay(
             .code_range
             .map(|(start, end)| [format_hex(start), format_hex(end)]),
         stop_reason: format_stop_reason(&stop_reason),
+        summary: replay_summary(&blocks),
         blocks,
         final_registers,
         final_memory,
@@ -575,9 +654,12 @@ fn run_replay(
 fn build_synthetic_setup(
     report_out: PathBuf,
     code_range_override: Option<(u64, u64)>,
+    pc_override: Option<u64>,
+    reg_overrides: &[(Reg, u64)],
 ) -> Result<ReplaySetup, String> {
     let elf_path = compile_sample("samples/probe_reads_aarch64.c")?;
     let (entry_pc, symbol_range) = symbol_range(&elf_path, "probe_reads")?;
+    let start_pc = pc_override.unwrap_or(entry_pc);
     let code_range = code_range_override.or(Some(symbol_range));
     let code_memory = Box::new(
         ElfMemory::from_elf(
@@ -615,16 +697,17 @@ fn build_synthetic_setup(
     ]);
 
     let mut registers = BTreeMap::new();
-    registers.insert(Reg::PC, Value::U64(entry_pc));
+    registers.insert(Reg::PC, Value::U64(start_pc));
     registers.insert(Reg::SP, Value::U64(stack_base + 0x3000));
     registers.insert(Reg::X(0), Value::U64(known_base));
     registers.insert(Reg::X(1), Value::U64(unknown_base));
     registers.insert(Reg::X(30), Value::U64(0));
+    apply_reg_overrides(&mut registers, reg_overrides);
 
     Ok(ReplaySetup {
         mode_name: "synthetic".to_string(),
         report_out,
-        start_pc: entry_pc,
+        start_pc,
         code_range,
         registers,
         code_memory,
@@ -636,6 +719,8 @@ fn build_process_snapshot_setup(
     dir: &Path,
     report_out: PathBuf,
     code_range_override: Option<(u64, u64)>,
+    pc_override: Option<u64>,
+    reg_overrides: &[(Reg, u64)],
 ) -> Result<ReplaySetup, String> {
     let manifest_path = dir.join("before_manifest.json");
     let manifest_str = fs::read_to_string(&manifest_path)
@@ -643,7 +728,8 @@ fn build_process_snapshot_setup(
     let manifest: ProcessSnapshotManifest =
         serde_json::from_str(&manifest_str).map_err(|err| format!("parse manifest: {err}"))?;
 
-    let start_pc = parse_u64(&manifest.faulting_pc)?;
+    let manifest_pc = parse_u64(&manifest.faulting_pc)?;
+    let start_pc = pc_override.unwrap_or(manifest_pc);
     let code_range = code_range_override.or_else(|| derive_code_range(&manifest.regions, start_pc));
     let memdump_dir = dir.join("memdump");
 
@@ -699,6 +785,7 @@ fn build_process_snapshot_setup(
             registers.insert(Reg::X(index), Value::U64(parse_u64(value)?));
         }
     }
+    apply_reg_overrides(&mut registers, reg_overrides);
 
     Ok(ReplaySetup {
         mode_name: "process_snapshot".to_string(),
@@ -741,6 +828,12 @@ fn compile_sample(source_rel: &str) -> Result<PathBuf, String> {
     }
 
     Ok(out)
+}
+
+fn apply_reg_overrides(registers: &mut BTreeMap<Reg, Value>, overrides: &[(Reg, u64)]) {
+    for (reg, value) in overrides {
+        registers.insert(reg.clone(), Value::U64(*value));
+    }
 }
 
 fn symbol_range(path: &Path, name: &str) -> Result<(u64, (u64, u64)), String> {
@@ -966,11 +1059,18 @@ fn block_report(
     result: &BlockExecutionResult,
     backing_store: &SnapshotBackingStore,
     changed_registers: Vec<RegisterReport>,
+    incoming_symbolic_source: Option<String>,
 ) -> BlockReport {
+    let (symbolic, first_symbolic_source) =
+        block_symbolic_summary(result, &changed_registers, incoming_symbolic_source);
     BlockReport {
         addr: format_hex(block.addr),
         stop: format_block_stop(&result.stop),
         next_pc: result.next_pc.map(format_hex),
+        symbolic,
+        first_symbolic_source,
+        downstream_concrete_blocks: 0,
+        downstream_symbolic_blocks: 0,
         reads: result
             .reads
             .iter()
@@ -978,6 +1078,120 @@ fn block_report(
             .collect(),
         writes: result.writes.iter().map(write_report).collect(),
         changed_registers,
+    }
+}
+
+fn block_symbolic_summary(
+    result: &BlockExecutionResult,
+    changed_registers: &[RegisterReport],
+    incoming_symbolic_source: Option<String>,
+) -> (bool, Option<String>) {
+    let has_symbolic_effect = result.reads.iter().any(|read| !is_concrete(&read.value))
+        || result.writes.iter().any(|write| !is_concrete(&write.value))
+        || changed_registers.iter().any(|reg| !reg.concrete)
+        || matches!(
+            result.stop,
+            BlockStop::SymbolicBranch | BlockStop::MissingMemory { .. }
+        );
+
+    if !has_symbolic_effect {
+        return (false, None);
+    }
+
+    let first_symbolic_source = incoming_symbolic_source
+        .or_else(|| {
+            result
+                .reads
+                .iter()
+                .find(|read| !is_concrete(&read.value))
+                .map(first_symbolic_read_source)
+        })
+        .or_else(|| {
+            result
+                .writes
+                .iter()
+                .find(|write| !is_concrete(&write.value))
+                .map(first_symbolic_write_source)
+        })
+        .or_else(|| {
+            changed_registers
+                .iter()
+                .find(|reg| !reg.concrete)
+                .map(|reg| format!("register {} became symbolic", reg.reg))
+        })
+        .or_else(|| match &result.stop {
+            BlockStop::SymbolicBranch => Some("symbolic branch condition".to_string()),
+            BlockStop::MissingMemory { location, .. } => {
+                Some(format!("missing read {}", format_location(location)))
+            }
+            _ => None,
+        });
+
+    (true, first_symbolic_source)
+}
+
+fn first_symbolic_input_source(
+    registers: &BTreeMap<Reg, Value>,
+    memory: &BTreeMap<MemoryCellId, Value>,
+) -> Option<String> {
+    for reg in tracked_registers() {
+        if let Some(value) = registers.get(&reg) {
+            if !is_concrete(value) {
+                return Some(format!(
+                    "incoming register {} was symbolic",
+                    format_reg(&reg)
+                ));
+            }
+        }
+    }
+
+    for (id, value) in memory {
+        if !is_concrete(value) {
+            return Some(format!(
+                "incoming memory {} was symbolic",
+                format_location(&id.location)
+            ));
+        }
+    }
+
+    None
+}
+
+fn first_symbolic_read_source(read: &MemoryReadObservation) -> String {
+    if read.source.is_none() {
+        format!("missing read {}", format_location(&read.id.location))
+    } else {
+        format!("symbolic read {}", format_location(&read.id.location))
+    }
+}
+
+fn first_symbolic_write_source(write: &MemoryWriteObservation) -> String {
+    format!("symbolic write {}", format_location(&write.id.location))
+}
+
+fn annotate_block_symbolic_summary(blocks: &mut [BlockReport]) {
+    let mut downstream_concrete_blocks = 0usize;
+    let mut downstream_symbolic_blocks = 0usize;
+
+    for block in blocks.iter_mut().rev() {
+        block.downstream_concrete_blocks = downstream_concrete_blocks;
+        block.downstream_symbolic_blocks = downstream_symbolic_blocks;
+        if block.symbolic {
+            downstream_symbolic_blocks += 1;
+        } else {
+            downstream_concrete_blocks += 1;
+        }
+    }
+}
+
+fn replay_summary(blocks: &[BlockReport]) -> ReplaySummary {
+    ReplaySummary {
+        concrete_blocks: blocks.iter().filter(|block| !block.symbolic).count(),
+        symbolic_blocks: blocks.iter().filter(|block| block.symbolic).count(),
+        first_symbolic_block: blocks
+            .iter()
+            .find(|block| block.symbolic)
+            .map(|block| block.addr.clone()),
     }
 }
 
@@ -1104,6 +1318,7 @@ fn format_block_stop(stop: &BlockStop) -> String {
 
 fn format_location(location: &MemoryLocation) -> String {
     match location {
+        MemoryLocation::Unknown => "unknown".to_string(),
         MemoryLocation::Absolute(addr) => format_hex(*addr),
         MemoryLocation::StackSlot(offset) => format!("stack({offset:+#x})"),
     }
@@ -1155,6 +1370,49 @@ fn parse_u64(value: &str) -> Result<u64, String> {
             .parse::<u64>()
             .map_err(|err| format!("invalid integer value '{value}': {err}"))
     }
+}
+
+fn parse_missing_memory_policy(value: &str) -> Result<MissingMemoryPolicy, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "stop" => Ok(MissingMemoryPolicy::Stop),
+        "symbolic" => Ok(MissingMemoryPolicy::ContinueAsUnknown),
+        other => Err(format!(
+            "unsupported --missing-memory value '{other}'; expected stop or symbolic"
+        )),
+    }
+}
+
+fn parse_reg(value: &str) -> Result<Reg, String> {
+    let value = value.trim().to_ascii_lowercase();
+    if value == "sp" {
+        return Ok(Reg::SP);
+    }
+    if value == "pc" {
+        return Ok(Reg::PC);
+    }
+    if value == "flags" {
+        return Ok(Reg::Flags);
+    }
+    if value == "xzr" {
+        return Ok(Reg::XZR);
+    }
+    if let Some(index) = value.strip_prefix('x') {
+        let index = index
+            .parse::<u8>()
+            .map_err(|err| format!("invalid register '{value}': {err}"))?;
+        if index <= 30 {
+            return Ok(Reg::X(index));
+        }
+    }
+    if let Some(index) = value.strip_prefix('w') {
+        let index = index
+            .parse::<u8>()
+            .map_err(|err| format!("invalid register '{value}': {err}"))?;
+        if index <= 30 {
+            return Ok(Reg::W(index));
+        }
+    }
+    Err(format!("unsupported register '{value}'"))
 }
 
 fn repo_root() -> PathBuf {

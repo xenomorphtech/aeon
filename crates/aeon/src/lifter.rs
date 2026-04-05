@@ -42,19 +42,12 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
             Stmt::Assign { dst, src }
         }
         Op::MOVI => {
-            let dst = reg_op(operands, 0);
-            let src = expr_op(operands, 1);
             ft(&mut edges, next_pc);
-            Stmt::Assign { dst, src }
+            lift_vector_immediate_intrinsic(&disasm, operands, "movi")
         }
         Op::MVNI => {
-            let dst = reg_op(operands, 0);
-            let src = expr_op(operands, 1);
             ft(&mut edges, next_pc);
-            Stmt::Assign {
-                dst,
-                src: e_not(src),
-            }
+            lift_vector_immediate_intrinsic(&disasm, operands, "mvni")
         }
         Op::ADRP => {
             let dst = reg_op(operands, 0);
@@ -480,8 +473,7 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         // ── Bitfield ───────────────────────────────────────────────
         Op::BFI | Op::BFXIL | Op::SBFIZ | Op::SBFX | Op::UBFX | Op::UBFIZ => {
             ft(&mut edges, next_pc);
-            let name = format!("{:?}", insn.op()).to_lowercase();
-            lift_intrinsic_all(operands, &name)
+            lift_bitfield(insn.op(), operands)
         }
         Op::EXTR => {
             ft(&mut edges, next_pc);
@@ -864,7 +856,7 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         Op::FRECPE | Op::FRECPS | Op::FRSQRTE | Op::FRSQRTS => {
             ft(&mut edges, next_pc);
             let name = format!("{:?}", insn.op()).to_lowercase();
-            lift_intrinsic_all(operands, &name)
+            lift_intrinsic_all_with_arrangement(&disasm, operands, &name)
         }
 
         // ── SIMD / NEON (as intrinsics with proper operand extraction) ─
@@ -1026,7 +1018,7 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         | Op::FMINV => {
             ft(&mut edges, next_pc);
             let name = format!("{:?}", insn.op()).to_lowercase();
-            lift_intrinsic_all(operands, &name)
+            lift_intrinsic_all_with_arrangement(&disasm, operands, &name)
         }
 
         // SIMD loads/stores
@@ -1106,15 +1098,18 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         // ── System / NOP / Hints ───────────────────────────────────
         Op::NOP | Op::YIELD | Op::HINT => {
             ft(&mut edges, next_pc);
-            Stmt::Nop
+            let name = format!("{:?}", insn.op()).to_lowercase();
+            lift_intrinsic_all(operands, &name)
         }
         Op::PACIASP | Op::AUTIASP | Op::BTI | Op::XPACLRI => {
             ft(&mut edges, next_pc);
-            Stmt::Nop
+            let name = format!("{:?}", insn.op()).to_lowercase();
+            lift_intrinsic_all(operands, &name)
         }
         Op::PRFM | Op::PRFUM => {
             ft(&mut edges, next_pc);
-            Stmt::Nop
+            let name = format!("{:?}", insn.op()).to_lowercase();
+            lift_intrinsic_all(operands, &name)
         }
         Op::DMB | Op::DSB | Op::ISB => {
             ft(&mut edges, next_pc);
@@ -1122,7 +1117,8 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         }
         Op::CLREX => {
             ft(&mut edges, next_pc);
-            Stmt::Nop
+            let name = format!("{:?}", insn.op()).to_lowercase();
+            lift_intrinsic_all(operands, &name)
         }
         Op::BRK | Op::UDF => Stmt::Trap,
         Op::SVC | Op::HVC | Op::SMC => {
@@ -1226,6 +1222,66 @@ fn lift_intrinsic_all(operands: &[Operand], name: &str) -> Stmt {
     }
 }
 
+fn lift_intrinsic_all_with_arrangement(disasm: &str, operands: &[Operand], name: &str) -> Stmt {
+    lift_intrinsic_all(operands, &intrinsic_name_with_arrangement(disasm, name))
+}
+
+fn lift_vector_immediate_intrinsic(disasm: &str, operands: &[Operand], name: &str) -> Stmt {
+    let mut ops = Vec::with_capacity(operands.len());
+    if let Some(dst) = operands.first().and_then(operand_to_reg) {
+        ops.push(Expr::Reg(dst));
+    }
+    ops.extend(operands.iter().skip(1).map(expr_from_operand));
+    Stmt::Intrinsic {
+        name: intrinsic_name_with_arrangement(disasm, name),
+        operands: ops,
+    }
+}
+
+fn intrinsic_name_with_arrangement(disasm: &str, name: &str) -> String {
+    match first_vector_arrangement(disasm) {
+        Some(arrangement) => format!("{name}.{arrangement}"),
+        None => name.to_string(),
+    }
+}
+
+fn first_vector_arrangement(disasm: &str) -> Option<String> {
+    let (_, operands) = disasm.split_once(' ')?;
+    let first = operands.split(',').next()?.trim();
+    let (_, arrangement) = first.split_once('.')?;
+    if arrangement.chars().next()?.is_ascii_digit() {
+        Some(arrangement.to_string())
+    } else {
+        None
+    }
+}
+
+fn lift_bitfield(op: Op, operands: &[Operand]) -> Stmt {
+    let dst = reg_op(operands, 0);
+    let src = expr_op(operands, 1);
+    let lsb = imm_val(operands, 2) as u8;
+    let width = imm_val(operands, 3) as u8;
+    let reg_bits = operand_reg_size(operands, 0).max(1) * 8;
+
+    let src_low = e_extract(src.clone(), 0, width);
+    let src_field = e_extract(src, lsb, width);
+
+    let bitfield = match op {
+        Op::UBFIZ => e_shl(src_low, Expr::Imm(lsb as u64)),
+        Op::UBFX => src_field,
+        Op::SBFIZ => e_sign_extend(
+            e_shl(src_low, Expr::Imm(lsb as u64)),
+            (lsb + width).min(reg_bits),
+        ),
+        Op::SBFX => e_sign_extend(src_field, width.min(reg_bits)),
+        Op::BFI => e_insert(Expr::Reg(dst.clone()), src_low, lsb, width),
+        Op::BFXIL => e_insert(Expr::Reg(dst.clone()), src_field, 0, width),
+        _ => unreachable!("unsupported bitfield op: {:?}", op),
+    };
+
+    Stmt::Assign { dst, src: bitfield }
+}
+
 fn lift_load(operands: &[Operand], explicit_size: u8, signed: bool) -> Stmt {
     let dst = reg_op(operands, 0);
     let size = if explicit_size == 0 {
@@ -1234,7 +1290,7 @@ fn lift_load(operands: &[Operand], explicit_size: u8, signed: bool) -> Stmt {
         explicit_size
     };
     let addr = if operands.len() > 1 {
-        mem_to_addr(&operands[1])
+        expr_from_operand(&operands[1])
     } else {
         Expr::Imm(0)
     };
@@ -1612,7 +1668,10 @@ fn mem_writeback(mem: &Operand) -> Option<(Reg, Expr)> {
     match mem {
         Operand::MemPreIdx { reg, imm } | Operand::MemPostIdxImm { reg, imm } => {
             let reg = reg_from_bad64(*reg)?;
-            Some((reg.clone(), e_add(Expr::Reg(reg), Expr::Imm(imm_to_u64(imm)))))
+            Some((
+                reg.clone(),
+                e_add(Expr::Reg(reg), Expr::Imm(imm_to_u64(imm))),
+            ))
         }
         Operand::MemPostIdxReg(regs) => {
             let base = reg_from_bad64(regs[0])?;
@@ -1922,6 +1981,74 @@ mod tests {
             }
         );
         assert_eq!(result.edges, vec![0x07a34ac4, pc + 4]);
+    }
+
+    #[test]
+    fn lifts_ldr_literal_as_absolute_load() {
+        let pc = 0x9b6117ac;
+        let result = lift_word(0x5800_11c0, pc);
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Assign {
+                dst: Reg::X(0),
+                src: e_load(Expr::Imm(0x9b6119e4), 8),
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_vector_movi_with_arrangement() {
+        let pc = 0x4cbe0;
+        let result = lift_word(0x6f07_e7e0, pc);
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Intrinsic {
+                name: "movi.2d".to_string(),
+                operands: vec![Expr::Reg(Reg::V(0)), Expr::Imm(u64::MAX)],
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_cmeq_with_arrangement() {
+        let pc = 0x4cc14;
+        let result = lift_word(0x2ea1_8c01, pc);
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Intrinsic {
+                name: "cmeq.2s".to_string(),
+                operands: vec![
+                    Expr::Reg(Reg::V(1)),
+                    Expr::Reg(Reg::V(0)),
+                    Expr::Reg(Reg::V(1)),
+                ],
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_bif_with_arrangement() {
+        let pc = 0x4cc18;
+        let result = lift_word(0x2ee1_1c02, pc);
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Intrinsic {
+                name: "bif.8b".to_string(),
+                operands: vec![
+                    Expr::Reg(Reg::V(2)),
+                    Expr::Reg(Reg::V(0)),
+                    Expr::Reg(Reg::V(1)),
+                ],
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
     }
 
     #[test]

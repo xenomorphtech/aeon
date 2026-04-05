@@ -12,6 +12,7 @@ pub enum Value {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MemoryLocation {
+    Unknown,
     Absolute(u64),
     StackSlot(i64),
 }
@@ -44,6 +45,12 @@ pub trait BackingStore {
 pub enum MemoryValueSource {
     Overlay,
     BackingStore,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingMemoryPolicy {
+    Stop,
+    ContinueAsUnknown,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -84,9 +91,15 @@ pub fn execute_block(
     initial_registers: BTreeMap<Reg, Value>,
     initial_memory: BTreeMap<MemoryCellId, Value>,
     backing: &dyn BackingStore,
+    missing_memory_policy: MissingMemoryPolicy,
     step_budget: usize,
 ) -> BlockExecutionResult {
-    let mut executor = BlockExecutor::new(initial_registers, initial_memory, backing);
+    let mut executor = BlockExecutor::new(
+        initial_registers,
+        initial_memory,
+        backing,
+        missing_memory_policy,
+    );
     let mut steps_executed = 0usize;
 
     for (idx, stmt) in stmts.iter().enumerate() {
@@ -123,6 +136,7 @@ struct BlockExecutor<'a> {
     memory: BTreeMap<MemoryCellId, Value>,
     flags: Option<Nzcv>,
     backing: &'a dyn BackingStore,
+    missing_memory_policy: MissingMemoryPolicy,
     reads: Vec<MemoryReadObservation>,
     writes: Vec<MemoryWriteObservation>,
     next_pc: Option<u64>,
@@ -205,14 +219,18 @@ impl Executor {
                 self.execute_stmt(lhs);
                 self.execute_stmt(rhs);
             }
+            Stmt::Nop => panic_on_noop_stmt(stmt),
+            Stmt::Intrinsic { name, operands } => self.execute_stmt_intrinsic(name, operands),
             Stmt::Branch { .. }
             | Stmt::CondBranch { .. }
             | Stmt::Call { .. }
             | Stmt::Ret
-            | Stmt::Nop
-            | Stmt::Barrier(_)
-            | Stmt::Trap
-            | Stmt::Intrinsic { .. } => {}
+            | Stmt::Trap => {}
+            Stmt::Barrier(kind) => {
+                if !is_supported_barrier(kind) {
+                    panic_on_unsupported_stmt(stmt);
+                }
+            }
         }
     }
 
@@ -344,8 +362,12 @@ impl Executor {
                     .and_then(|value| value.as_u64());
                 eval_movk_bits(dst, src)
             }
-            Expr::Intrinsic { .. }
-            | Expr::MrsRead(_)
+            Expr::Intrinsic { .. } => panic_on_unsupported_expr(expr),
+            Expr::Clz(inner) => self.eval_unary_with_width(inner, leading_zeros_for_width),
+            Expr::Cls(inner) => self.eval_unary_with_width(inner, leading_sign_bits_for_width),
+            Expr::Rev(inner) => self.eval_unary_with_width(inner, reverse_bytes_for_width),
+            Expr::Rbit(inner) => self.eval_unary_with_width(inner, reverse_bits_for_width),
+            Expr::MrsRead(_)
             | Expr::FAdd(_, _)
             | Expr::FSub(_, _)
             | Expr::FMul(_, _)
@@ -357,11 +379,7 @@ impl Executor {
             | Expr::FMin(_, _)
             | Expr::FCvt(_)
             | Expr::IntToFloat(_)
-            | Expr::FloatToInt(_)
-            | Expr::Clz(_)
-            | Expr::Cls(_)
-            | Expr::Rev(_)
-            | Expr::Rbit(_) => Value::Unknown,
+            | Expr::FloatToInt(_) => panic_on_unsupported_expr(expr),
         }
     }
 
@@ -378,6 +396,15 @@ impl Executor {
         let value = self.eval_expr(expr);
         match value.as_u64() {
             Some(bits) => Value::U64(op(bits)),
+            None => Value::Unknown,
+        }
+    }
+
+    fn eval_unary_with_width(&mut self, expr: &Expr, op: impl Fn(u64, u8) -> u64) -> Value {
+        let value = self.eval_expr(expr);
+        let width = expr_bit_width(expr).unwrap_or(64);
+        match value.as_u64() {
+            Some(bits) => Value::U64(op(bits, width)),
             None => Value::Unknown,
         }
     }
@@ -494,57 +521,132 @@ impl Executor {
         })
     }
 
-    fn read_reg(&self, reg: &Reg) -> Value {
-        match reg {
-            Reg::XZR => Value::U64(0),
-            Reg::W(index) => self
-                .registers
-                .get(reg)
-                .cloned()
-                .or_else(|| {
-                    self.registers
-                        .get(&Reg::X(*index))
-                        .cloned()
-                        .map(truncate_to_w)
-                })
-                .unwrap_or(Value::Unknown),
-            Reg::X(index) => self
-                .registers
-                .get(reg)
-                .cloned()
-                .or_else(|| {
-                    self.registers
-                        .get(&Reg::W(*index))
-                        .cloned()
-                        .map(zero_extend_w)
-                })
-                .unwrap_or(Value::Unknown),
-            _ => self.registers.get(reg).cloned().unwrap_or(Value::Unknown),
+    fn execute_stmt_intrinsic(&mut self, name: &str, operands: &[Expr]) {
+        match intrinsic_base_name(name) {
+            "movi" => self.execute_vector_move_intrinsic(name, operands, false),
+            "mvni" => self.execute_vector_move_intrinsic(name, operands, true),
+            "cmeq" => self.execute_cmeq_intrinsic(name, operands),
+            "bif" => self.execute_bif_intrinsic(name, operands),
+            _ if crc32_intrinsic_info(name).is_some() => self.execute_crc32_intrinsic(name, operands),
+            _ => {
+                if !is_supported_stmt_intrinsic(name) {
+                    panic!(
+                        "aeon emulation encountered unsupported IL statement intrinsic `{name}`"
+                    );
+                }
+            }
         }
     }
 
+    fn execute_vector_move_intrinsic(&mut self, name: &str, operands: &[Expr], invert: bool) {
+        let Some(arrangement) = parse_vector_arrangement(name) else {
+            panic!("aeon emulation is missing SIMD arrangement for `{name}`");
+        };
+        let Some(dst) = operands.first().and_then(vector_reg_from_expr) else {
+            panic!("aeon emulation expected a SIMD destination for `{name}`");
+        };
+        let imm = operands
+            .get(1)
+            .map(|expr| self.eval_expr(expr))
+            .and_then(|value| value.as_u64());
+        let value = imm
+            .map(|imm| arranged_immediate_vector(imm, arrangement, invert))
+            .map(Value::U128)
+            .unwrap_or(Value::Unknown);
+        write_arranged_vector_register(&mut self.registers, &dst, arrangement, value);
+    }
+
+    fn execute_cmeq_intrinsic(&mut self, name: &str, operands: &[Expr]) {
+        let Some(arrangement) = parse_vector_arrangement(name) else {
+            panic!("aeon emulation is missing SIMD arrangement for `{name}`");
+        };
+        let Some(dst) = operands.first().and_then(vector_reg_from_expr) else {
+            panic!("aeon emulation expected a SIMD destination for `{name}`");
+        };
+        let lhs = operands
+            .get(1)
+            .map(|expr| {
+                let value = self.eval_expr(expr);
+                vector_operand_bytes(expr, value, arrangement)
+            })
+            .flatten();
+        let rhs = operands
+            .get(2)
+            .map(|expr| {
+                let value = self.eval_expr(expr);
+                vector_operand_bytes(expr, value, arrangement)
+            })
+            .flatten();
+        let value = match (lhs, rhs) {
+            (Some(lhs), Some(rhs)) => Value::U128(vector_cmeq(lhs, rhs, arrangement)),
+            _ => Value::Unknown,
+        };
+        write_arranged_vector_register(&mut self.registers, &dst, arrangement, value);
+    }
+
+    fn execute_bif_intrinsic(&mut self, name: &str, operands: &[Expr]) {
+        let Some(arrangement) = parse_vector_arrangement(name) else {
+            panic!("aeon emulation is missing SIMD arrangement for `{name}`");
+        };
+        let Some(dst) = operands.first().and_then(vector_reg_from_expr) else {
+            panic!("aeon emulation expected a SIMD destination for `{name}`");
+        };
+        let original_dst = self.eval_expr(operands.first().expect("bif destination operand"));
+        let src = operands
+            .get(1)
+            .map(|expr| {
+                let value = self.eval_expr(expr);
+                vector_operand_bytes(expr, value, arrangement)
+            })
+            .flatten();
+        let mask = operands
+            .get(2)
+            .map(|expr| {
+                let value = self.eval_expr(expr);
+                vector_operand_bytes(expr, value, arrangement)
+            })
+            .flatten();
+        let dst_bytes = vector_operand_bytes(
+            operands.first().expect("bif destination operand"),
+            original_dst,
+            arrangement,
+        );
+        let value = match (dst_bytes, src, mask) {
+            (Some(dst_bytes), Some(src), Some(mask)) => {
+                Value::U128(vector_bif(dst_bytes, src, mask, arrangement))
+            }
+            _ => Value::Unknown,
+        };
+        write_arranged_vector_register(&mut self.registers, &dst, arrangement, value);
+    }
+
+    fn execute_crc32_intrinsic(&mut self, name: &str, operands: &[Expr]) {
+        let Some(dst) = operands.first().and_then(expr_reg_operand) else {
+            panic!("aeon emulation expected a register destination for `{name}`");
+        };
+        let acc = operands
+            .get(1)
+            .map(|expr| self.eval_expr(expr))
+            .and_then(|value| value.as_u64());
+        let src = operands
+            .get(2)
+            .map(|expr| self.eval_expr(expr))
+            .and_then(|value| value.as_u64());
+        let value = match (acc, src, crc32_intrinsic_info(name)) {
+            (Some(acc), Some(src), Some((poly, width))) => {
+                Value::U64(crc32_update(acc as u32, src, width, poly) as u64)
+            }
+            _ => Value::Unknown,
+        };
+        self.write_reg(dst, value);
+    }
+
+    fn read_reg(&self, reg: &Reg) -> Value {
+        read_register_value(&self.registers, reg)
+    }
+
     fn write_reg(&mut self, reg: Reg, value: Value) {
-        match reg {
-            Reg::XZR => {}
-            Reg::W(index) => {
-                let w_value = truncate_to_w(value);
-                let x_value = zero_extend_w(w_value.clone());
-                self.registers.insert(Reg::W(index), w_value);
-                self.registers.insert(Reg::X(index), x_value);
-            }
-            Reg::X(index) => {
-                let w_value = truncate_to_w(value.clone());
-                self.registers.insert(Reg::W(index), w_value);
-                self.registers.insert(Reg::X(index), value);
-            }
-            Reg::Flags => {
-                self.flags = value.as_u64().map(Nzcv::from_bits);
-                self.registers.insert(Reg::Flags, value);
-            }
-            _ => {
-                self.registers.insert(reg, value);
-            }
-        }
+        write_register_value(&mut self.registers, &mut self.flags, reg, value);
     }
 }
 
@@ -553,12 +655,14 @@ impl<'a> BlockExecutor<'a> {
         initial_registers: BTreeMap<Reg, Value>,
         initial_memory: BTreeMap<MemoryCellId, Value>,
         backing: &'a dyn BackingStore,
+        missing_memory_policy: MissingMemoryPolicy,
     ) -> Self {
         let mut executor = Self {
             registers: BTreeMap::new(),
             memory: initial_memory,
             flags: None,
             backing,
+            missing_memory_policy,
             reads: Vec::new(),
             writes: Vec::new(),
             next_pc: None,
@@ -603,16 +707,29 @@ impl<'a> BlockExecutor<'a> {
                 true
             }
             Stmt::Store { addr, value, size } => {
-                let Some(cell_id) = self.resolve_memory_cell(addr, *size) else {
-                    self.stop = BlockStop::MissingMemory {
-                        location: MemoryLocation::Absolute(0),
-                        size: *size,
-                    };
-                    return false;
-                };
+                let cell_id =
+                    self.resolve_memory_cell(addr, *size)
+                        .unwrap_or_else(|| MemoryCellId {
+                            location: MemoryLocation::Unknown,
+                            size: *size,
+                        });
                 let stored = mask_value(self.eval_expr(value), *size);
                 if !matches!(self.stop, BlockStop::Completed) {
                     return false;
+                }
+                if matches!(cell_id.location, MemoryLocation::Unknown) {
+                    self.writes.push(MemoryWriteObservation {
+                        id: cell_id,
+                        value: stored,
+                    });
+                    if matches!(self.missing_memory_policy, MissingMemoryPolicy::Stop) {
+                        self.stop = BlockStop::MissingMemory {
+                            location: MemoryLocation::Unknown,
+                            size: *size,
+                        };
+                        return false;
+                    }
+                    return true;
                 }
                 self.memory.insert(cell_id.clone(), stored.clone());
                 self.writes.push(MemoryWriteObservation {
@@ -674,7 +791,14 @@ impl<'a> BlockExecutor<'a> {
                 self.stop = BlockStop::UnsupportedControlFlow;
                 false
             }
-            Stmt::Nop | Stmt::Barrier(_) | Stmt::Intrinsic { .. } => true,
+            Stmt::Nop => panic_on_noop_stmt(stmt),
+            Stmt::Barrier(kind) => {
+                if !is_supported_barrier(kind) {
+                    panic_on_unsupported_stmt(stmt);
+                }
+                true
+            }
+            Stmt::Intrinsic { name, operands } => self.execute_stmt_intrinsic(name, operands),
         }
     }
 
@@ -684,13 +808,12 @@ impl<'a> BlockExecutor<'a> {
             Expr::Imm(value) | Expr::AdrpImm(value) | Expr::AdrImm(value) => Value::U64(*value),
             Expr::FImm(value) => Value::F64(*value),
             Expr::Load { addr, size } => {
-                let Some(cell_id) = self.resolve_memory_cell(addr, *size) else {
-                    self.stop = BlockStop::MissingMemory {
-                        location: MemoryLocation::Absolute(0),
-                        size: *size,
-                    };
-                    return Value::Unknown;
-                };
+                let cell_id =
+                    self.resolve_memory_cell(addr, *size)
+                        .unwrap_or_else(|| MemoryCellId {
+                            location: MemoryLocation::Unknown,
+                            size: *size,
+                        });
                 self.load_memory(&cell_id)
             }
             Expr::Add(lhs, rhs) => self.eval_binary_u64(lhs, rhs, u64::wrapping_add),
@@ -809,8 +932,12 @@ impl<'a> BlockExecutor<'a> {
                     .and_then(|value| value.as_u64());
                 eval_movk_bits(dst, src)
             }
-            Expr::Intrinsic { .. }
-            | Expr::MrsRead(_)
+            Expr::Intrinsic { .. } => panic_on_unsupported_expr(expr),
+            Expr::Clz(inner) => self.eval_unary_with_width(inner, leading_zeros_for_width),
+            Expr::Cls(inner) => self.eval_unary_with_width(inner, leading_sign_bits_for_width),
+            Expr::Rev(inner) => self.eval_unary_with_width(inner, reverse_bytes_for_width),
+            Expr::Rbit(inner) => self.eval_unary_with_width(inner, reverse_bits_for_width),
+            Expr::MrsRead(_)
             | Expr::FAdd(_, _)
             | Expr::FSub(_, _)
             | Expr::FMul(_, _)
@@ -822,11 +949,7 @@ impl<'a> BlockExecutor<'a> {
             | Expr::FMin(_, _)
             | Expr::FCvt(_)
             | Expr::IntToFloat(_)
-            | Expr::FloatToInt(_)
-            | Expr::Clz(_)
-            | Expr::Cls(_)
-            | Expr::Rev(_)
-            | Expr::Rbit(_) => Value::Unknown,
+            | Expr::FloatToInt(_) => panic_on_unsupported_expr(expr),
         }
     }
 
@@ -840,7 +963,18 @@ impl<'a> BlockExecutor<'a> {
             return value;
         }
 
+        if let Some(bytes) = overlay_bytes_for_cell(&self.memory, cell_id) {
+            let value = decode_loaded_value(&bytes);
+            self.reads.push(MemoryReadObservation {
+                id: cell_id.clone(),
+                value: value.clone(),
+                source: Some(MemoryValueSource::Overlay),
+            });
+            return value;
+        }
+
         let backing_addr = match cell_id.location {
+            MemoryLocation::Unknown => None,
             MemoryLocation::Absolute(addr) => Some(addr),
             MemoryLocation::StackSlot(offset) => self
                 .read_reg(&Reg::SP)
@@ -860,15 +994,17 @@ impl<'a> BlockExecutor<'a> {
             }
         }
 
-        self.stop = BlockStop::MissingMemory {
-            location: cell_id.location.clone(),
-            size: cell_id.size,
-        };
         self.reads.push(MemoryReadObservation {
             id: cell_id.clone(),
             value: Value::Unknown,
             source: None,
         });
+        if matches!(self.missing_memory_policy, MissingMemoryPolicy::Stop) {
+            self.stop = BlockStop::MissingMemory {
+                location: cell_id.location.clone(),
+                size: cell_id.size,
+            };
+        }
         Value::Unknown
     }
 
@@ -885,6 +1021,15 @@ impl<'a> BlockExecutor<'a> {
         let value = self.eval_expr(expr);
         match value.as_u64() {
             Some(bits) => Value::U64(op(bits)),
+            None => Value::Unknown,
+        }
+    }
+
+    fn eval_unary_with_width(&mut self, expr: &Expr, op: impl Fn(u64, u8) -> u64) -> Value {
+        let value = self.eval_expr(expr);
+        let width = expr_bit_width(expr).unwrap_or(64);
+        match value.as_u64() {
+            Some(bits) => Value::U64(op(bits, width)),
             None => Value::Unknown,
         }
     }
@@ -1031,57 +1176,133 @@ impl<'a> BlockExecutor<'a> {
         })
     }
 
-    fn read_reg(&self, reg: &Reg) -> Value {
-        match reg {
-            Reg::XZR => Value::U64(0),
-            Reg::W(index) => self
-                .registers
-                .get(reg)
-                .cloned()
-                .or_else(|| {
-                    self.registers
-                        .get(&Reg::X(*index))
-                        .cloned()
-                        .map(truncate_to_w)
-                })
-                .unwrap_or(Value::Unknown),
-            Reg::X(index) => self
-                .registers
-                .get(reg)
-                .cloned()
-                .or_else(|| {
-                    self.registers
-                        .get(&Reg::W(*index))
-                        .cloned()
-                        .map(zero_extend_w)
-                })
-                .unwrap_or(Value::Unknown),
-            _ => self.registers.get(reg).cloned().unwrap_or(Value::Unknown),
+    fn execute_stmt_intrinsic(&mut self, name: &str, operands: &[Expr]) -> bool {
+        match intrinsic_base_name(name) {
+            "movi" => self.execute_vector_move_intrinsic(name, operands, false),
+            "mvni" => self.execute_vector_move_intrinsic(name, operands, true),
+            "cmeq" => self.execute_cmeq_intrinsic(name, operands),
+            "bif" => self.execute_bif_intrinsic(name, operands),
+            _ if crc32_intrinsic_info(name).is_some() => self.execute_crc32_intrinsic(name, operands),
+            _ => {
+                if !is_supported_stmt_intrinsic(name) {
+                    panic!(
+                        "aeon emulation encountered unsupported IL statement intrinsic `{name}`"
+                    );
+                }
+            }
         }
+        true
+    }
+
+    fn execute_vector_move_intrinsic(&mut self, name: &str, operands: &[Expr], invert: bool) {
+        let Some(arrangement) = parse_vector_arrangement(name) else {
+            panic!("aeon emulation is missing SIMD arrangement for `{name}`");
+        };
+        let Some(dst) = operands.first().and_then(vector_reg_from_expr) else {
+            panic!("aeon emulation expected a SIMD destination for `{name}`");
+        };
+        let imm = operands
+            .get(1)
+            .map(|expr| self.eval_expr(expr))
+            .and_then(|value| value.as_u64());
+        let value = imm
+            .map(|imm| arranged_immediate_vector(imm, arrangement, invert))
+            .map(Value::U128)
+            .unwrap_or(Value::Unknown);
+        write_arranged_vector_register(&mut self.registers, &dst, arrangement, value);
+    }
+
+    fn execute_cmeq_intrinsic(&mut self, name: &str, operands: &[Expr]) {
+        let Some(arrangement) = parse_vector_arrangement(name) else {
+            panic!("aeon emulation is missing SIMD arrangement for `{name}`");
+        };
+        let Some(dst) = operands.first().and_then(vector_reg_from_expr) else {
+            panic!("aeon emulation expected a SIMD destination for `{name}`");
+        };
+        let lhs = operands
+            .get(1)
+            .map(|expr| {
+                let value = self.eval_expr(expr);
+                vector_operand_bytes(expr, value, arrangement)
+            })
+            .flatten();
+        let rhs = operands
+            .get(2)
+            .map(|expr| {
+                let value = self.eval_expr(expr);
+                vector_operand_bytes(expr, value, arrangement)
+            })
+            .flatten();
+        let value = match (lhs, rhs) {
+            (Some(lhs), Some(rhs)) => Value::U128(vector_cmeq(lhs, rhs, arrangement)),
+            _ => Value::Unknown,
+        };
+        write_arranged_vector_register(&mut self.registers, &dst, arrangement, value);
+    }
+
+    fn execute_bif_intrinsic(&mut self, name: &str, operands: &[Expr]) {
+        let Some(arrangement) = parse_vector_arrangement(name) else {
+            panic!("aeon emulation is missing SIMD arrangement for `{name}`");
+        };
+        let Some(dst) = operands.first().and_then(vector_reg_from_expr) else {
+            panic!("aeon emulation expected a SIMD destination for `{name}`");
+        };
+        let original_dst = self.eval_expr(operands.first().expect("bif destination operand"));
+        let src = operands
+            .get(1)
+            .map(|expr| {
+                let value = self.eval_expr(expr);
+                vector_operand_bytes(expr, value, arrangement)
+            })
+            .flatten();
+        let mask = operands
+            .get(2)
+            .map(|expr| {
+                let value = self.eval_expr(expr);
+                vector_operand_bytes(expr, value, arrangement)
+            })
+            .flatten();
+        let dst_bytes = vector_operand_bytes(
+            operands.first().expect("bif destination operand"),
+            original_dst,
+            arrangement,
+        );
+        let value = match (dst_bytes, src, mask) {
+            (Some(dst_bytes), Some(src), Some(mask)) => {
+                Value::U128(vector_bif(dst_bytes, src, mask, arrangement))
+            }
+            _ => Value::Unknown,
+        };
+        write_arranged_vector_register(&mut self.registers, &dst, arrangement, value);
+    }
+
+    fn execute_crc32_intrinsic(&mut self, name: &str, operands: &[Expr]) {
+        let Some(dst) = operands.first().and_then(expr_reg_operand) else {
+            panic!("aeon emulation expected a register destination for `{name}`");
+        };
+        let acc = operands
+            .get(1)
+            .map(|expr| self.eval_expr(expr))
+            .and_then(|value| value.as_u64());
+        let src = operands
+            .get(2)
+            .map(|expr| self.eval_expr(expr))
+            .and_then(|value| value.as_u64());
+        let value = match (acc, src, crc32_intrinsic_info(name)) {
+            (Some(acc), Some(src), Some((poly, width))) => {
+                Value::U64(crc32_update(acc as u32, src, width, poly) as u64)
+            }
+            _ => Value::Unknown,
+        };
+        self.write_reg(dst, value);
+    }
+
+    fn read_reg(&self, reg: &Reg) -> Value {
+        read_register_value(&self.registers, reg)
     }
 
     fn write_reg(&mut self, reg: Reg, value: Value) {
-        match reg {
-            Reg::XZR => {}
-            Reg::W(index) => {
-                let w_value = truncate_to_w(value);
-                let x_value = zero_extend_w(w_value.clone());
-                self.registers.insert(Reg::W(index), w_value);
-                self.registers.insert(Reg::X(index), x_value);
-            }
-            Reg::X(index) => {
-                let w_value = truncate_to_w(value.clone());
-                self.registers.insert(Reg::W(index), w_value);
-                self.registers.insert(Reg::X(index), value);
-            }
-            Reg::Flags => {
-                self.flags = value.as_u64().map(Nzcv::from_bits);
-                self.registers.insert(Reg::Flags, value);
-            }
-            _ => {
-                self.registers.insert(reg, value);
-            }
-        }
+        write_register_value(&mut self.registers, &mut self.flags, reg, value);
     }
 }
 
@@ -1109,6 +1330,398 @@ impl Value {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VectorArrangement {
+    lane_bits: u8,
+    lanes: u8,
+    active_bytes: u8,
+}
+
+fn intrinsic_base_name(name: &str) -> &str {
+    name.split_once('.').map(|(base, _)| base).unwrap_or(name)
+}
+
+fn parse_vector_arrangement(name: &str) -> Option<VectorArrangement> {
+    let (_, suffix) = name.split_once('.')?;
+    let split = suffix.find(|ch: char| !ch.is_ascii_digit())?;
+    let lanes = suffix[..split].parse::<u8>().ok()?;
+    let lane_bits = match suffix[split..].chars().next()? {
+        'b' => 8,
+        'h' => 16,
+        's' => 32,
+        'd' => 64,
+        _ => return None,
+    };
+    let active_bytes = lanes.checked_mul(lane_bits / 8)?;
+    if active_bytes == 0 || active_bytes > 16 {
+        return None;
+    }
+    Some(VectorArrangement {
+        lane_bits,
+        lanes,
+        active_bytes,
+    })
+}
+
+fn vector_reg_from_expr(expr: &Expr) -> Option<Reg> {
+    match expr {
+        Expr::Reg(reg @ (Reg::V(_) | Reg::Q(_))) => Some(reg.clone()),
+        _ => None,
+    }
+}
+
+fn expr_reg_operand(expr: &Expr) -> Option<Reg> {
+    match expr {
+        Expr::Reg(reg) => Some(reg.clone()),
+        _ => None,
+    }
+}
+
+fn read_register_value(registers: &BTreeMap<Reg, Value>, reg: &Reg) -> Value {
+    match reg {
+        Reg::XZR => Value::U64(0),
+        Reg::W(index) => registers
+            .get(reg)
+            .cloned()
+            .or_else(|| registers.get(&Reg::X(*index)).cloned().map(truncate_to_w))
+            .unwrap_or(Value::Unknown),
+        Reg::X(index) => registers
+            .get(reg)
+            .cloned()
+            .or_else(|| registers.get(&Reg::W(*index)).cloned().map(zero_extend_w))
+            .unwrap_or(Value::Unknown),
+        Reg::V(_) | Reg::Q(_) | Reg::D(_) | Reg::S(_) | Reg::H(_) | Reg::VByte(_) => {
+            read_simd_register_value(registers, reg).unwrap_or(Value::Unknown)
+        }
+        _ => registers.get(reg).cloned().unwrap_or(Value::Unknown),
+    }
+}
+
+fn write_register_value(
+    registers: &mut BTreeMap<Reg, Value>,
+    flags: &mut Option<Nzcv>,
+    reg: Reg,
+    value: Value,
+) {
+    match reg {
+        Reg::XZR => {}
+        Reg::W(index) => {
+            let w_value = truncate_to_w(value);
+            let x_value = zero_extend_w(w_value.clone());
+            registers.insert(Reg::W(index), w_value);
+            registers.insert(Reg::X(index), x_value);
+        }
+        Reg::X(index) => {
+            let w_value = truncate_to_w(value.clone());
+            registers.insert(Reg::W(index), w_value);
+            registers.insert(Reg::X(index), value);
+        }
+        Reg::Flags => {
+            *flags = value.as_u64().map(Nzcv::from_bits);
+            registers.insert(Reg::Flags, value);
+        }
+        Reg::V(_) | Reg::Q(_) | Reg::D(_) | Reg::S(_) | Reg::H(_) | Reg::VByte(_) => {
+            write_simd_register_value(registers, reg, value);
+        }
+        _ => {
+            registers.insert(reg, value);
+        }
+    }
+}
+
+fn simd_index(reg: &Reg) -> Option<u8> {
+    match reg {
+        Reg::V(index)
+        | Reg::Q(index)
+        | Reg::D(index)
+        | Reg::S(index)
+        | Reg::H(index)
+        | Reg::VByte(index) => Some(*index),
+        _ => None,
+    }
+}
+
+fn scalar_simd_size(reg: &Reg) -> Option<usize> {
+    match reg {
+        Reg::D(_) => Some(8),
+        Reg::S(_) => Some(4),
+        Reg::H(_) => Some(2),
+        Reg::VByte(_) => Some(1),
+        _ => None,
+    }
+}
+
+fn read_simd_register_value(registers: &BTreeMap<Reg, Value>, reg: &Reg) -> Option<Value> {
+    let index = simd_index(reg)?;
+    match reg {
+        Reg::V(_) | Reg::Q(_) => {
+            let bytes = read_simd_vector_bytes(registers, index)?;
+            Some(Value::U128(u128::from_le_bytes(bytes)))
+        }
+        Reg::D(_) | Reg::S(_) | Reg::H(_) | Reg::VByte(_) => {
+            let size = scalar_simd_size(reg)?;
+            let bytes = read_simd_scalar_bytes(registers, index, size)?;
+            Some(scalar_value_from_bytes(&bytes))
+        }
+        _ => None,
+    }
+}
+
+fn read_simd_vector_bytes(registers: &BTreeMap<Reg, Value>, index: u8) -> Option<[u8; 16]> {
+    registers
+        .get(&Reg::V(index))
+        .or_else(|| registers.get(&Reg::Q(index)))
+        .and_then(vector_bytes_from_value)
+}
+
+fn read_simd_scalar_bytes(
+    registers: &BTreeMap<Reg, Value>,
+    index: u8,
+    size: usize,
+) -> Option<Vec<u8>> {
+    if let Some(bytes) = read_simd_vector_bytes(registers, index) {
+        return Some(bytes[..size].to_vec());
+    }
+
+    let direct_regs: &[Reg] = match size {
+        8 => &[Reg::D(index)],
+        4 => &[Reg::S(index), Reg::D(index)],
+        2 => &[Reg::H(index), Reg::S(index), Reg::D(index)],
+        1 => &[
+            Reg::VByte(index),
+            Reg::H(index),
+            Reg::S(index),
+            Reg::D(index),
+        ],
+        _ => return None,
+    };
+
+    for direct in direct_regs {
+        if let Some(bytes) = registers
+            .get(direct)
+            .and_then(|value| low_bytes_from_value(value, size))
+        {
+            return Some(bytes);
+        }
+    }
+
+    None
+}
+
+fn write_simd_register_value(registers: &mut BTreeMap<Reg, Value>, reg: Reg, value: Value) {
+    let Some(index) = simd_index(&reg) else {
+        return;
+    };
+
+    match reg {
+        Reg::V(_) | Reg::Q(_) => {
+            clear_all_simd_aliases(registers, index);
+            registers.insert(Reg::V(index), canonical_vector_value(value));
+        }
+        Reg::D(_) | Reg::S(_) | Reg::H(_) | Reg::VByte(_) => {
+            let size = scalar_simd_size(&reg).expect("scalar SIMD size");
+            if let Some(mut bytes) = read_simd_vector_bytes(registers, index) {
+                if let Some(low) = low_bytes_from_value(&value, size) {
+                    bytes[..size].copy_from_slice(&low);
+                    clear_all_simd_aliases(registers, index);
+                    registers.insert(Reg::V(index), Value::U128(u128::from_le_bytes(bytes)));
+                } else {
+                    clear_all_simd_aliases(registers, index);
+                    registers.insert(Reg::V(index), Value::Unknown);
+                }
+                return;
+            }
+
+            clear_scalar_simd_aliases(registers, index);
+            registers.insert(reg, scalar_or_unknown_value(value, size));
+        }
+        _ => {}
+    }
+}
+
+fn clear_all_simd_aliases(registers: &mut BTreeMap<Reg, Value>, index: u8) {
+    registers.remove(&Reg::V(index));
+    registers.remove(&Reg::Q(index));
+    clear_scalar_simd_aliases(registers, index);
+}
+
+fn clear_scalar_simd_aliases(registers: &mut BTreeMap<Reg, Value>, index: u8) {
+    registers.remove(&Reg::D(index));
+    registers.remove(&Reg::S(index));
+    registers.remove(&Reg::H(index));
+    registers.remove(&Reg::VByte(index));
+}
+
+fn canonical_vector_value(value: Value) -> Value {
+    match value {
+        Value::U128(_) | Value::Unknown => value,
+        other => vector_bytes_from_value(&other)
+            .map(|bytes| Value::U128(u128::from_le_bytes(bytes)))
+            .unwrap_or(Value::Unknown),
+    }
+}
+
+fn scalar_or_unknown_value(value: Value, size: usize) -> Value {
+    low_bytes_from_value(&value, size)
+        .map(|bytes| scalar_value_from_bytes(&bytes))
+        .unwrap_or(Value::Unknown)
+}
+
+fn vector_bytes_from_value(value: &Value) -> Option<[u8; 16]> {
+    match value {
+        Value::U128(bits) => Some(bits.to_le_bytes()),
+        Value::U64(bits) => {
+            let mut bytes = [0u8; 16];
+            bytes[..8].copy_from_slice(&bits.to_le_bytes());
+            Some(bytes)
+        }
+        Value::F64(value) => {
+            let mut bytes = [0u8; 16];
+            bytes[..8].copy_from_slice(&value.to_bits().to_le_bytes());
+            Some(bytes)
+        }
+        Value::Unknown => None,
+    }
+}
+
+fn low_bytes_from_value(value: &Value, size: usize) -> Option<Vec<u8>> {
+    if size == 0 || size > 8 {
+        return None;
+    }
+    match value {
+        Value::U64(bits) => Some(bits.to_le_bytes()[..size].to_vec()),
+        Value::U128(bits) => Some(bits.to_le_bytes()[..size].to_vec()),
+        Value::F64(value) => Some(value.to_bits().to_le_bytes()[..size].to_vec()),
+        Value::Unknown => None,
+    }
+}
+
+fn scalar_value_from_bytes(bytes: &[u8]) -> Value {
+    let mut buf = [0u8; 8];
+    buf[..bytes.len()].copy_from_slice(bytes);
+    Value::U64(u64::from_le_bytes(buf))
+}
+
+fn arranged_immediate_vector(imm: u64, arrangement: VectorArrangement, invert: bool) -> u128 {
+    let lane_bytes = usize::from(arrangement.lane_bits / 8);
+    let active_bytes = usize::from(arrangement.active_bytes);
+    let lane_mask = match arrangement.lane_bits {
+        0 => 0,
+        1..=63 => (1u64 << arrangement.lane_bits) - 1,
+        _ => u64::MAX,
+    };
+    let lane_value = if invert {
+        (!imm) & lane_mask
+    } else {
+        imm & lane_mask
+    };
+    let lane_bits = lane_value.to_le_bytes();
+    let mut bytes = [0u8; 16];
+    for lane in 0..usize::from(arrangement.lanes) {
+        let start = lane * lane_bytes;
+        bytes[start..start + lane_bytes].copy_from_slice(&lane_bits[..lane_bytes]);
+    }
+    if active_bytes < 16 {
+        bytes[active_bytes..].fill(0);
+    }
+    u128::from_le_bytes(bytes)
+}
+
+fn vector_operand_bytes(
+    expr: &Expr,
+    value: Value,
+    arrangement: VectorArrangement,
+) -> Option<[u8; 16]> {
+    match value {
+        Value::U128(bits) => Some(bits.to_le_bytes()),
+        Value::U64(bits) => {
+            let mut bytes = [0u8; 16];
+            if matches!(expr, Expr::Imm(_)) {
+                let lane_bytes = usize::from(arrangement.lane_bits / 8);
+                let bits = bits.to_le_bytes();
+                for lane in 0..usize::from(arrangement.lanes) {
+                    let start = lane * lane_bytes;
+                    bytes[start..start + lane_bytes].copy_from_slice(&bits[..lane_bytes]);
+                }
+            } else {
+                let low = arrangement.active_bytes.min(8) as usize;
+                bytes[..low].copy_from_slice(&bits.to_le_bytes()[..low]);
+            }
+            Some(bytes)
+        }
+        Value::F64(value) => {
+            let mut bytes = [0u8; 16];
+            let low = arrangement.active_bytes.min(8) as usize;
+            bytes[..low].copy_from_slice(&value.to_bits().to_le_bytes()[..low]);
+            Some(bytes)
+        }
+        Value::Unknown => None,
+    }
+}
+
+fn vector_cmeq(lhs: [u8; 16], rhs: [u8; 16], arrangement: VectorArrangement) -> u128 {
+    let lane_bytes = usize::from(arrangement.lane_bits / 8);
+    let mut result = [0u8; 16];
+    for lane in 0..usize::from(arrangement.lanes) {
+        let start = lane * lane_bytes;
+        let end = start + lane_bytes;
+        let fill = if lhs[start..end] == rhs[start..end] {
+            0xff
+        } else {
+            0x00
+        };
+        result[start..end].fill(fill);
+    }
+    u128::from_le_bytes(result)
+}
+
+fn vector_bif(
+    dst: [u8; 16],
+    src: [u8; 16],
+    mask: [u8; 16],
+    arrangement: VectorArrangement,
+) -> u128 {
+    let mut result = [0u8; 16];
+    let active_bytes = usize::from(arrangement.active_bytes);
+    for index in 0..active_bytes {
+        result[index] = (dst[index] & mask[index]) | (src[index] & !mask[index]);
+    }
+    u128::from_le_bytes(result)
+}
+
+fn write_arranged_vector_register(
+    registers: &mut BTreeMap<Reg, Value>,
+    dst: &Reg,
+    arrangement: VectorArrangement,
+    value: Value,
+) {
+    let Some(index) = simd_index(dst) else {
+        return;
+    };
+
+    if arrangement.active_bytes == 16 {
+        clear_all_simd_aliases(registers, index);
+        registers.insert(Reg::V(index), canonical_vector_value(value));
+        return;
+    }
+
+    let Some(mut existing) = read_simd_vector_bytes(registers, index) else {
+        clear_scalar_simd_aliases(registers, index);
+        registers.remove(&Reg::Q(index));
+        registers.insert(Reg::V(index), Value::Unknown);
+        return;
+    };
+    let Some(updated) = vector_bytes_from_value(&value) else {
+        clear_all_simd_aliases(registers, index);
+        registers.insert(Reg::V(index), Value::Unknown);
+        return;
+    };
+    let active_bytes = usize::from(arrangement.active_bytes);
+    existing[..active_bytes].copy_from_slice(&updated[..active_bytes]);
+    clear_all_simd_aliases(registers, index);
+    registers.insert(Reg::V(index), Value::U128(u128::from_le_bytes(existing)));
+}
+
 fn decode_loaded_value(bytes: &[u8]) -> Value {
     match bytes.len() {
         0 => Value::Unknown,
@@ -1123,6 +1736,38 @@ fn decode_loaded_value(bytes: &[u8]) -> Value {
             Value::U128(u128::from_le_bytes(buf))
         }
         _ => Value::Unknown,
+    }
+}
+
+fn overlay_bytes_for_cell(
+    memory: &BTreeMap<MemoryCellId, Value>,
+    cell_id: &MemoryCellId,
+) -> Option<Vec<u8>> {
+    if cell_id.size <= 1 {
+        return None;
+    }
+
+    let mut bytes = Vec::with_capacity(cell_id.size as usize);
+    for index in 0..cell_id.size {
+        let byte_cell = MemoryCellId {
+            location: byte_location(&cell_id.location, index)?,
+            size: 1,
+        };
+        let value = memory.get(&byte_cell)?.as_u64()?;
+        bytes.push(value as u8);
+    }
+    Some(bytes)
+}
+
+fn byte_location(location: &MemoryLocation, index: u8) -> Option<MemoryLocation> {
+    match location {
+        MemoryLocation::Absolute(addr) => {
+            Some(MemoryLocation::Absolute(addr.wrapping_add(index as u64)))
+        }
+        MemoryLocation::StackSlot(offset) => {
+            Some(MemoryLocation::StackSlot(offset.wrapping_add(index as i64)))
+        }
+        MemoryLocation::Unknown => None,
     }
 }
 
@@ -1194,8 +1839,128 @@ fn sign_extend(value: u64, from_bits: u8) -> u64 {
     ((value << shift) as i64 >> shift) as u64
 }
 
+fn leading_zeros_for_width(value: u64, width: u8) -> u64 {
+    let bits = normalize_to_width(value, width);
+    match width {
+        0 => 0,
+        1..=63 => (bits.leading_zeros() - (64 - u32::from(width))) as u64,
+        _ => bits.leading_zeros() as u64,
+    }
+}
+
+fn leading_sign_bits_for_width(value: u64, width: u8) -> u64 {
+    if width == 0 {
+        return 0;
+    }
+    let bits = normalize_to_width(value, width);
+    let sign = ((bits >> (width.saturating_sub(1))) & 1) != 0;
+    let adjusted = if sign { !bits } else { bits };
+    leading_zeros_for_width(adjusted, width).saturating_sub(1)
+}
+
+fn reverse_bytes_for_width(value: u64, width: u8) -> u64 {
+    let byte_width = match width {
+        0..=8 => 1,
+        9..=16 => 2,
+        17..=32 => 4,
+        _ => 8,
+    };
+    let mut bytes = value.to_le_bytes();
+    bytes[..byte_width].reverse();
+    let mut normalized = [0u8; 8];
+    normalized[..byte_width].copy_from_slice(&bytes[..byte_width]);
+    normalize_to_width(u64::from_le_bytes(normalized), width)
+}
+
+fn reverse_bits_for_width(value: u64, width: u8) -> u64 {
+    if width == 0 {
+        return 0;
+    }
+    let bits = normalize_to_width(value, width);
+    bits.reverse_bits() >> (64 - u32::from(width))
+}
+
+fn normalize_to_width(value: u64, width: u8) -> u64 {
+    match width {
+        0 => 0,
+        1..=63 => value & ((1u64 << width) - 1),
+        _ => value,
+    }
+}
+
+fn crc32_intrinsic_info(name: &str) -> Option<(u32, usize)> {
+    match intrinsic_base_name(name) {
+        "crc32b" => Some((0xedb8_8320, 1)),
+        "crc32h" => Some((0xedb8_8320, 2)),
+        "crc32w" => Some((0xedb8_8320, 4)),
+        "crc32x" => Some((0xedb8_8320, 8)),
+        "crc32cb" => Some((0x82f6_3b78, 1)),
+        "crc32ch" => Some((0x82f6_3b78, 2)),
+        "crc32cw" => Some((0x82f6_3b78, 4)),
+        "crc32cx" => Some((0x82f6_3b78, 8)),
+        _ => None,
+    }
+}
+
+fn crc32_update(mut crc: u32, value: u64, width: usize, poly: u32) -> u32 {
+    let bytes = value.to_le_bytes();
+    for byte in bytes.iter().take(width) {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ poly
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    crc
+}
+
+fn panic_on_noop_stmt(stmt: &Stmt) -> ! {
+    panic!(
+        "aeon emulation encountered IL no-op and refuses to continue: {:?}",
+        stmt
+    );
+}
+
+fn panic_on_unsupported_stmt(stmt: &Stmt) -> ! {
+    panic!(
+        "aeon emulation encountered unsupported IL statement and refuses to continue: {:?}",
+        stmt
+    );
+}
+
+fn panic_on_unsupported_expr(expr: &Expr) -> ! {
+    panic!(
+        "aeon emulation encountered unsupported IL expression and refuses to continue: {:?}",
+        expr
+    );
+}
+
+fn is_supported_barrier(kind: &str) -> bool {
+    matches!(kind, "dmb" | "dsb" | "isb")
+}
+
+fn is_supported_stmt_intrinsic(name: &str) -> bool {
+    matches!(
+        name,
+        "nop"
+            | "yield"
+            | "hint"
+            | "paciasp"
+            | "autiasp"
+            | "bti"
+            | "xpaclri"
+            | "prfm"
+            | "prfum"
+            | "clrex"
+    )
+}
+
 fn offset_location(location: MemoryLocation, delta: i64, subtract: bool) -> MemoryLocation {
     match location {
+        MemoryLocation::Unknown => MemoryLocation::Unknown,
         MemoryLocation::Absolute(addr) => {
             let offset = if subtract {
                 addr.wrapping_sub(delta as u64)
@@ -1566,6 +2331,7 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             &backing,
+            MissingMemoryPolicy::Stop,
             8,
         );
 
@@ -1597,6 +2363,7 @@ mod tests {
             BTreeMap::from([(Reg::X(0), Value::U64(full_addr))]),
             BTreeMap::new(),
             &backing,
+            MissingMemoryPolicy::Stop,
             8,
         );
 
@@ -1624,6 +2391,7 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             &backing,
+            MissingMemoryPolicy::Stop,
             8,
         );
 
@@ -1648,6 +2416,7 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             &backing,
+            MissingMemoryPolicy::Stop,
             8,
         );
 
@@ -1660,5 +2429,319 @@ mod tests {
         );
         assert!(result.next_pc.is_none());
         assert_eq!(result.final_registers.get(&Reg::X(0)), None);
+    }
+
+    #[test]
+    fn execute_block_continues_with_unknown_when_missing_memory_is_symbolic() {
+        let backing = TestBackingStore {
+            cells: BTreeMap::new(),
+        };
+
+        let result = execute_block(
+            &[
+                Stmt::Assign {
+                    dst: Reg::X(0),
+                    src: e_load(Expr::Imm(0x5000), 8),
+                },
+                Stmt::Assign {
+                    dst: Reg::X(1),
+                    src: e_add(Expr::Reg(Reg::X(0)), Expr::Imm(4)),
+                },
+                Stmt::Branch {
+                    target: Expr::Imm(0x6000),
+                },
+            ],
+            BTreeMap::new(),
+            BTreeMap::new(),
+            &backing,
+            MissingMemoryPolicy::ContinueAsUnknown,
+            8,
+        );
+
+        assert_eq!(result.stop, BlockStop::Completed);
+        assert_eq!(result.next_pc, Some(0x6000));
+        assert_eq!(
+            result.final_registers.get(&Reg::X(0)),
+            Some(&Value::Unknown)
+        );
+        assert_eq!(
+            result.final_registers.get(&Reg::X(1)),
+            Some(&Value::Unknown)
+        );
+        assert_eq!(result.reads.len(), 1);
+        assert_eq!(result.reads[0].source, None);
+    }
+
+    #[test]
+    fn execute_block_continues_with_unknown_when_address_cannot_be_resolved() {
+        let backing = TestBackingStore {
+            cells: BTreeMap::new(),
+        };
+
+        let result = execute_block(
+            &[
+                Stmt::Assign {
+                    dst: Reg::X(1),
+                    src: e_load(Expr::Reg(Reg::X(0)), 8),
+                },
+                Stmt::Branch {
+                    target: Expr::Imm(0x6000),
+                },
+            ],
+            BTreeMap::from([(Reg::X(0), Value::Unknown)]),
+            BTreeMap::new(),
+            &backing,
+            MissingMemoryPolicy::ContinueAsUnknown,
+            8,
+        );
+
+        assert_eq!(result.stop, BlockStop::Completed);
+        assert_eq!(result.next_pc, Some(0x6000));
+        assert_eq!(
+            result.final_registers.get(&Reg::X(1)),
+            Some(&Value::Unknown)
+        );
+        assert_eq!(result.reads.len(), 1);
+        assert_eq!(result.reads[0].id.location, MemoryLocation::Unknown);
+        assert_eq!(result.reads[0].source, None);
+    }
+
+    #[test]
+    fn execute_block_propagates_simd_aliases_and_arranged_intrinsics() {
+        let backing = TestBackingStore {
+            cells: BTreeMap::new(),
+        };
+
+        let result = execute_block(
+            &[
+                Stmt::Intrinsic {
+                    name: "movi.2d".to_string(),
+                    operands: vec![Expr::Reg(Reg::V(0)), Expr::Imm(u64::MAX)],
+                },
+                Stmt::Intrinsic {
+                    name: "movi.2d".to_string(),
+                    operands: vec![Expr::Reg(Reg::V(1)), Expr::Imm(u64::MAX)],
+                },
+                Stmt::Intrinsic {
+                    name: "movi.2d".to_string(),
+                    operands: vec![Expr::Reg(Reg::V(2)), Expr::Imm(u64::MAX)],
+                },
+                Stmt::Assign {
+                    dst: Reg::D(0),
+                    src: Expr::Imm(0x4433_2211_ffff_ffff),
+                },
+                Stmt::Intrinsic {
+                    name: "cmeq.2s".to_string(),
+                    operands: vec![
+                        Expr::Reg(Reg::V(1)),
+                        Expr::Reg(Reg::V(0)),
+                        Expr::Reg(Reg::V(1)),
+                    ],
+                },
+                Stmt::Intrinsic {
+                    name: "bif.8b".to_string(),
+                    operands: vec![
+                        Expr::Reg(Reg::V(2)),
+                        Expr::Reg(Reg::V(0)),
+                        Expr::Reg(Reg::V(1)),
+                    ],
+                },
+            ],
+            BTreeMap::new(),
+            BTreeMap::new(),
+            &backing,
+            MissingMemoryPolicy::Stop,
+            16,
+        );
+
+        let mut expected_v0 = [0xffu8; 16];
+        expected_v0[..8].copy_from_slice(&0x4433_2211_ffff_ffffu64.to_le_bytes());
+        assert_eq!(
+            result.final_registers.get(&Reg::V(0)),
+            Some(&Value::U128(u128::from_le_bytes(expected_v0)))
+        );
+
+        let mut expected_v1 = [0xffu8; 16];
+        expected_v1[4..8].fill(0x00);
+        assert_eq!(
+            result.final_registers.get(&Reg::V(1)),
+            Some(&Value::U128(u128::from_le_bytes(expected_v1)))
+        );
+
+        let mut expected_v2 = [0xffu8; 16];
+        expected_v2[..8].copy_from_slice(&0x4433_2211_ffff_ffffu64.to_le_bytes());
+        assert_eq!(
+            result.final_registers.get(&Reg::V(2)),
+            Some(&Value::U128(u128::from_le_bytes(expected_v2)))
+        );
+        assert_eq!(
+            read_register_value(&result.final_registers, &Reg::D(0)),
+            Value::U64(0x4433_2211_ffff_ffff)
+        );
+    }
+
+    #[test]
+    fn execute_block_evaluates_bit_manipulation_exprs() {
+        let backing = TestBackingStore {
+            cells: BTreeMap::new(),
+        };
+
+        let result = execute_block(
+            &[
+                Stmt::Assign {
+                    dst: Reg::X(0),
+                    src: Expr::Clz(Box::new(Expr::Reg(Reg::X(8)))),
+                },
+                Stmt::Assign {
+                    dst: Reg::W(1),
+                    src: Expr::Rev(Box::new(Expr::Reg(Reg::W(9)))),
+                },
+                Stmt::Assign {
+                    dst: Reg::X(2),
+                    src: Expr::Rbit(Box::new(Expr::Reg(Reg::X(10)))),
+                },
+            ],
+            BTreeMap::from([
+                (Reg::X(8), Value::U64(0x0000_0000_0000_1000)),
+                (Reg::W(9), Value::U64(0x1122_3344)),
+                (Reg::X(10), Value::U64(1)),
+            ]),
+            BTreeMap::new(),
+            &backing,
+            MissingMemoryPolicy::Stop,
+            16,
+        );
+
+        assert_eq!(
+            result.final_registers.get(&Reg::X(0)),
+            Some(&Value::U64(51))
+        );
+        assert_eq!(
+            result.final_registers.get(&Reg::W(1)),
+            Some(&Value::U64(0x4433_2211))
+        );
+        assert_eq!(
+            result.final_registers.get(&Reg::X(2)),
+            Some(&Value::U64(1u64 << 63))
+        );
+    }
+
+    #[test]
+    fn execute_block_evaluates_crc32_intrinsics() {
+        let backing = TestBackingStore {
+            cells: BTreeMap::new(),
+        };
+
+        let result = execute_block(
+            &[
+                Stmt::Intrinsic {
+                    name: "crc32cx".to_string(),
+                    operands: vec![
+                        Expr::Reg(Reg::W(0)),
+                        Expr::Reg(Reg::W(1)),
+                        Expr::Reg(Reg::X(2)),
+                    ],
+                },
+                Stmt::Intrinsic {
+                    name: "crc32w".to_string(),
+                    operands: vec![
+                        Expr::Reg(Reg::W(3)),
+                        Expr::Reg(Reg::W(4)),
+                        Expr::Reg(Reg::W(5)),
+                    ],
+                },
+            ],
+            BTreeMap::from([
+                (Reg::W(1), Value::U64(0)),
+                (Reg::X(2), Value::U64(0x1122_3344_5566_7788)),
+                (Reg::W(4), Value::U64(0)),
+                (Reg::W(5), Value::U64(0x1234_5678)),
+            ]),
+            BTreeMap::new(),
+            &backing,
+            MissingMemoryPolicy::Stop,
+            8,
+        );
+
+        assert_eq!(
+            result.final_registers.get(&Reg::W(0)),
+            Some(&Value::U64(0x2371_e39c))
+        );
+        assert_eq!(
+            result.final_registers.get(&Reg::W(3)),
+            Some(&Value::U64(0x8e29_58ce))
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "IL no-op")]
+    fn execute_snippet_panics_on_nop() {
+        let _ = execute_snippet(&[Stmt::Nop], BTreeMap::new(), 8);
+    }
+
+    #[test]
+    fn execute_snippet_allows_supported_barrier() {
+        let result = execute_snippet(
+            &[
+                Stmt::Barrier("dmb".to_string()),
+                Stmt::Assign {
+                    dst: Reg::X(0),
+                    src: Expr::Imm(0x1234),
+                },
+            ],
+            BTreeMap::new(),
+            8,
+        );
+
+        assert_eq!(
+            result.final_registers.get(&Reg::X(0)),
+            Some(&Value::U64(0x1234))
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "unsupported IL statement")]
+    fn execute_snippet_panics_on_unknown_barrier() {
+        let _ = execute_snippet(&[Stmt::Barrier("unknown".to_string())], BTreeMap::new(), 8);
+    }
+
+    #[test]
+    #[should_panic(expected = "unsupported IL statement")]
+    fn execute_block_panics_on_stmt_intrinsic() {
+        let backing = TestBackingStore {
+            cells: BTreeMap::new(),
+        };
+
+        let _ = execute_block(
+            &[Stmt::Intrinsic {
+                name: "msr".to_string(),
+                operands: vec![],
+            }],
+            BTreeMap::new(),
+            BTreeMap::new(),
+            &backing,
+            MissingMemoryPolicy::Stop,
+            8,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "unsupported IL expression")]
+    fn execute_block_panics_on_unsupported_expr() {
+        let backing = TestBackingStore {
+            cells: BTreeMap::new(),
+        };
+
+        let _ = execute_block(
+            &[Stmt::Assign {
+                dst: Reg::X(0),
+                src: Expr::FAdd(Box::new(Expr::FImm(1.0)), Box::new(Expr::FImm(2.0))),
+            }],
+            BTreeMap::new(),
+            BTreeMap::new(),
+            &backing,
+            MissingMemoryPolicy::Stop,
+            8,
+        );
     }
 }

@@ -23,6 +23,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::context::{LiveContext, SnapshotMemory};
 
+#[cfg(target_os = "android")]
+const MAP_FIXED_NOREPLACE_FLAG: libc::c_int = 0x100000;
+#[cfg(not(target_os = "android"))]
+const MAP_FIXED_NOREPLACE_FLAG: libc::c_int = libc::MAP_FIXED_NOREPLACE;
+
 /// Metadata for a captured memory region.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegionRef {
@@ -252,7 +257,7 @@ impl MappedCapture {
                     start as *mut std::ffi::c_void,
                     len,
                     libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED_NOREPLACE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_FIXED_NOREPLACE_FLAG,
                     -1,
                     0,
                 )
@@ -301,7 +306,7 @@ impl MappedCapture {
                     page_addr as *mut std::ffi::c_void,
                     page_size as usize,
                     libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED_NOREPLACE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_FIXED_NOREPLACE_FLAG,
                     -1,
                     0,
                 )

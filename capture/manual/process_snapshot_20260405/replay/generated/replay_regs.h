@@ -1,0 +1,43 @@
+static const struct ReplayRegs kReplayRegs = {
+    .x = {
+        0x000000762083ca88ULL,
+        0x00000000134020a8ULL,
+        0x0000000000000000ULL,
+        0xb400007831a17620ULL,
+        0x00000075acdad640ULL,
+        0x00000076371f0ccdULL,
+        0x0000000000000000ULL,
+        0x0000000000000000ULL,
+        0x0000000000000000ULL,
+        0x000000009b616de0ULL,
+        0x00000076371f0ccfULL,
+        0x00000076bfa1880cULL,
+        0x00000076bfa18854ULL,
+        0x00000076bfa1889cULL,
+        0x00000076bfa188fcULL,
+        0x0000000000000000ULL,
+        0x00000076c0011d40ULL,
+        0x0000000000000000ULL,
+        0x0000000000000020ULL,
+        0xb400007831a17620ULL,
+        0x0000000000000000ULL,
+        0xb400007831a17620ULL,
+        0x00000075acdae000ULL,
+        0xb400007831a176d0ULL,
+        0x00000076371f0ccdULL,
+        0x00000075acdae000ULL,
+        0x0000000000000000ULL,
+        0x0000000000000043ULL,
+        0x00000075acdae000ULL,
+        0x00000075acdad550ULL,
+        0x00000076bfa18968ULL,
+    },
+    .sp = 0x00000075acdad540ULL,
+    .pc = 0x000000009b616de0ULL,
+};
+
+static const struct LiveSeed kSeedLivePages[] = {
+    { .page_base = 0x0000000013402000ULL },
+    { .page_base = 0x0000000013264000ULL },
+};
+static const size_t kSeedLivePageCount = sizeof(kSeedLivePages) / sizeof(kSeedLivePages[0]);
