@@ -1,5 +1,5 @@
-use std::collections::BTreeMap;
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::os::unix::fs::FileExt;
@@ -120,8 +120,18 @@ fn main() {
         process::exit(1);
     }
 
+    let page_cache_dir = if cli.adb_serial.is_some() {
+        Some(
+            cli.page_cache_dir
+                .clone()
+                .unwrap_or_else(default_remote_page_cache_dir),
+        )
+    } else {
+        None
+    };
+
     let proc_memory = match cli.adb_serial.as_deref() {
-        Some(serial) => ProcMemory::open_adb(serial, pid),
+        Some(serial) => ProcMemory::open_adb(serial, pid, page_cache_dir.clone()),
         None => ProcMemory::open(pid),
     };
     let proc_memory = match proc_memory {
@@ -148,9 +158,13 @@ fn main() {
         .pc_override
         .or_else(|| state_json.as_ref().and_then(|state| state.pc))
         .or_else(|| {
-            live_regs
-                .as_ref()
-                .map(|regs| if regs.pc == 0 { DEFAULT_START_PC } else { regs.pc })
+            live_regs.as_ref().map(|regs| {
+                if regs.pc == 0 {
+                    DEFAULT_START_PC
+                } else {
+                    regs.pc
+                }
+            })
         })
         .unwrap_or(DEFAULT_START_PC);
     let trace_range = cli
@@ -182,6 +196,7 @@ fn main() {
         report_out: cli
             .report_out
             .unwrap_or_else(|| std::env::temp_dir().join("aeon_live_cert_eval.json")),
+        page_cache_dir,
         sprintf_trace_out: cli.sprintf_trace_out,
         start_pc,
         entry_lr: read_u64_reg(&registers, Reg::X(30))
@@ -263,13 +278,16 @@ fn main() {
     if let Some(path) = &report.sprintf_trace_path {
         println!("sprintf trace: {}", path.display());
     }
+    if let Some(path) = &report.page_cache_dir {
+        println!("page cache:    {}", path.display());
+    }
     println!("report:        {}", report.report_path.display());
 }
 
 fn usage() {
     eprintln!("usage:");
     eprintln!(
-        "  cargo run -p aeon-instrument --bin live_cert_eval -- [--state-json path] [--adb-serial SERIAL] [--pid <pid>] [--challenge <hex>] [--tid <tid>] [--pc <addr>] [--reg <name> <value>] [--max-blocks N] [--max-block-visits N] [--trace-range start end] [--missing-memory stop|symbolic] [--summary-only] [--stop-on-token] [--verbose-trace] [--report-out path] [--sprintf-trace-out path]"
+        "  cargo run -p aeon-instrument --bin live_cert_eval -- [--state-json path] [--adb-serial SERIAL] [--page-cache-dir path] [--pid <pid>] [--challenge <hex>] [--tid <tid>] [--pc <addr>] [--reg <name> <value>] [--max-blocks N] [--max-block-visits N] [--trace-range start end] [--missing-memory stop|symbolic] [--summary-only] [--stop-on-token] [--verbose-trace] [--report-out path] [--sprintf-trace-out path]"
     );
 }
 
@@ -277,6 +295,7 @@ fn usage() {
 struct Cli {
     state_json: Option<PathBuf>,
     adb_serial: Option<String>,
+    page_cache_dir: Option<PathBuf>,
     pid: Option<i32>,
     tid: Option<i32>,
     challenge: Option<String>,
@@ -302,6 +321,7 @@ impl Cli {
 
         let mut state_json = None;
         let mut adb_serial = None;
+        let mut page_cache_dir = None;
         let mut pid = None;
         let mut tid = None;
         let mut challenge = None;
@@ -333,6 +353,13 @@ impl Cli {
                             .ok_or_else(|| "--adb-serial requires a device serial".to_string())?
                             .clone(),
                     );
+                    idx += 2;
+                }
+                "--page-cache-dir" => {
+                    page_cache_dir =
+                        Some(PathBuf::from(args.get(idx + 1).ok_or_else(|| {
+                            "--page-cache-dir requires a path".to_string()
+                        })?));
                     idx += 2;
                 }
                 "--pid" => {
@@ -440,10 +467,10 @@ impl Cli {
                     idx += 2;
                 }
                 "--sprintf-trace-out" => {
-                    sprintf_trace_out = Some(PathBuf::from(
-                        args.get(idx + 1)
-                            .ok_or_else(|| "--sprintf-trace-out requires a path".to_string())?,
-                    ));
+                    sprintf_trace_out =
+                        Some(PathBuf::from(args.get(idx + 1).ok_or_else(|| {
+                            "--sprintf-trace-out requires a path".to_string()
+                        })?));
                     idx += 2;
                 }
                 other => return Err(format!("unknown option '{other}'")),
@@ -453,6 +480,7 @@ impl Cli {
         Ok(Self {
             state_json,
             adb_serial,
+            page_cache_dir,
             pid,
             tid,
             challenge,
@@ -508,6 +536,7 @@ struct RemoteProcMemory {
     serial: String,
     pid: i32,
     page_cache: RefCell<BTreeMap<u64, Vec<u8>>>,
+    disk_cache_dir: Option<PathBuf>,
 }
 
 impl ProcMemory {
@@ -522,7 +551,11 @@ impl ProcMemory {
         })
     }
 
-    fn open_adb(serial: impl Into<String>, pid: i32) -> Result<Self, String> {
+    fn open_adb(
+        serial: impl Into<String>,
+        pid: i32,
+        page_cache_dir: Option<PathBuf>,
+    ) -> Result<Self, String> {
         let serial = serial.into();
         let maps = adb_shell_text(&serial, &format!("cat /proc/{pid}/maps"))?;
         let regions = parse_proc_maps_text(&maps, &format!("adb:{serial}:/proc/{pid}/maps"))?;
@@ -531,6 +564,7 @@ impl ProcMemory {
                 serial,
                 pid,
                 page_cache: RefCell::new(BTreeMap::new()),
+                disk_cache_dir: page_cache_dir,
             }),
             regions,
         })
@@ -585,7 +619,7 @@ impl ProcMemory {
                 }
             }
             ProcMemorySource::Remote(remote) => {
-                self.read_remote_cached(remote, resolved_addr, size, region.end)
+                self.read_remote_cached(remote, resolved_addr, size, region)
             }
         }
     }
@@ -595,11 +629,12 @@ impl ProcMemory {
         remote: &RemoteProcMemory,
         addr: u64,
         size: usize,
-        region_end: u64,
+        region: &ProcRegion,
     ) -> Option<Vec<u8>> {
         if remote_debug_enabled() {
             eprintln!(
-                "[remote] read addr=0x{addr:x} size={size} region_end=0x{region_end:x}"
+                "[remote] read addr=0x{addr:x} size={size} region_end=0x{:x}",
+                region.end
             );
         }
         let mut out = Vec::with_capacity(size);
@@ -607,7 +642,7 @@ impl ProcMemory {
         while out.len() < size {
             let page_addr = current & !(REMOTE_PAGE_SIZE - 1);
             let page_offset = (current - page_addr) as usize;
-            let page_len = (region_end.saturating_sub(page_addr)).min(REMOTE_PAGE_SIZE) as usize;
+            let page_len = (region.end.saturating_sub(page_addr)).min(REMOTE_PAGE_SIZE) as usize;
             if page_len == 0 || page_offset >= page_len {
                 if remote_debug_enabled() {
                     eprintln!(
@@ -616,7 +651,7 @@ impl ProcMemory {
                 }
                 return None;
             }
-            let page = self.fetch_remote_page(remote, page_addr, page_len)?;
+            let page = self.fetch_remote_page(remote, region, page_addr, page_len)?;
             let remaining = size - out.len();
             let take = remaining.min(page_len - page_offset);
             out.extend_from_slice(&page[page_offset..page_offset + take]);
@@ -628,6 +663,7 @@ impl ProcMemory {
     fn fetch_remote_page(
         &self,
         remote: &RemoteProcMemory,
+        region: &ProcRegion,
         page_addr: u64,
         page_len: usize,
     ) -> Option<Vec<u8>> {
@@ -638,6 +674,19 @@ impl ProcMemory {
                     cached.len()
                 );
             }
+            return Some(cached);
+        }
+        if let Some(cached) = read_disk_cached_page(remote, region, page_addr, page_len) {
+            if remote_debug_enabled() {
+                eprintln!(
+                    "[remote] disk cache hit page=0x{page_addr:x} len={}",
+                    cached.len()
+                );
+            }
+            remote
+                .page_cache
+                .borrow_mut()
+                .insert(page_addr, cached.clone());
             return Some(cached);
         }
         if remote_debug_enabled() {
@@ -673,6 +722,7 @@ impl ProcMemory {
             .page_cache
             .borrow_mut()
             .insert(page_addr, fetched.clone());
+        write_disk_cached_page(remote, region, page_addr, page_len, &fetched);
         Some(fetched)
     }
 
@@ -688,6 +738,133 @@ impl ProcMemory {
             region.path, region.perms, region.offset
         ))
     }
+}
+
+fn read_disk_cached_page(
+    remote: &RemoteProcMemory,
+    region: &ProcRegion,
+    page_addr: u64,
+    page_len: usize,
+) -> Option<Vec<u8>> {
+    let path = remote_page_cache_path(
+        remote.disk_cache_dir.as_deref()?,
+        remote,
+        region,
+        page_addr,
+        page_len,
+    )?;
+    let bytes = fs::read(&path).ok()?;
+    if bytes.len() != page_len {
+        return None;
+    }
+    Some(bytes)
+}
+
+fn write_disk_cached_page(
+    remote: &RemoteProcMemory,
+    region: &ProcRegion,
+    page_addr: u64,
+    page_len: usize,
+    bytes: &[u8],
+) {
+    let Some(cache_root) = remote.disk_cache_dir.as_deref() else {
+        return;
+    };
+    let Some(path) = remote_page_cache_path(cache_root, remote, region, page_addr, page_len) else {
+        return;
+    };
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let _ = fs::write(path, bytes);
+}
+
+fn remote_page_cache_path(
+    cache_root: &Path,
+    remote: &RemoteProcMemory,
+    region: &ProcRegion,
+    page_addr: u64,
+    page_len: usize,
+) -> Option<PathBuf> {
+    let namespace = page_cache_namespace(remote, region)?;
+    let page_offset = region
+        .offset
+        .checked_add(page_addr.checked_sub(region.base)?)?;
+    let mut path = cache_root.to_path_buf();
+    path.push(sanitize_cache_component(&remote.serial));
+    path.push(format!(
+        "{:016x}_{}",
+        stable_string_hash(&namespace),
+        sanitize_cache_component(cache_namespace_label(&namespace, region))
+    ));
+    path.push(format!("{page_offset:016x}_{page_len:04x}.bin"));
+    Some(path)
+}
+
+fn page_cache_namespace(remote: &RemoteProcMemory, region: &ProcRegion) -> Option<String> {
+    let path = region.path.trim();
+    if is_stable_cache_region(path) {
+        return Some(format!("stable:{path}"));
+    }
+
+    Some(format!(
+        "volatile:{}:{}:{:x}:{:x}:{:x}:{}:{}",
+        remote.pid, remote.serial, region.base, region.end, region.offset, region.perms, path
+    ))
+}
+
+fn is_stable_cache_region(path: &str) -> bool {
+    if path.is_empty()
+        || path.starts_with("/memfd:")
+        || path.starts_with("/dev/ashmem/")
+        || path == "[heap]"
+        || path.starts_with("[stack")
+        || path.starts_with("[anon")
+    {
+        return false;
+    }
+    true
+}
+
+fn cache_namespace_label<'a>(namespace: &'a str, region: &'a ProcRegion) -> &'a str {
+    Path::new(namespace)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|label| !label.is_empty())
+        .or_else(|| {
+            Path::new(region.path.trim())
+                .file_name()
+                .and_then(|name| name.to_str())
+        })
+        .unwrap_or(namespace)
+}
+
+fn sanitize_cache_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "_".to_string()
+    } else {
+        out
+    }
+}
+
+fn stable_string_hash(value: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0001_0000_01b3);
+    }
+    hash
 }
 
 impl MemoryProvider for ProcMemory {
@@ -1095,12 +1272,17 @@ fn parse_hex_field(value: &str) -> Result<u64, String> {
         .map_err(|err| format!("invalid hex field '{value}': {err}"))
 }
 
+fn default_remote_page_cache_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../capture/manual/page_cache")
+}
+
 #[derive(Debug)]
 struct LiveReplaySetup {
     pid: i32,
     tid: i32,
     challenge: String,
     report_out: PathBuf,
+    page_cache_dir: Option<PathBuf>,
     sprintf_trace_out: Option<PathBuf>,
     start_pc: u64,
     entry_lr: Option<u64>,
@@ -1158,6 +1340,7 @@ struct ReplayReport {
     tid: i32,
     challenge: String,
     report_path: PathBuf,
+    page_cache_dir: Option<PathBuf>,
     sprintf_trace_path: Option<PathBuf>,
     return_art_string: Option<ArtStringReport>,
     start_pc: String,
@@ -1469,6 +1652,7 @@ fn run_replay(
         tid,
         challenge,
         report_out,
+        page_cache_dir,
         sprintf_trace_out,
         start_pc,
         entry_lr,
@@ -1753,8 +1937,11 @@ fn run_replay(
         trace.flush_pending()?;
     }
     let final_registers = register_reports(&registers);
-    let return_art_string = read_u64_reg(&registers, Reg::X(0))
-        .and_then(|ptr| decode_art_string_report(&memory_overlay, &memory, ptr).ok().flatten());
+    let return_art_string = read_u64_reg(&registers, Reg::X(0)).and_then(|ptr| {
+        decode_art_string_report(&memory_overlay, &memory, ptr)
+            .ok()
+            .flatten()
+    });
     let dependencies = finalize_dependency_reports(dependency_by_key, dependency_sources);
     let mut token_candidates = extract_token_candidates(&memory_overlay);
     if let Some(candidate) = art_string_token_candidate(return_art_string.as_ref()) {
@@ -1767,6 +1954,7 @@ fn run_replay(
         tid,
         challenge,
         report_path: report_out,
+        page_cache_dir,
         sprintf_trace_path: sprintf_trace.as_ref().map(|trace| trace.path.clone()),
         return_art_string,
         start_pc: format_hex(start_pc),
@@ -3211,7 +3399,14 @@ fn decode_art_string_report(
         return Ok(None);
     }
 
-    let count_bytes = stub_read_bytes(memory_overlay, memory, object_ptr.wrapping_add(8), 4, "art_string", 0)?;
+    let count_bytes = stub_read_bytes(
+        memory_overlay,
+        memory,
+        object_ptr.wrapping_add(8),
+        4,
+        "art_string",
+        0,
+    )?;
     let count = u32::from_le_bytes(count_bytes[0..4].try_into().unwrap());
     let compressed = (count & 1) != 0;
     let length = (count >> 1) as usize;
@@ -3628,6 +3823,7 @@ fn normalize_hex(value: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn test_proc_memory_with_path(path: &str) -> ProcMemory {
         ProcMemory {
@@ -3666,6 +3862,21 @@ mod tests {
             monotonic_ns: 900_000_000,
             boottime_ns: 900_000_000,
         }
+    }
+
+    fn test_temp_dir(label: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        path.push(format!(
+            "aeon_live_cert_eval_{label}_{}_{}",
+            process::id(),
+            nonce
+        ));
+        fs::create_dir_all(&path).expect("create temp dir");
+        path
     }
 
     #[test]
@@ -3912,6 +4123,7 @@ mod tests {
             tid: 1,
             challenge: "AABB".to_string(),
             report_out: std::env::temp_dir().join("aeon_test_entry_lr.json"),
+            page_cache_dir: None,
             sprintf_trace_out: None,
             start_pc: LIBC_MEMSET_OFFSET,
             entry_lr: Some(0x2000),
@@ -3935,12 +4147,10 @@ mod tests {
 
         assert_eq!(report.block_count, 1);
         assert_eq!(report.stop_reason, "returned_to_entry_lr 0x2000");
-        assert!(
-            report
-                .final_registers
-                .iter()
-                .any(|reg| reg.reg == "pc" && reg.value == "0x2000")
-        );
+        assert!(report
+            .final_registers
+            .iter()
+            .any(|reg| reg.reg == "pc" && reg.value == "0x2000"));
     }
 
     #[test]
@@ -3964,7 +4174,10 @@ mod tests {
         assert_eq!(decoded.length, 48);
         assert_eq!(decoded.object_ptr, "0x4000");
         assert_eq!(decoded.value_ptr, "0x400c");
-        assert_eq!(decoded.value, "3DBAB9F744F6B601E62D42B80212A8DFCD8E42847FE6C6D2");
+        assert_eq!(
+            decoded.value,
+            "3DBAB9F744F6B601E62D42B80212A8DFCD8E42847FE6C6D2"
+        );
         assert_eq!(
             art_string_token_candidate(Some(&decoded))
                 .expect("token candidate from compressed art string")
@@ -3999,6 +4212,142 @@ mod tests {
     }
 
     #[test]
+    fn decode_art_string_report_rejects_invalid_lengths() {
+        let memory = test_proc_memory();
+        let mut overlay = BTreeMap::new();
+        let object = 0x6000u64;
+        let oversized_count = ((4097u32) << 1) | 1;
+        stub_write_bytes(&mut overlay, object + 8, &oversized_count.to_le_bytes());
+
+        assert!(decode_art_string_report(&overlay, &memory, 0)
+            .expect("decode null art string")
+            .is_none());
+        assert!(decode_art_string_report(&overlay, &memory, object)
+            .expect("decode oversized art string")
+            .is_none());
+    }
+
+    #[test]
+    fn art_string_token_candidate_trims_and_uppercases_hex() {
+        let report = ArtStringReport {
+            object_ptr: "0x4000".to_string(),
+            value_ptr: "0x400c".to_string(),
+            length: 50,
+            compressed: true,
+            value: " f6ee2878618d9eb4649be8d98b45dff30caf9104b2ea8239\n".to_string(),
+        };
+
+        let token =
+            art_string_token_candidate(Some(&report)).expect("candidate from lowercase art string");
+
+        assert_eq!(token.start_addr, "0x400c");
+        assert_eq!(token.len, 48);
+        assert_eq!(
+            token.value,
+            "F6EE2878618D9EB4649BE8D98B45DFF30CAF9104B2EA8239"
+        );
+    }
+
+    #[test]
+    fn remote_page_cache_path_rebases_using_file_offset() {
+        let cache_root = Path::new("/tmp/aeon-cache");
+        let remote = RemoteProcMemory {
+            serial: "emulator-5554".to_string(),
+            pid: 42,
+            page_cache: RefCell::new(BTreeMap::new()),
+            disk_cache_dir: None,
+        };
+        let region_a = ProcRegion {
+            base: 0x7000_0000,
+            end: 0x7000_3000,
+            perms: "r-xp".to_string(),
+            offset: 0x1000,
+            path: "/system/lib64/libc.so".to_string(),
+        };
+        let region_b = ProcRegion {
+            base: 0x7100_0000,
+            end: 0x7100_3000,
+            perms: "r-xp".to_string(),
+            offset: 0x1000,
+            path: "/system/lib64/libc.so".to_string(),
+        };
+
+        let path_a = remote_page_cache_path(cache_root, &remote, &region_a, 0x7000_1000, 4096)
+            .expect("cache path for first mapping");
+        let path_b = remote_page_cache_path(cache_root, &remote, &region_b, 0x7100_1000, 4096)
+            .expect("cache path for rebased mapping");
+
+        assert_eq!(path_a, path_b);
+    }
+
+    #[test]
+    fn remote_page_cache_namespaces_volatile_regions_by_process_identity() {
+        let cache_root = Path::new("/tmp/aeon-cache");
+        let remote_a = RemoteProcMemory {
+            serial: "emulator-5554".to_string(),
+            pid: 42,
+            page_cache: RefCell::new(BTreeMap::new()),
+            disk_cache_dir: None,
+        };
+        let remote_b = RemoteProcMemory {
+            serial: "emulator-5554".to_string(),
+            pid: 43,
+            page_cache: RefCell::new(BTreeMap::new()),
+            disk_cache_dir: None,
+        };
+        let memfd = ProcRegion {
+            base: 0x7000_0000,
+            end: 0x7000_1000,
+            perms: "r-xp".to_string(),
+            offset: 0,
+            path: "/memfd:jit-cache (deleted)".to_string(),
+        };
+        let anon = ProcRegion {
+            base: 0x7100_0000,
+            end: 0x7100_1000,
+            perms: "rw-p".to_string(),
+            offset: 0,
+            path: "[anon:scudo:primary]".to_string(),
+        };
+
+        let memfd_a = remote_page_cache_path(cache_root, &remote_a, &memfd, memfd.base, 4096)
+            .expect("memfd cache path for first process");
+        let memfd_b = remote_page_cache_path(cache_root, &remote_b, &memfd, memfd.base, 4096)
+            .expect("memfd cache path for second process");
+        let anon_a = remote_page_cache_path(cache_root, &remote_a, &anon, anon.base, 4096)
+            .expect("anon cache path");
+
+        assert_ne!(memfd_a, memfd_b);
+        assert_ne!(memfd_a, anon_a);
+    }
+
+    #[test]
+    fn disk_cached_page_round_trips_for_stable_regions() {
+        let dir = test_temp_dir("page_cache");
+        let remote = RemoteProcMemory {
+            serial: "emulator-5554".to_string(),
+            pid: 42,
+            page_cache: RefCell::new(BTreeMap::new()),
+            disk_cache_dir: Some(dir.clone()),
+        };
+        let region = ProcRegion {
+            base: 0x7200_0000,
+            end: 0x7200_2000,
+            perms: "r--p".to_string(),
+            offset: 0x4000,
+            path: "/system/lib64/libart.so".to_string(),
+        };
+        let bytes = vec![0xaa, 0xbb, 0xcc, 0xdd];
+
+        write_disk_cached_page(&remote, &region, 0x7200_1000, bytes.len(), &bytes);
+        let cached = read_disk_cached_page(&remote, &region, 0x7200_1000, bytes.len())
+            .expect("read cached page");
+
+        assert_eq!(cached, bytes);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn capture_sprintf_trace_reads_format_preview() {
         let memory = test_proc_memory_with_path("/apex/com.android.runtime/lib64/bionic/libc.so");
         let registers = regs(&[
@@ -4008,9 +4357,10 @@ mod tests {
         ]);
         let overlay = overlay_bytes(0x6000, b"token=%s\0");
 
-        let trace = capture_sprintf_trace(LIBC_SPRINTF_OFFSET, 0x1234, &registers, &overlay, &memory)
-            .expect("capture trace")
-            .expect("sprintf trace");
+        let trace =
+            capture_sprintf_trace(LIBC_SPRINTF_OFFSET, 0x1234, &registers, &overlay, &memory)
+                .expect("capture trace")
+                .expect("sprintf trace");
 
         assert_eq!(trace.function, "sprintf");
         assert_eq!(trace.dest_ptr, Some(0x5000));

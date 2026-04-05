@@ -11,6 +11,7 @@ frida/__pycache__/
 # Capture docs/manifests are tracked separately; ignore raw dump payloads.
 capture/**/*.bin
 capture/**/*.tar.gz
+capture/manual/page_cache/
 capture/manual/process_snapshot_20260405/memdump/
 
 # Local sample/reference binaries generated or downloaded during analysis.

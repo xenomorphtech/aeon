@@ -527,7 +527,9 @@ impl Executor {
             "mvni" => self.execute_vector_move_intrinsic(name, operands, true),
             "cmeq" => self.execute_cmeq_intrinsic(name, operands),
             "bif" => self.execute_bif_intrinsic(name, operands),
-            _ if crc32_intrinsic_info(name).is_some() => self.execute_crc32_intrinsic(name, operands),
+            _ if crc32_intrinsic_info(name).is_some() => {
+                self.execute_crc32_intrinsic(name, operands)
+            }
             _ => {
                 if !is_supported_stmt_intrinsic(name) {
                     panic!(
@@ -1182,7 +1184,9 @@ impl<'a> BlockExecutor<'a> {
             "mvni" => self.execute_vector_move_intrinsic(name, operands, true),
             "cmeq" => self.execute_cmeq_intrinsic(name, operands),
             "bif" => self.execute_bif_intrinsic(name, operands),
-            _ if crc32_intrinsic_info(name).is_some() => self.execute_crc32_intrinsic(name, operands),
+            _ if crc32_intrinsic_info(name).is_some() => {
+                self.execute_crc32_intrinsic(name, operands)
+            }
             _ => {
                 if !is_supported_stmt_intrinsic(name) {
                     panic!(
@@ -2581,6 +2585,85 @@ mod tests {
     }
 
     #[test]
+    fn execute_block_scalar_simd_write_updates_existing_vector_aliases() {
+        let backing = TestBackingStore {
+            cells: BTreeMap::new(),
+        };
+
+        let result = execute_block(
+            &[
+                Stmt::Intrinsic {
+                    name: "movi.2d".to_string(),
+                    operands: vec![Expr::Reg(Reg::V(0)), Expr::Imm(u64::MAX)],
+                },
+                Stmt::Assign {
+                    dst: Reg::H(0),
+                    src: Expr::Imm(0x2211),
+                },
+                Stmt::Assign {
+                    dst: Reg::VByte(0),
+                    src: Expr::Imm(0x7f),
+                },
+            ],
+            BTreeMap::new(),
+            BTreeMap::new(),
+            &backing,
+            MissingMemoryPolicy::Stop,
+            8,
+        );
+
+        let mut expected = [0xffu8; 16];
+        expected[0] = 0x7f;
+        expected[1] = 0x22;
+        assert_eq!(
+            result.final_registers.get(&Reg::V(0)),
+            Some(&Value::U128(u128::from_le_bytes(expected)))
+        );
+        assert_eq!(
+            read_register_value(&result.final_registers, &Reg::H(0)),
+            Value::U64(0x227f)
+        );
+        assert_eq!(
+            read_register_value(&result.final_registers, &Reg::D(0)),
+            Value::U64(0xffff_ffff_ffff_227f)
+        );
+    }
+
+    #[test]
+    fn execute_block_marks_simd_intrinsic_unknown_when_any_operand_is_unknown() {
+        let backing = TestBackingStore {
+            cells: BTreeMap::new(),
+        };
+
+        let result = execute_block(
+            &[Stmt::Intrinsic {
+                name: "cmeq.2s".to_string(),
+                operands: vec![
+                    Expr::Reg(Reg::V(1)),
+                    Expr::Reg(Reg::V(0)),
+                    Expr::Reg(Reg::V(2)),
+                ],
+            }],
+            BTreeMap::from([
+                (
+                    Reg::V(0),
+                    Value::U128(0x0102_0304_0506_0708_1112_1314_1516_1718),
+                ),
+                (Reg::V(2), Value::Unknown),
+            ]),
+            BTreeMap::new(),
+            &backing,
+            MissingMemoryPolicy::Stop,
+            4,
+        );
+
+        assert_eq!(
+            result.final_registers.get(&Reg::V(1)),
+            Some(&Value::Unknown)
+        );
+    }
+
+    #[test]
     fn execute_block_evaluates_bit_manipulation_exprs() {
         let backing = TestBackingStore {
             cells: BTreeMap::new(),
@@ -2670,6 +2753,84 @@ mod tests {
         assert_eq!(
             result.final_registers.get(&Reg::W(3)),
             Some(&Value::U64(0x8e29_58ce))
+        );
+    }
+
+    #[test]
+    fn execute_block_evaluates_crc32c_width_variants_and_masks_source_bytes() {
+        let backing = TestBackingStore {
+            cells: BTreeMap::new(),
+        };
+
+        let result = execute_block(
+            &[
+                Stmt::Intrinsic {
+                    name: "crc32cb".to_string(),
+                    operands: vec![
+                        Expr::Reg(Reg::W(0)),
+                        Expr::Reg(Reg::W(1)),
+                        Expr::Reg(Reg::X(2)),
+                    ],
+                },
+                Stmt::Intrinsic {
+                    name: "crc32ch".to_string(),
+                    operands: vec![
+                        Expr::Reg(Reg::W(3)),
+                        Expr::Reg(Reg::W(4)),
+                        Expr::Reg(Reg::X(5)),
+                    ],
+                },
+            ],
+            BTreeMap::from([
+                (Reg::W(1), Value::U64(0)),
+                (Reg::X(2), Value::U64(0x1122_3344_5566_7788)),
+                (Reg::W(4), Value::U64(0)),
+                (Reg::X(5), Value::U64(0x1122_3344_5566_7788)),
+            ]),
+            BTreeMap::new(),
+            &backing,
+            MissingMemoryPolicy::Stop,
+            8,
+        );
+
+        assert_eq!(
+            result.final_registers.get(&Reg::W(0)),
+            Some(&Value::U64(0x082f_63b7))
+        );
+        assert_eq!(
+            result.final_registers.get(&Reg::W(3)),
+            Some(&Value::U64(0xc385_09a7))
+        );
+    }
+
+    #[test]
+    fn execute_block_propagates_unknown_crc32_inputs() {
+        let backing = TestBackingStore {
+            cells: BTreeMap::new(),
+        };
+
+        let result = execute_block(
+            &[Stmt::Intrinsic {
+                name: "crc32cw".to_string(),
+                operands: vec![
+                    Expr::Reg(Reg::W(0)),
+                    Expr::Reg(Reg::W(1)),
+                    Expr::Reg(Reg::W(2)),
+                ],
+            }],
+            BTreeMap::from([
+                (Reg::W(1), Value::Unknown),
+                (Reg::W(2), Value::U64(0x1234_5678)),
+            ]),
+            BTreeMap::new(),
+            &backing,
+            MissingMemoryPolicy::Stop,
+            4,
+        );
+
+        assert_eq!(
+            result.final_registers.get(&Reg::W(0)),
+            Some(&Value::Unknown)
         );
     }
 
