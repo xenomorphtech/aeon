@@ -1,0 +1,10 @@
+[
+  {
+    "base": "0x7970cf8000",
+    "end": "0x7970cf9000",
+    "size": 4096,
+    "protection": "r-x",
+    "path": "/home/sdancer/aeon/capture/manual/anon_exec_dumps/anon_exec_7970cf8000_r_x.bin",
+    "file_size": 4096
+  }
+]

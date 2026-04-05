@@ -1,0 +1,106 @@
+{
+  "capture_date": "2026-04-05",
+  "description": "Full process memory snapshot of NMSS cert JIT function at first execute fault",
+  "faulting_pc": "0x9b616de0",
+  "thread_id": 4329,
+  "pid": 4129,
+  "arch": "arm64",
+  "challenge": "AABBCCDDEEFF0011",
+  "token": "3DBAB9F744F6B601E62D42B80212A8DFCD8E42847FE6C6D2",
+  "before_snapshot": {
+    "timestamp": "2026-04-05T09:39:16.036Z",
+    "regions_total": 4056,
+    "regions_dumped": 3020,
+    "regions_skipped": 993,
+    "bytes_dumped": 2015973376,
+    "elapsed_ms": 12920
+  },
+  "after_snapshot": {
+    "timestamp": "2026-04-05T09:39:17.366Z",
+    "regions_total": 4042,
+    "regions_dumped": 3030,
+    "bytes_dumped": 2018668544,
+    "elapsed_ms": 11770
+  },
+  "registers": {
+    "pc": "0x9b616de0",
+    "sp": "0x75acdad540",
+    "x0": "0x762083ca88",
+    "x1": "0x134020a8",
+    "x2": "0x0",
+    "x3": "0xb400007831a17620",
+    "x4": "0x75acdad640",
+    "x5": "0x76371f0ccd",
+    "x6": "0x0",
+    "x7": "0x0",
+    "x8": "0x0",
+    "x9": "0x9b616de0",
+    "x10": "0x76371f0ccf",
+    "x11": "0x76bfa1880c",
+    "x12": "0x76bfa18854",
+    "x13": "0x76bfa1889c",
+    "x14": "0x76bfa188fc",
+    "x15": "0x0",
+    "x16": "0x76c0011d40",
+    "x17": "0x0",
+    "x18": "0x20",
+    "x19": "0xb400007831a17620",
+    "x20": "0x0",
+    "x21": "0xb400007831a17620",
+    "x22": "0x75acdae000",
+    "x23": "0xb400007831a176d0",
+    "x24": "0x76371f0ccd",
+    "x25": "0x75acdae000",
+    "x26": "0x0",
+    "x27": "0x43",
+    "x28": "0x75acdae000",
+    "x29": "0x75acdad550",
+    "x30": "0x76bfa18968"
+  },
+  "jit_cache_layout": {
+    "r_only_data_view": {
+      "base": "0x995fe000",
+      "size": "32MB",
+      "memfd_offset": "0x00000000",
+      "file": "995fe000.bin"
+    },
+    "r_x_exec_pre_corridor": {
+      "base": "0x9b5fe000",
+      "size": "72KB",
+      "memfd_offset": "0x02000000",
+      "file": "9b5fe000.bin"
+    },
+    "r_trapped_corridor": {
+      "base": "0x9b610000",
+      "size": "57KB",
+      "memfd_offset": "0x02012000",
+      "file": "9b610000.bin",
+      "note": "page-trap r-- at capture, only 4KB readable"
+    },
+    "r_x_exec_post_corridor": {
+      "base": "0x9b61e000",
+      "size": "32MB",
+      "memfd_offset": "0x02020000",
+      "file": "9b61e000.bin"
+    },
+    "rw_s_data_alias": {
+      "base": "0x76ace00000",
+      "size": "64MB",
+      "memfd_offset": "0x00000000",
+      "file": "76ace00000.bin",
+      "note": "full memfd - code at offset 0x02000000+"
+    }
+  },
+  "unicorn_replay_notes": {
+    "code_memfd_offset": "0x02000000 (exec code starts 32MB into memfd)",
+    "fault_pc_memfd_offset": "0x02018de0",
+    "corridor_code_source": "76ace00000.bin at offset 0x02018de0 (rw alias has all code bytes)",
+    "note": "before/after .bin files share same directory - after overwrites before for writable regions. Code regions (r-x) are identical in both snapshots."
+  },
+  "files_on_disk": {
+    "bin_count": 3084,
+    "total_size_mb": 1926.2,
+    "tarball": "memdump.tar.gz",
+    "tarball_size_mb": 323.0
+  }
+}
