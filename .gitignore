@@ -2,3 +2,18 @@
 *.so
 *.o
 *.a
+*.py[cod]
+.codex
+
+# Frida/Python cache artifacts
+frida/__pycache__/
+
+# Capture docs/manifests are tracked separately; ignore raw dump payloads.
+capture/**/*.bin
+capture/**/*.tar.gz
+capture/manual/process_snapshot_20260405/memdump/
+
+# Local sample/reference binaries generated or downloaded during analysis.
+samples/*.apk
+samples/*.tsv
+samples/loops_cond_aarch64.elf
