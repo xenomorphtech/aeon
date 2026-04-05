@@ -8,7 +8,7 @@
       "predecessors": [],
       "successors": [],
       "stmts": [
-        ["nop"],
+        ["intrinsic", "bti", [["imm", "0x0"]]],
         ["branch", ["imm", "0x680"]]
       ]
     }
