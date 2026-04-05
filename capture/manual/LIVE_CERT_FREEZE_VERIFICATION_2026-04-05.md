@@ -34,6 +34,12 @@ Implications:
 - the earlier printable/sanitization loop around `0x9b61ccc0` remains the strongest formatting candidate
 - tracing libc formatting calls is not a useful primary sink for this cert path
 
+Related native finding:
+
+- the observed native `S1` helper at `0xce75c` is a flattened dispatcher, not a real `sprintf`
+- the actual formatter-like call inside that path is `0xce884 -> 0x6be48`
+- two explicit global dependencies in that native `S1` path are `[0x447ba8]` and `[0x447608]`
+
 ## Relevant Files
 
 - `capture/manual/freeze.json`
@@ -48,3 +54,21 @@ The next useful sink is not libc formatting. The evaluator should focus on:
 1. reaching the entry `lr` (`0x9b6078b8`) from `pc=0x9b611090`
 2. decoding the returned ART `String` or equivalent output object
 3. tracing JIT-side byte emission / sanitization blocks rather than waiting for libc string builders
+
+## Addendum: SIMD Capture Gap
+
+On the later freeze at `pid=28164`, `pc=0x9b612074`, the first `--stop-on-non-concrete` hit was not a real cert dependency. It was a `boot-framework.oat` callee-save prologue at `0x70d4a270` spilling unknown `d8..d15` to the stack:
+
+```asm
+70d4a28c: stp d8, d9, [sp, #16]
+70d4a290: stp d10, d11, [sp, #32]
+70d4a294: stp d12, d13, [sp, #48]
+70d4a298: stp d14, d15, [sp, #64]
+```
+
+Those SIMD registers were not present in `freeze.json`, so Aeon treated the spills as symbolic even though all incoming GPR state was concrete.
+
+Implication for the next capture:
+
+- include SIMD state in the exception JSON, ideally `q0..q31`
+- minimum useful subset: `d8..d15` because they are callee-saved and immediately spilled by runtime helpers

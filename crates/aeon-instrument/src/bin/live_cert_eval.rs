@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::os::unix::fs::FileExt;
@@ -209,6 +209,7 @@ fn main() {
         missing_memory_policy: cli.missing_memory_policy,
         summary_only: cli.summary_only,
         stop_on_token: cli.stop_on_token,
+        stop_on_non_concrete: cli.stop_on_non_concrete,
         verbose_trace: cli.verbose_trace,
     };
 
@@ -287,7 +288,7 @@ fn main() {
 fn usage() {
     eprintln!("usage:");
     eprintln!(
-        "  cargo run -p aeon-instrument --bin live_cert_eval -- [--state-json path] [--adb-serial SERIAL] [--page-cache-dir path] [--pid <pid>] [--challenge <hex>] [--tid <tid>] [--pc <addr>] [--reg <name> <value>] [--max-blocks N] [--max-block-visits N] [--trace-range start end] [--missing-memory stop|symbolic] [--summary-only] [--stop-on-token] [--verbose-trace] [--report-out path] [--sprintf-trace-out path]"
+        "  cargo run -p aeon-instrument --bin live_cert_eval -- [--state-json path] [--adb-serial SERIAL] [--page-cache-dir path] [--pid <pid>] [--challenge <hex>] [--tid <tid>] [--pc <addr>] [--reg <name> <value>] [--max-blocks N] [--max-block-visits N] [--trace-range start end] [--missing-memory stop|symbolic] [--summary-only] [--stop-on-token] [--stop-on-non-concrete] [--verbose-trace] [--report-out path] [--sprintf-trace-out path]"
     );
 }
 
@@ -307,6 +308,7 @@ struct Cli {
     missing_memory_policy: MissingMemoryPolicy,
     summary_only: bool,
     stop_on_token: bool,
+    stop_on_non_concrete: bool,
     verbose_trace: bool,
     report_out: Option<PathBuf>,
     sprintf_trace_out: Option<PathBuf>,
@@ -333,6 +335,7 @@ impl Cli {
         let mut missing_memory_policy = MissingMemoryPolicy::Stop;
         let mut summary_only = false;
         let mut stop_on_token = false;
+        let mut stop_on_non_concrete = false;
         let mut verbose_trace = false;
         let mut report_out = None;
         let mut sprintf_trace_out = None;
@@ -455,6 +458,10 @@ impl Cli {
                     stop_on_token = true;
                     idx += 1;
                 }
+                "--stop-on-non-concrete" | "--stop-on-symbolic" => {
+                    stop_on_non_concrete = true;
+                    idx += 1;
+                }
                 "--verbose-trace" => {
                     verbose_trace = true;
                     idx += 1;
@@ -492,6 +499,7 @@ impl Cli {
             missing_memory_policy,
             summary_only,
             stop_on_token,
+            stop_on_non_concrete,
             verbose_trace,
             report_out,
             sprintf_trace_out,
@@ -1199,11 +1207,85 @@ fn infer_sysreg_overrides(
         if let Some((resolved, region)) = memory.find_region(candidate) {
             if region.perms.starts_with('r') {
                 overrides.insert("tpidr_el0".to_string(), resolved);
+                return overrides;
             }
         }
     }
 
+    if let Some(candidate) = infer_tpidr_el0_from_tls_region(memory, registers) {
+        overrides.insert("tpidr_el0".to_string(), candidate);
+    }
+
     overrides
+}
+
+fn infer_tpidr_el0_from_tls_region(
+    memory: &ProcMemory,
+    registers: &BTreeMap<Reg, Value>,
+) -> Option<u64> {
+    let sp = read_u64_reg(registers, Reg::SP)?;
+    let (_, tls_region) = memory.find_region(sp)?;
+    if !tls_region.perms.starts_with('r') || !tls_region.path.contains("[anon:stack_and_tls:") {
+        return None;
+    }
+
+    let mut candidates = Vec::new();
+    for index in 0..=30 {
+        let reg = Reg::X(index);
+        let Some(value) = read_u64_reg(registers, reg) else {
+            continue;
+        };
+        if value < tls_region.base || value >= tls_region.end {
+            continue;
+        }
+        if value & 0xfff != 0 {
+            continue;
+        }
+        candidates.push(value);
+    }
+    candidates.sort_unstable();
+    candidates.dedup();
+
+    candidates
+        .into_iter()
+        .filter_map(|candidate| score_tpidr_el0_candidate(memory, tls_region, sp, candidate))
+        .max()
+        .map(|(_, candidate)| candidate)
+}
+
+fn score_tpidr_el0_candidate(
+    memory: &ProcMemory,
+    tls_region: &ProcRegion,
+    sp: u64,
+    candidate: u64,
+) -> Option<(u64, u64)> {
+    let canary = read_backing_u64(memory, candidate.checked_add(0x28)?);
+    let has_canary = canary.filter(|value| *value != 0).is_some();
+    let next_ptr = read_backing_u64(memory, candidate.checked_add(0x30)?);
+    let has_ptr = next_ptr
+        .and_then(|value| memory.find_region(value))
+        .is_some();
+
+    if !has_canary {
+        return None;
+    }
+
+    let mut score = 0u64;
+    if candidate >= sp {
+        score += 1 << 20;
+    }
+    if has_ptr {
+        score += 1 << 16;
+    }
+    score += tls_region.end.saturating_sub(candidate).min(0xffff);
+    Some((score, candidate))
+}
+
+fn read_backing_u64(memory: &ProcMemory, addr: u64) -> Option<u64> {
+    let bytes = memory.load(addr, 8)?;
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&bytes);
+    Some(u64::from_le_bytes(buf))
 }
 
 fn parse_proc_maps(path: &str) -> Result<Vec<ProcRegion>, String> {
@@ -1294,6 +1376,7 @@ struct LiveReplaySetup {
     missing_memory_policy: MissingMemoryPolicy,
     summary_only: bool,
     stop_on_token: bool,
+    stop_on_non_concrete: bool,
     verbose_trace: bool,
 }
 
@@ -1322,6 +1405,10 @@ enum ReplayStop {
     MaxBlocks,
     MaxBlockVisits(u64),
     TokenFound(String),
+    NonConcrete {
+        pc: u64,
+        reason: String,
+    },
     LiftError(u64, String),
     ExecutionPanic(u64, String),
     MissingMemory {
@@ -1602,6 +1689,12 @@ struct BlockReport {
     changed_registers: Vec<RegisterReport>,
 }
 
+#[derive(Debug, Default)]
+struct IgnoredNonConcreteEffects {
+    reads: BTreeSet<MemoryCellId>,
+    writes: BTreeSet<MemoryCellId>,
+}
+
 #[derive(Debug, Serialize)]
 struct ReadReport {
     location: String,
@@ -1664,6 +1757,7 @@ fn run_replay(
         missing_memory_policy,
         summary_only,
         stop_on_token,
+        stop_on_non_concrete,
         verbose_trace,
     } = setup;
     let mut sprintf_trace = sprintf_trace_out
@@ -1687,11 +1781,23 @@ fn run_replay(
     let mut trace_exits = 0usize;
     let mut first_symbolic_block = None::<String>;
     let mut tracing_was_active = false;
+    let mut ignored_symbolic_memory = BTreeSet::<MemoryCellId>::new();
     let stop_reason;
 
     loop {
         if let Some(trace) = sprintf_trace.as_mut() {
             trace.finish_ready(pc, &memory_overlay, &memory)?;
+        }
+
+        if stop_on_non_concrete {
+            if let Some(reason) = first_symbolic_input_source_filtered(
+                &registers,
+                &memory_overlay,
+                &ignored_symbolic_memory,
+            ) {
+                stop_reason = ReplayStop::NonConcrete { pc, reason };
+                break;
+            }
         }
 
         if block_count > 0 && entry_lr == Some(pc) {
@@ -1722,14 +1828,22 @@ fn run_replay(
         }
         *visit_count += 1;
 
-        if let Some(stub) = maybe_execute_known_stub(
+        let stub = match maybe_execute_known_stub(
             pc,
             &mut registers,
             &mut memory_overlay,
             &memory,
             &mut virtual_clock,
             &mut sprintf_trace,
-        )? {
+        ) {
+            Ok(stub) => stub,
+            Err(err) if stop_on_non_concrete && is_non_concrete_stub_error(&err) => {
+                stop_reason = ReplayStop::NonConcrete { pc, reason: err };
+                break;
+            }
+            Err(err) => return Err(err),
+        };
+        if let Some(stub) = stub {
             let next_pc = normalize_control_flow_addr(stub.next_pc, &memory, trace_range)
                 .unwrap_or(stub.next_pc);
             block_count += 1;
@@ -1785,8 +1899,17 @@ fn run_replay(
         let previous_registers = registers.clone();
         let initial_registers = std::mem::take(&mut registers);
         let initial_memory = std::mem::take(&mut memory_overlay);
-        let incoming_symbolic_source =
-            first_symbolic_input_source(&initial_registers, &initial_memory);
+        let filter_context =
+            stop_on_non_concrete.then(|| (initial_registers.clone(), initial_memory.clone()));
+        let incoming_symbolic_source = if stop_on_non_concrete {
+            first_symbolic_input_source_filtered(
+                &initial_registers,
+                &initial_memory,
+                &ignored_symbolic_memory,
+            )
+        } else {
+            first_symbolic_input_source(&initial_registers, &initial_memory)
+        };
         let result = match catch_unwind(AssertUnwindSafe(|| {
             execute_block(
                 &block.stmts,
@@ -1819,6 +1942,29 @@ fn run_replay(
         }
 
         let changed_registers = diff_registers(&previous_registers, &result.final_registers);
+        let ignored_effects = filter_context
+            .as_ref()
+            .map(|(registers, memory_overlay)| {
+                collect_nonsemantic_simd_preserve_effects(
+                    &block,
+                    registers,
+                    memory_overlay,
+                    &memory,
+                )
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let filtered_non_concrete_reason = if stop_on_non_concrete {
+            first_non_concrete_block_reason_filtered(
+                &result,
+                &changed_registers,
+                incoming_symbolic_source.clone(),
+                &ignored_symbolic_memory,
+                &ignored_effects,
+            )
+        } else {
+            None
+        };
         block_count += 1;
 
         if tracing_active && verbose_trace {
@@ -1863,8 +2009,27 @@ fn run_replay(
         } else {
             untraced_blocks += 1;
         }
+
+        if stop_on_non_concrete {
+            for write in &result.writes {
+                if !ignored_effects.writes.contains(&write.id) {
+                    ignored_symbolic_memory.remove(&write.id);
+                }
+            }
+            ignored_symbolic_memory.extend(ignored_effects.writes.iter().cloned());
+        }
         registers = result.final_registers;
         memory_overlay = result.final_memory;
+
+        if stop_on_non_concrete {
+            if let Some(reason) = filtered_non_concrete_reason {
+                stop_reason = ReplayStop::NonConcrete {
+                    pc: block.addr,
+                    reason,
+                };
+                break;
+            }
+        }
 
         if stop_on_token {
             if let Some(token) = pick_stop_token_candidate(&memory_overlay) {
@@ -3070,6 +3235,55 @@ fn block_report(
     }
 }
 
+fn first_non_concrete_block_reason_filtered(
+    result: &BlockExecutionResult,
+    changed_registers: &[RegisterReport],
+    incoming_symbolic_source: Option<String>,
+    ignored_input_memory: &BTreeSet<MemoryCellId>,
+    ignored_effects: &IgnoredNonConcreteEffects,
+) -> Option<String> {
+    if incoming_symbolic_source.is_some() {
+        return incoming_symbolic_source;
+    }
+
+    if let Some(read) = result.reads.iter().find(|read| {
+        !is_concrete(&read.value)
+            && !ignored_input_memory.contains(&read.id)
+            && !ignored_effects.reads.contains(&read.id)
+    }) {
+        return Some(first_symbolic_read_source(read));
+    }
+
+    if let Some(write) = result
+        .writes
+        .iter()
+        .find(|write| !is_concrete(&write.value) && !ignored_effects.writes.contains(&write.id))
+    {
+        return Some(first_symbolic_write_source(write));
+    }
+
+    if let Some(reg) = changed_registers.iter().find(|reg| !reg.concrete) {
+        return Some(format!("register {} became symbolic", reg.reg));
+    }
+
+    match &result.stop {
+        BlockStop::SymbolicBranch => Some("symbolic branch condition".to_string()),
+        BlockStop::MissingMemory { location, .. } => {
+            let ignored_missing = result.reads.iter().any(|read| {
+                !is_concrete(&read.value)
+                    && ignored_effects.reads.contains(&read.id)
+                    && read.id.location == *location
+            });
+            if ignored_missing {
+                None
+            } else {
+                Some(format!("missing read {}", format_location(location)))
+            }
+        }
+        _ => None,
+    }
+}
+
 fn block_symbolic_summary(
     result: &BlockExecutionResult,
     changed_registers: &[RegisterReport],
@@ -3144,6 +3358,165 @@ fn first_symbolic_input_source(
     }
 
     None
+}
+
+fn first_symbolic_input_source_filtered(
+    registers: &BTreeMap<Reg, Value>,
+    memory: &BTreeMap<MemoryCellId, Value>,
+    ignored_memory: &BTreeSet<MemoryCellId>,
+) -> Option<String> {
+    for reg in tracked_registers() {
+        if let Some(value) = registers.get(&reg) {
+            if !is_concrete(value) {
+                return Some(format!(
+                    "incoming register {} was symbolic",
+                    format_reg(&reg)
+                ));
+            }
+        }
+    }
+
+    for (id, value) in memory {
+        if !is_concrete(value) && !ignored_memory.contains(id) {
+            return Some(format!(
+                "incoming memory {} was symbolic",
+                format_location(&id.location)
+            ));
+        }
+    }
+
+    None
+}
+
+fn collect_nonsemantic_simd_preserve_effects(
+    block: &LiftedBlock,
+    initial_registers: &BTreeMap<Reg, Value>,
+    initial_memory: &BTreeMap<MemoryCellId, Value>,
+    backing: &dyn BackingStore,
+) -> Result<IgnoredNonConcreteEffects, String> {
+    let mut registers = initial_registers.clone();
+    let mut memory = initial_memory.clone();
+    let mut flat = Vec::new();
+    flatten_stmts(&block.stmts, &mut flat);
+    let mut effects = IgnoredNonConcreteEffects::default();
+
+    for stmt in flat {
+        let ignore_stmt = is_nonsemantic_simd_preserve_stmt(&stmt);
+        let result = execute_block(
+            std::slice::from_ref(&stmt),
+            registers,
+            memory,
+            backing,
+            MissingMemoryPolicy::ContinueAsUnknown,
+            16,
+        );
+        if !matches!(result.stop, BlockStop::Completed) {
+            return Err(format!(
+                "failed to inspect preserve stmt in {}: {}",
+                format_hex(block.addr),
+                format_block_stop(&result.stop)
+            ));
+        }
+        if ignore_stmt {
+            effects.reads.extend(
+                result
+                    .reads
+                    .iter()
+                    .filter(|read| !is_concrete(&read.value))
+                    .map(|read| read.id.clone()),
+            );
+            effects.writes.extend(
+                result
+                    .writes
+                    .iter()
+                    .filter(|write| !is_concrete(&write.value))
+                    .map(|write| write.id.clone()),
+            );
+        }
+        registers = result.final_registers;
+        memory = result.final_memory;
+    }
+
+    Ok(effects)
+}
+
+fn flatten_stmts(stmts: &[Stmt], out: &mut Vec<Stmt>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Pair(lhs, rhs) => {
+                flatten_stmts(std::slice::from_ref(lhs), out);
+                flatten_stmts(std::slice::from_ref(rhs), out);
+            }
+            other => out.push(other.clone()),
+        }
+    }
+}
+
+fn is_nonsemantic_simd_preserve_stmt(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Store { addr, value, size } => {
+            *size == 8
+                && expr_references_stack_pointer(addr)
+                && matches!(value, Expr::Reg(Reg::D(index)) if (8..=15).contains(index))
+        }
+        Stmt::Assign { dst, src } => {
+            matches!(dst, Reg::D(index) if (8..=15).contains(index))
+                && matches!(src, Expr::Load { addr, size } if *size == 8 && expr_references_stack_pointer(addr))
+        }
+        _ => false,
+    }
+}
+
+fn expr_references_stack_pointer(expr: &Expr) -> bool {
+    match expr {
+        Expr::Reg(Reg::SP) | Expr::StackSlot { .. } => true,
+        Expr::Add(lhs, rhs)
+        | Expr::Sub(lhs, rhs)
+        | Expr::And(lhs, rhs)
+        | Expr::Or(lhs, rhs)
+        | Expr::Xor(lhs, rhs)
+        | Expr::Shl(lhs, rhs)
+        | Expr::Lsr(lhs, rhs)
+        | Expr::Asr(lhs, rhs)
+        | Expr::Ror(lhs, rhs)
+        | Expr::Mul(lhs, rhs)
+        | Expr::Div(lhs, rhs)
+        | Expr::UDiv(lhs, rhs)
+        | Expr::FAdd(lhs, rhs)
+        | Expr::FSub(lhs, rhs)
+        | Expr::FMul(lhs, rhs)
+        | Expr::FDiv(lhs, rhs)
+        | Expr::FMax(lhs, rhs)
+        | Expr::FMin(lhs, rhs)
+        | Expr::Compare { lhs, rhs, .. } => {
+            expr_references_stack_pointer(lhs) || expr_references_stack_pointer(rhs)
+        }
+        Expr::Load { addr, .. }
+        | Expr::Neg(addr)
+        | Expr::Abs(addr)
+        | Expr::Not(addr)
+        | Expr::FNeg(addr)
+        | Expr::FAbs(addr)
+        | Expr::FSqrt(addr)
+        | Expr::FCvt(addr)
+        | Expr::IntToFloat(addr)
+        | Expr::FloatToInt(addr)
+        | Expr::Clz(addr)
+        | Expr::Cls(addr)
+        | Expr::Rev(addr)
+        | Expr::Rbit(addr)
+        | Expr::SignExtend { src: addr, .. }
+        | Expr::ZeroExtend { src: addr, .. }
+        | Expr::Extract { src: addr, .. } => expr_references_stack_pointer(addr),
+        Expr::Insert { dst, src, .. } => {
+            expr_references_stack_pointer(dst) || expr_references_stack_pointer(src)
+        }
+        Expr::CondSelect {
+            if_true, if_false, ..
+        } => expr_references_stack_pointer(if_true) || expr_references_stack_pointer(if_false),
+        Expr::Intrinsic { operands, .. } => operands.iter().any(expr_references_stack_pointer),
+        _ => false,
+    }
 }
 
 fn first_symbolic_read_source(read: &MemoryReadObservation) -> String {
@@ -3408,14 +3781,43 @@ fn decode_art_string_report(
         0,
     )?;
     let count = u32::from_le_bytes(count_bytes[0..4].try_into().unwrap());
-    let compressed = (count & 1) != 0;
-    let length = (count >> 1) as usize;
-    if length == 0 || length > 4096 {
-        return Ok(None);
+    let mut attempts = Vec::new();
+    if (count & 1) != 0 {
+        attempts.push((true, (count >> 1) as usize, object_ptr.wrapping_add(12)));
+    }
+    if count != 0 && (count & 1) == 0 {
+        attempts.push((true, (count >> 1) as usize, object_ptr.wrapping_add(16)));
+        attempts.push((false, (count >> 1) as usize, object_ptr.wrapping_add(16)));
     }
 
-    let (value_ptr, value) = if compressed {
-        let value_ptr = object_ptr.wrapping_add(12);
+    for (compressed, length, value_ptr) in attempts {
+        if length == 0 || length > 4096 {
+            continue;
+        }
+        if let Some(value) =
+            try_decode_art_string_value(memory_overlay, memory, value_ptr, length, compressed)?
+        {
+            return Ok(Some(ArtStringReport {
+                object_ptr: format_hex(object_ptr),
+                value_ptr: format_hex(value_ptr),
+                length,
+                compressed,
+                value,
+            }));
+        }
+    }
+
+    Ok(None)
+}
+
+fn try_decode_art_string_value(
+    memory_overlay: &BTreeMap<MemoryCellId, Value>,
+    memory: &ProcMemory,
+    value_ptr: u64,
+    length: usize,
+    compressed: bool,
+) -> Result<Option<String>, String> {
+    let value = if compressed {
         let bytes = stub_read_bytes(
             memory_overlay,
             memory,
@@ -3424,9 +3826,8 @@ fn decode_art_string_report(
             "art_string",
             0,
         )?;
-        (value_ptr, String::from_utf8_lossy(&bytes).into_owned())
+        String::from_utf8_lossy(&bytes).into_owned()
     } else {
-        let value_ptr = object_ptr.wrapping_add(16);
         let bytes = stub_read_bytes(
             memory_overlay,
             memory,
@@ -3439,16 +3840,17 @@ fn decode_art_string_report(
             .chunks_exact(2)
             .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
             .collect::<Vec<_>>();
-        (value_ptr, String::from_utf16_lossy(&utf16))
+        String::from_utf16_lossy(&utf16)
     };
+    if is_plausible_art_string_value(&value) {
+        Ok(Some(value))
+    } else {
+        Ok(None)
+    }
+}
 
-    Ok(Some(ArtStringReport {
-        object_ptr: format_hex(object_ptr),
-        value_ptr: format_hex(value_ptr),
-        length,
-        compressed,
-        value,
-    }))
+fn is_plausible_art_string_value(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|ch| !ch.is_control() || ch == ' ')
 }
 
 fn art_string_token_candidate(report: Option<&ArtStringReport>) -> Option<TokenCandidate> {
@@ -3597,6 +3999,9 @@ fn format_stop_reason(stop: &ReplayStop) -> String {
         ReplayStop::MaxBlocks => "max_blocks".to_string(),
         ReplayStop::MaxBlockVisits(addr) => format!("max_block_visits at {}", format_hex(*addr)),
         ReplayStop::TokenFound(token) => format!("token_found {}", token),
+        ReplayStop::NonConcrete { pc, reason } => {
+            format!("non_concrete in {}: {reason}", format_hex(*pc))
+        }
         ReplayStop::LiftError(addr, err) => format!("lift_error at {}: {err}", format_hex(*addr)),
         ReplayStop::ExecutionPanic(addr, err) => {
             format!("execution_panic in {}: {err}", format_hex(*addr))
@@ -3703,6 +4108,10 @@ fn format_hex(value: u64) -> String {
 
 fn is_concrete(value: &Value) -> bool {
     !matches!(value, Value::Unknown)
+}
+
+fn is_non_concrete_stub_error(err: &str) -> bool {
+    err.contains("missing concrete")
 }
 
 fn parse_u64(value: &str) -> Result<u64, String> {
@@ -3840,6 +4249,26 @@ mod tests {
 
     fn test_proc_memory() -> ProcMemory {
         test_proc_memory_with_path("/system/lib64/libc.so")
+    }
+
+    fn test_proc_memory_with_regions_and_bytes(
+        regions: Vec<ProcRegion>,
+        writes: &[(u64, &[u8])],
+    ) -> ProcMemory {
+        let dir = test_temp_dir("proc_memory");
+        let mem_path = dir.join("mem.bin");
+        let end = regions.iter().map(|region| region.end).max().unwrap_or(0);
+        let mut bytes = vec![0u8; end as usize];
+        for (addr, chunk) in writes {
+            let start = *addr as usize;
+            let stop = start + chunk.len();
+            bytes[start..stop].copy_from_slice(chunk);
+        }
+        fs::write(&mem_path, bytes).expect("write proc memory image");
+        ProcMemory {
+            source: ProcMemorySource::Local(File::open(&mem_path).expect("open proc memory image")),
+            regions,
+        }
     }
 
     fn overlay_bytes(addr: u64, bytes: &[u8]) -> BTreeMap<MemoryCellId, Value> {
@@ -4140,6 +4569,7 @@ mod tests {
             missing_memory_policy: MissingMemoryPolicy::Stop,
             summary_only: true,
             stop_on_token: false,
+            stop_on_non_concrete: false,
             verbose_trace: false,
         };
 
@@ -4151,6 +4581,150 @@ mod tests {
             .final_registers
             .iter()
             .any(|reg| reg.reg == "pc" && reg.value == "0x2000"));
+    }
+
+    #[test]
+    fn replay_stops_when_block_becomes_non_concrete() {
+        let code = [
+            0x20u8, 0x00, 0x40, 0xf9, // ldr x0, [x1]
+            0xc0, 0x03, 0x5f, 0xd6, // ret
+        ];
+        let memory = test_proc_memory_with_regions_and_bytes(
+            vec![ProcRegion {
+                base: 0x1000,
+                end: 0x2000,
+                perms: "r-xp".to_string(),
+                offset: 0,
+                path: "/jit/test.bin".to_string(),
+            }],
+            &[(0x1000, &code)],
+        );
+        let setup = LiveReplaySetup {
+            pid: 1,
+            tid: 1,
+            challenge: "AABB".to_string(),
+            report_out: std::env::temp_dir().join("aeon_test_stop_non_concrete_block.json"),
+            page_cache_dir: None,
+            sprintf_trace_out: None,
+            start_pc: 0x1000,
+            entry_lr: None,
+            trace_range: Some((0x1000, 0x2000)),
+            registers: regs(&[(Reg::X(1), 0x3000), (Reg::X(30), 0x2000)]),
+            sysreg_overrides: BTreeMap::new(),
+            memory,
+            virtual_clock: test_clock(),
+            missing_memory_policy: MissingMemoryPolicy::ContinueAsUnknown,
+            summary_only: true,
+            stop_on_token: false,
+            stop_on_non_concrete: true,
+            verbose_trace: false,
+        };
+
+        let report = run_replay(setup, 16, 16).expect("run replay");
+
+        assert_eq!(report.block_count, 1);
+        assert_eq!(
+            report.stop_reason,
+            "non_concrete in 0x1000: missing read 0x3000"
+        );
+    }
+
+    #[test]
+    fn replay_stops_when_stub_argument_is_not_concrete() {
+        let setup = LiveReplaySetup {
+            pid: 1,
+            tid: 1,
+            challenge: "AABB".to_string(),
+            report_out: std::env::temp_dir().join("aeon_test_stop_non_concrete_stub.json"),
+            page_cache_dir: None,
+            sprintf_trace_out: None,
+            start_pc: LIBC_MEMSET_OFFSET,
+            entry_lr: None,
+            trace_range: None,
+            registers: regs(&[(Reg::X(1), 0x41), (Reg::X(2), 4), (Reg::X(30), 0x2000)]),
+            sysreg_overrides: BTreeMap::new(),
+            memory: test_proc_memory(),
+            virtual_clock: test_clock(),
+            missing_memory_policy: MissingMemoryPolicy::Stop,
+            summary_only: true,
+            stop_on_token: false,
+            stop_on_non_concrete: true,
+            verbose_trace: false,
+        };
+
+        let report = run_replay(setup, 16, 16).expect("run replay");
+
+        assert_eq!(report.block_count, 0);
+        assert_eq!(
+            report.stop_reason,
+            format!(
+                "non_concrete in {}: memset stub at {} missing concrete x0",
+                format_hex(LIBC_MEMSET_OFFSET),
+                format_hex(LIBC_MEMSET_OFFSET)
+            )
+        );
+    }
+
+    #[test]
+    fn non_concrete_filter_ignores_d8_d15_stack_spills() {
+        let memory = test_proc_memory();
+        let block = LiftedBlock {
+            addr: 0x1000,
+            stmts: vec![
+                Stmt::Assign {
+                    dst: Reg::SP,
+                    src: Expr::Sub(Box::new(Expr::Reg(Reg::SP)), Box::new(Expr::Imm(0xb0))),
+                },
+                Stmt::Store {
+                    addr: Expr::Add(Box::new(Expr::Reg(Reg::SP)), Box::new(Expr::Imm(16))),
+                    value: Expr::Reg(Reg::D(8)),
+                    size: 8,
+                },
+                Stmt::Store {
+                    addr: Expr::Add(Box::new(Expr::Reg(Reg::SP)), Box::new(Expr::Imm(24))),
+                    value: Expr::Reg(Reg::D(9)),
+                    size: 8,
+                },
+                Stmt::Branch {
+                    target: Expr::Imm(0x2000),
+                },
+            ],
+            terminator: BlockTerminator::DirectBranch,
+        };
+        let initial_registers = BTreeMap::from([
+            (Reg::SP, Value::U64(0x4000)),
+            (Reg::D(8), Value::Unknown),
+            (Reg::D(9), Value::Unknown),
+        ]);
+        let initial_memory = BTreeMap::new();
+        let result = execute_block(
+            &block.stmts,
+            initial_registers.clone(),
+            initial_memory.clone(),
+            &memory,
+            MissingMemoryPolicy::ContinueAsUnknown,
+            BLOCK_STEP_BUDGET,
+        );
+        let changed_registers = diff_registers(&initial_registers, &result.final_registers);
+        let ignored = collect_nonsemantic_simd_preserve_effects(
+            &block,
+            &initial_registers,
+            &initial_memory,
+            &memory,
+        )
+        .expect("collect ignored spill effects");
+
+        assert!(!ignored.writes.is_empty());
+        assert_eq!(
+            first_non_concrete_block_reason_filtered(
+                &result,
+                &changed_registers,
+                None,
+                &BTreeSet::new(),
+                &ignored,
+            ),
+            None
+        );
     }
 
     #[test]
@@ -4209,6 +4783,79 @@ mod tests {
         assert_eq!(decoded.length, 5);
         assert_eq!(decoded.value_ptr, "0x5010");
         assert_eq!(decoded.value, "TOKEN");
+    }
+
+    #[test]
+    fn decode_art_string_report_handles_observed_compressed_plus_16_layout() {
+        let memory = test_proc_memory();
+        let mut overlay = BTreeMap::new();
+        let object = 0x5800u64;
+        let value = "com.netmarble.thered";
+        let count = (value.len() as u32) << 1;
+        stub_write_bytes(&mut overlay, object + 8, &count.to_le_bytes());
+        stub_write_bytes(&mut overlay, object + 16, value.as_bytes());
+
+        let decoded = decode_art_string_report(&overlay, &memory, object)
+            .expect("decode observed compressed art string")
+            .expect("observed compressed art string");
+
+        assert!(decoded.compressed);
+        assert_eq!(decoded.length, value.len());
+        assert_eq!(decoded.value_ptr, "0x5810");
+        assert_eq!(decoded.value, value);
+    }
+
+    #[test]
+    fn infer_sysreg_overrides_recovers_tpidr_el0_from_stack_tls_region() {
+        let tls_base = 0x1000u64;
+        let tls_end = 0x4000u64;
+        let tpidr = 0x3000u64;
+        let canary = 0x2273_323d_4275_b9bbu64;
+        let memory = test_proc_memory_with_regions_and_bytes(
+            vec![ProcRegion {
+                base: tls_base,
+                end: tls_end,
+                perms: "rw-p".to_string(),
+                offset: 0,
+                path: "[anon:stack_and_tls:42]".to_string(),
+            }],
+            &[(tpidr + 0x28, &canary.to_le_bytes())],
+        );
+        let registers = regs(&[(Reg::SP, 0x2fe0), (Reg::X(26), tpidr), (Reg::X(29), 0x2080)]);
+
+        let overrides = infer_sysreg_overrides(&memory, &registers, None);
+
+        assert_eq!(overrides.get("tpidr_el0").copied(), Some(tpidr));
+    }
+
+    #[test]
+    fn infer_sysreg_overrides_prefers_explicit_sysreg_json_value() {
+        let tls_base = 0x1000u64;
+        let tls_end = 0x4000u64;
+        let memory = test_proc_memory_with_regions_and_bytes(
+            vec![ProcRegion {
+                base: tls_base,
+                end: tls_end,
+                perms: "rw-p".to_string(),
+                offset: 0,
+                path: "[anon:stack_and_tls:42]".to_string(),
+            }],
+            &[],
+        );
+        let registers = regs(&[(Reg::SP, 0x2fe0), (Reg::X(26), 0x3000)]);
+        let state = InputState {
+            pid: Some(1),
+            tid: Some(42),
+            challenge: None,
+            pc: None,
+            lr: None,
+            reg_overrides: Vec::new(),
+            sysreg_overrides: BTreeMap::from([("tpidr_el0".to_string(), 0xdead_beef)]),
+        };
+
+        let overrides = infer_sysreg_overrides(&memory, &registers, Some(&state));
+
+        assert_eq!(overrides.get("tpidr_el0").copied(), Some(0xdead_beef));
     }
 
     #[test]

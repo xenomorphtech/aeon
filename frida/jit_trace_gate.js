@@ -222,6 +222,52 @@
         }
         regs.x29 = fmtPtr(ctx.fp);
         regs.x30 = fmtPtr(ctx.lr);
+        try {
+            regs.nzcv = '' + ctx.nzcv;
+        } catch (e) {}
+        var simd = {};
+        var hasSIMD = false;
+        for (var q = 0; q <= 31; q++) {
+            try {
+                var val = ctx['q' + q];
+                if (val !== undefined && val !== null) {
+                    if (val instanceof ArrayBuffer || (val.byteLength !== undefined)) {
+                        var u8 = new Uint8Array(val);
+                        var hex = '';
+                        for (var b = 0; b < u8.length; b++) {
+                            var h = u8[b].toString(16);
+                            hex += h.length === 1 ? '0' + h : h;
+                        }
+                        simd['q' + q] = hex;
+                    } else {
+                        simd['q' + q] = val.toString();
+                    }
+                    hasSIMD = true;
+                }
+            } catch (e) {}
+        }
+        if (!hasSIMD) {
+            for (var d = 0; d <= 31; d++) {
+                try {
+                    var dval = ctx['d' + d];
+                    if (dval !== undefined && dval !== null) {
+                        if (dval instanceof ArrayBuffer || (dval.byteLength !== undefined)) {
+                            var du8 = new Uint8Array(dval);
+                            var dhex = '';
+                            for (var db = 0; db < du8.length; db++) {
+                                var dh = du8[db].toString(16);
+                                dhex += dh.length === 1 ? '0' + dh : dh;
+                            }
+                            simd['d' + d] = dhex;
+                        } else {
+                            simd['d' + d] = dval.toString();
+                        }
+                        hasSIMD = true;
+                    }
+                } catch (e) {}
+            }
+        }
+        if (hasSIMD) regs.simd = simd;
         return regs;
     }
 
@@ -1140,10 +1186,11 @@
         });
     };
 
-    globalThis.__jitGateFreezeArm = function (challenge) {
+    globalThis.__jitGateFreezeArm = function (challenge, minPcHex) {
         state.freeze.armed = true;
         state.freeze.triggered = false;
         state.freeze.challenge = challenge || null;
+        state.freeze.minPc = minPcHex ? ptr(minPcHex) : null;
         state.freeze.info = null;
         if (!state.currentBase) {
             installForRange(chooseTrapRange());
@@ -1284,7 +1331,8 @@
                     state.memdump.before = { error: String(e) };
                 }
             }
-            if (state.freeze.armed && !state.freeze.triggered) {
+            if (state.freeze.armed && !state.freeze.triggered &&
+                (!state.freeze.minPc || (details.context && ptr(details.context.pc).compare(state.freeze.minPc) >= 0))) {
                 state.freeze.armed = false;
                 state.freeze.triggered = true;
                 state.freeze.info = {

@@ -61,6 +61,40 @@ So the earlier shorthand "bytes 16-19" was too loose. The concrete diff in this 
 - `call[1]` likely carries the challenge-fed selector, pointer, or short-lived state handle that makes the cert output query-specific.
 - Because only one narrow field changes while the final cert changes completely, the nonlinear mixing likely happens after this `S1` formatting step rather than inside the fixed fields themselves.
 
+## Native S1 Builder Resolution
+
+The native function at `0xce75c` is not itself a plain `sprintf`-style formatter. It is an obfuscated control-flow-flattened dispatcher:
+
+- size: `273` instructions / `1092` bytes
+- entry has stack canary setup via `mrs x8, tpidr_el0`
+- the core dispatch loop is at `0xce91c`
+- dispatch state is switched through compares against obfuscated constants such as:
+  - `0xe9e08b05`
+  - `0x5dcc2ad2`
+  - `0xff98745e`
+  - `0xb1299652`
+
+Important blocks inside that dispatcher:
+
+- `0xce874`: loads a string pointer from `0x3ac000 + 0xaf8` and prepares the actual formatting call
+- `0xce884`: `bl 0x6be48`
+- `0xce800` and `0xce894`: read global state slots at `[0x447ba8]` and `[0x447608]`
+- `0xce9a0..0xce9b0` and `0xcea44..0xcea54`: copy a 24-byte result into the output object at `x19` using `str q0` plus `str x8`
+
+So the useful interpretation is:
+
+- `0xce75c` is the obfuscated dispatcher / integrity wrapper
+- `0x6be48` is the actual formatter-like callee that emits the `%08X%08X%08X%08X%08X%08X`-style `S1` hex string from the six `uint32` values in the `x25`-backed buffer
+- globals `0x447ba8` and `0x447608` are explicit external dependencies in that native `S1` builder path
+
+## Consequence
+
+Future instrumentation should not treat `0xce75c` as a libc-style formatting sink. The high-value edges are:
+
+1. the call at `0xce884 -> 0x6be48`
+2. the global reads at `0x447ba8` and `0x447608`
+3. the 24-byte output copy back into the result object at `x19`
+
 ## Local Helper
 
 Use the local parser to diff future traces:

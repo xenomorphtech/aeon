@@ -527,6 +527,7 @@ impl Executor {
             "mvni" => self.execute_vector_move_intrinsic(name, operands, true),
             "cmeq" => self.execute_cmeq_intrinsic(name, operands),
             "bif" => self.execute_bif_intrinsic(name, operands),
+            "umov" => self.execute_umov_intrinsic(name, operands),
             _ if crc32_intrinsic_info(name).is_some() => {
                 self.execute_crc32_intrinsic(name, operands)
             }
@@ -640,6 +641,18 @@ impl Executor {
             }
             _ => Value::Unknown,
         };
+        self.write_reg(dst, value);
+    }
+
+    fn execute_umov_intrinsic(&mut self, name: &str, operands: &[Expr]) {
+        let Some(dst) = operands.first().and_then(expr_reg_operand) else {
+            panic!("aeon emulation expected a register destination for `{name}`");
+        };
+        let value = operands
+            .get(1)
+            .map(|expr| self.eval_expr(expr))
+            .map(low_u64_value)
+            .unwrap_or(Value::Unknown);
         self.write_reg(dst, value);
     }
 
@@ -1184,6 +1197,7 @@ impl<'a> BlockExecutor<'a> {
             "mvni" => self.execute_vector_move_intrinsic(name, operands, true),
             "cmeq" => self.execute_cmeq_intrinsic(name, operands),
             "bif" => self.execute_bif_intrinsic(name, operands),
+            "umov" => self.execute_umov_intrinsic(name, operands),
             _ if crc32_intrinsic_info(name).is_some() => {
                 self.execute_crc32_intrinsic(name, operands)
             }
@@ -1298,6 +1312,18 @@ impl<'a> BlockExecutor<'a> {
             }
             _ => Value::Unknown,
         };
+        self.write_reg(dst, value);
+    }
+
+    fn execute_umov_intrinsic(&mut self, name: &str, operands: &[Expr]) {
+        let Some(dst) = operands.first().and_then(expr_reg_operand) else {
+            panic!("aeon emulation expected a register destination for `{name}`");
+        };
+        let value = operands
+            .get(1)
+            .map(|expr| self.eval_expr(expr))
+            .map(low_u64_value)
+            .unwrap_or(Value::Unknown);
         self.write_reg(dst, value);
     }
 
@@ -1604,6 +1630,15 @@ fn scalar_value_from_bytes(bytes: &[u8]) -> Value {
     let mut buf = [0u8; 8];
     buf[..bytes.len()].copy_from_slice(bytes);
     Value::U64(u64::from_le_bytes(buf))
+}
+
+fn low_u64_value(value: Value) -> Value {
+    match value {
+        Value::U64(bits) => Value::U64(bits),
+        Value::U128(bits) => Value::U64(bits as u64),
+        Value::F64(bits) => Value::U64(bits.to_bits()),
+        Value::Unknown => Value::Unknown,
+    }
 }
 
 fn arranged_immediate_vector(imm: u64, arrangement: VectorArrangement, invert: bool) -> u128 {
@@ -2660,6 +2695,37 @@ mod tests {
         assert_eq!(
             result.final_registers.get(&Reg::V(1)),
             Some(&Value::Unknown)
+        );
+    }
+
+    #[test]
+    fn execute_block_extracts_scalar_lane_with_umov() {
+        let backing = TestBackingStore {
+            cells: BTreeMap::new(),
+        };
+        let lane_bytes = [
+            0x11u8, 0x22, 0x33, 0x44, 0xaa, 0xbb, 0xcc, 0xdd, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+
+        let result = execute_block(
+            &[Stmt::Intrinsic {
+                name: "umov".to_string(),
+                operands: vec![Expr::Reg(Reg::W(26)), Expr::Reg(Reg::H(0))],
+            }],
+            BTreeMap::from([(Reg::V(0), Value::U128(u128::from_le_bytes(lane_bytes)))]),
+            BTreeMap::new(),
+            &backing,
+            MissingMemoryPolicy::Stop,
+            4,
+        );
+
+        assert_eq!(
+            result.final_registers.get(&Reg::W(26)),
+            Some(&Value::U64(0x2211))
+        );
+        assert_eq!(
+            result.final_registers.get(&Reg::X(26)),
+            Some(&Value::U64(0x2211))
         );
     }
 

@@ -49,6 +49,14 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
             ft(&mut edges, next_pc);
             lift_vector_immediate_intrinsic(&disasm, operands, "mvni")
         }
+        Op::UMOV => {
+            ft(&mut edges, next_pc);
+            lift_lane_move(&disasm, operands, false)
+        }
+        Op::SMOV => {
+            ft(&mut edges, next_pc);
+            lift_lane_move(&disasm, operands, true)
+        }
         Op::ADRP => {
             let dst = reg_op(operands, 0);
             let addr = label_val(operands, 1);
@@ -861,8 +869,6 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
 
         // ── SIMD / NEON (as intrinsics with proper operand extraction) ─
         Op::DUP
-        | Op::UMOV
-        | Op::SMOV
         | Op::INS
         | Op::EXT
         | Op::ZIP1
@@ -1238,6 +1244,22 @@ fn lift_vector_immediate_intrinsic(disasm: &str, operands: &[Operand], name: &st
     }
 }
 
+fn lift_lane_move(disasm: &str, operands: &[Operand], signed: bool) -> Stmt {
+    let dst = reg_op(operands, 0);
+    let Some((src_reg, lsb, width)) = parse_lane_operand(disasm, 1) else {
+        let name = if signed { "smov" } else { "umov" };
+        return lift_intrinsic_all(operands, name);
+    };
+
+    let extracted = e_extract(Expr::Reg(src_reg), lsb, width);
+    let src = if signed {
+        e_sign_extend(extracted, width)
+    } else {
+        extracted
+    };
+    Stmt::Assign { dst, src }
+}
+
 fn intrinsic_name_with_arrangement(disasm: &str, name: &str) -> String {
     match first_vector_arrangement(disasm) {
         Some(arrangement) => format!("{name}.{arrangement}"),
@@ -1254,6 +1276,24 @@ fn first_vector_arrangement(disasm: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+fn parse_lane_operand(disasm: &str, operand_index: usize) -> Option<(Reg, u8, u8)> {
+    let (_, operands) = disasm.split_once(' ')?;
+    let operand = operands.split(',').nth(operand_index)?.trim();
+    let (base, lane_spec) = operand.split_once('.')?;
+    let reg = reg_from_string(base)?;
+    let (lane_name, lane_index) = lane_spec.split_once('[')?;
+    let lane_index = lane_index.strip_suffix(']')?.parse::<u8>().ok()?;
+    let lane_bits = match lane_name.chars().next()? {
+        'b' => 8,
+        'h' => 16,
+        's' => 32,
+        'd' => 64,
+        _ => return None,
+    };
+    let lsb = lane_index.checked_mul(lane_bits)?;
+    Some((reg, lsb, lane_bits))
 }
 
 fn lift_bitfield(op: Op, operands: &[Operand]) -> Stmt {
@@ -2046,6 +2086,21 @@ mod tests {
                     Expr::Reg(Reg::V(0)),
                     Expr::Reg(Reg::V(1)),
                 ],
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_umov_lane_extract() {
+        let pc = 0x73b69c;
+        let result = lift_word(0x0e02_3c1a, pc);
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Assign {
+                dst: Reg::W(26),
+                src: e_extract(Expr::Reg(Reg::V(0)), 0, 16),
             }
         );
         assert_eq!(result.edges, vec![pc + 4]);
