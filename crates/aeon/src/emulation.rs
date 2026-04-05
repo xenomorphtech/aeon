@@ -325,6 +325,17 @@ impl Executor {
                 .as_u64()
                 .map(|sp| Value::U64(sp.wrapping_add(*offset as u64)))
                 .unwrap_or(Value::Unknown),
+            Expr::Intrinsic { name, operands } if name == "movk" => {
+                let dst = operands
+                    .first()
+                    .map(|expr| self.eval_expr(expr))
+                    .and_then(|value| value.as_u64());
+                let src = operands
+                    .get(1)
+                    .map(|expr| self.eval_expr(expr))
+                    .and_then(|value| value.as_u64());
+                eval_movk_bits(dst, src)
+            }
             Expr::Intrinsic { .. }
             | Expr::MrsRead(_)
             | Expr::FAdd(_, _)
@@ -762,7 +773,22 @@ impl<'a> BlockExecutor<'a> {
                     _ => Value::Unknown,
                 }
             }
-            Expr::StackSlot { .. } => Value::Unknown,
+            Expr::StackSlot { offset, .. } => self
+                .read_reg(&Reg::SP)
+                .as_u64()
+                .map(|sp| Value::U64(sp.wrapping_add(*offset as u64)))
+                .unwrap_or(Value::Unknown),
+            Expr::Intrinsic { name, operands } if name == "movk" => {
+                let dst = operands
+                    .first()
+                    .map(|expr| self.eval_expr(expr))
+                    .and_then(|value| value.as_u64());
+                let src = operands
+                    .get(1)
+                    .map(|expr| self.eval_expr(expr))
+                    .and_then(|value| value.as_u64());
+                eval_movk_bits(dst, src)
+            }
             Expr::Intrinsic { .. }
             | Expr::MrsRead(_)
             | Expr::FAdd(_, _)
@@ -1074,6 +1100,25 @@ fn decode_loaded_value(bytes: &[u8]) -> Value {
         }
         _ => Value::Unknown,
     }
+}
+
+fn eval_movk_bits(dst: Option<u64>, src: Option<u64>) -> Value {
+    let (Some(dst), Some(src)) = (dst, src) else {
+        return Value::Unknown;
+    };
+
+    let shift = if src == 0 {
+        0
+    } else {
+        (src.trailing_zeros() / 16) * 16
+    };
+    if shift >= 64 {
+        return Value::Unknown;
+    }
+
+    let imm16 = (src >> shift) & 0xffff;
+    let mask = 0xffffu64 << shift;
+    Value::U64((dst & !mask) | ((imm16 << shift) & mask))
 }
 
 fn truncate_to_w(value: Value) -> Value {
@@ -1431,6 +1476,26 @@ mod tests {
     }
 
     #[test]
+    fn execute_snippet_evaluates_movk_intrinsic() {
+        let result = execute_snippet(
+            &[Stmt::Assign {
+                dst: Reg::X(0),
+                src: Expr::Intrinsic {
+                    name: "movk".to_string(),
+                    operands: vec![Expr::Imm(0x1122_3344_0000_7788), Expr::Imm(0x55aa_0000)],
+                },
+            }],
+            BTreeMap::new(),
+            8,
+        );
+
+        assert_eq!(
+            result.final_registers.get(&Reg::X(0)),
+            Some(&Value::U64(0x1122_3344_55aa_7788))
+        );
+    }
+
+    #[test]
     fn execute_block_reads_from_backing_store_and_resolves_next_pc() {
         let backing = TestBackingStore {
             cells: BTreeMap::from([((0x2000, 4), vec![0x78, 0x56, 0x34, 0x12])]),
@@ -1463,6 +1528,33 @@ mod tests {
             result.reads[0].source,
             Some(MemoryValueSource::BackingStore)
         );
+    }
+
+    #[test]
+    fn execute_block_evaluates_movk_intrinsic() {
+        let backing = TestBackingStore {
+            cells: BTreeMap::new(),
+        };
+
+        let result = execute_block(
+            &[Stmt::Assign {
+                dst: Reg::X(0),
+                src: Expr::Intrinsic {
+                    name: "movk".to_string(),
+                    operands: vec![Expr::Imm(0x8899_aabb_0000_ccdd), Expr::Imm(0x1234_0000)],
+                },
+            }],
+            BTreeMap::new(),
+            BTreeMap::new(),
+            &backing,
+            8,
+        );
+
+        assert_eq!(
+            result.final_registers.get(&Reg::X(0)),
+            Some(&Value::U64(0x8899_aabb_1234_ccdd))
+        );
+        assert_eq!(result.stop, BlockStop::Completed);
     }
 
     #[test]
