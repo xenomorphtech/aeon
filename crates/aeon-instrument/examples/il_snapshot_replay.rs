@@ -257,7 +257,7 @@ impl SnapshotBackingStore {
         }
     }
 
-    fn find_region(&self, addr: u64) -> Option<&ReplayRegion> {
+    fn find_region_exact(&self, addr: u64) -> Option<&ReplayRegion> {
         let idx = self.regions.partition_point(|region| region.base <= addr);
         let region = self.regions.get(idx.checked_sub(1)?)?;
         if addr < region.end {
@@ -267,12 +267,21 @@ impl SnapshotBackingStore {
         }
     }
 
+    fn find_region(&self, addr: u64) -> Option<(u64, &ReplayRegion)> {
+        for candidate in canonical_address_candidates(addr) {
+            if let Some(region) = self.find_region_exact(candidate) {
+                return Some((candidate, region));
+            }
+        }
+        None
+    }
+
     fn region_summary(&self, location: &MemoryLocation) -> Option<String> {
         let addr = match location {
             MemoryLocation::Absolute(addr) => *addr,
             MemoryLocation::StackSlot(_) => return None,
         };
-        let region = self.find_region(addr)?;
+        let (_, region) = self.find_region(addr)?;
         Some(format!(
             "{} [{}] dumped={}{}",
             region.file_path,
@@ -303,16 +312,16 @@ impl SnapshotBackingStore {
 
 impl BackingStore for SnapshotBackingStore {
     fn load(&self, addr: u64, size: u8) -> Option<Vec<u8>> {
-        let region = self.find_region(addr)?;
+        let (resolved_addr, region) = self.find_region(addr)?;
         if !region.dumped {
             return None;
         }
-        let end = addr.checked_add(size as u64)?;
+        let end = resolved_addr.checked_add(size as u64)?;
         if end > region.end {
             return None;
         }
         let bytes = self.region_bytes(region)?;
-        let start = (addr - region.base) as usize;
+        let start = (resolved_addr - region.base) as usize;
         let end = start + size as usize;
         if end > bytes.len() {
             return None;
@@ -839,6 +848,14 @@ fn overlaps(range: Option<(u64, u64)>, base: u64, end: u64) -> bool {
         Some((range_start, range_end)) => base < range_end && range_start < end,
         None => true,
     }
+}
+
+fn canonical_address_candidates(addr: u64) -> [u64; 3] {
+    [
+        addr,
+        addr & 0x00ff_ffff_ffff_ffff,
+        addr & 0x0000_ffff_ffff_ffff,
+    ]
 }
 
 fn lift_block(addr: u64, memory: &dyn MemoryProvider) -> Result<LiftedBlock, String> {

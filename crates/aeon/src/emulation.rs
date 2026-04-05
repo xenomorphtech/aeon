@@ -172,7 +172,15 @@ impl Executor {
             flags: None,
         };
 
+        let mut delayed_x_regs = Vec::new();
         for (reg, value) in initial_registers {
+            if matches!(reg, Reg::X(_)) {
+                delayed_x_regs.push((reg, value));
+            } else {
+                executor.write_reg(reg, value);
+            }
+        }
+        for (reg, value) in delayed_x_regs {
             executor.write_reg(reg, value);
         }
 
@@ -381,6 +389,10 @@ impl Executor {
 
     fn resolve_memory_location(&mut self, expr: &Expr) -> Option<MemoryLocation> {
         match expr {
+            Expr::Reg(Reg::W(index)) => self
+                .read_reg(&Reg::X(*index))
+                .as_u64()
+                .map(MemoryLocation::Absolute),
             Expr::StackSlot { offset, .. } => Some(MemoryLocation::StackSlot(*offset)),
             Expr::Add(lhs, rhs) => self.add_location(lhs, rhs, false),
             Expr::Sub(lhs, rhs) => self.add_location(lhs, rhs, true),
@@ -553,7 +565,15 @@ impl<'a> BlockExecutor<'a> {
             stop: BlockStop::Completed,
         };
 
+        let mut delayed_x_regs = Vec::new();
         for (reg, value) in initial_registers {
+            if matches!(reg, Reg::X(_)) {
+                delayed_x_regs.push((reg, value));
+            } else {
+                executor.write_reg(reg, value);
+            }
+        }
+        for (reg, value) in delayed_x_regs {
             executor.write_reg(reg, value);
         }
 
@@ -902,6 +922,10 @@ impl<'a> BlockExecutor<'a> {
 
     fn resolve_memory_location(&mut self, expr: &Expr) -> Option<MemoryLocation> {
         match expr {
+            Expr::Reg(Reg::W(index)) => self
+                .read_reg(&Reg::X(*index))
+                .as_u64()
+                .map(MemoryLocation::Absolute),
             Expr::StackSlot { offset, .. } => self
                 .read_reg(&Reg::SP)
                 .as_u64()
@@ -1371,6 +1395,34 @@ mod tests {
     }
 
     #[test]
+    fn execute_snippet_resolves_w_register_addresses_from_x_aliases() {
+        let full_addr = 0x1_0000_2000u64;
+        let result = execute_snippet(
+            &[
+                Stmt::Store {
+                    addr: Expr::Reg(Reg::W(0)),
+                    value: Expr::Reg(Reg::X(1)),
+                    size: 4,
+                },
+                Stmt::Assign {
+                    dst: Reg::X(2),
+                    src: e_load(Expr::Reg(Reg::X(0)), 4),
+                },
+            ],
+            BTreeMap::from([
+                (Reg::X(0), Value::U64(full_addr)),
+                (Reg::X(1), Value::U64(0x1234_5678)),
+            ]),
+            8,
+        );
+
+        assert_eq!(
+            result.final_registers.get(&Reg::X(2)),
+            Some(&Value::U64(0x1234_5678))
+        );
+    }
+
+    #[test]
     fn executes_stack_slot_memory_and_stops_at_budget() {
         let result = execute_snippet(
             &[
@@ -1528,6 +1580,31 @@ mod tests {
             result.reads[0].source,
             Some(MemoryValueSource::BackingStore)
         );
+    }
+
+    #[test]
+    fn execute_block_resolves_w_register_addresses_from_x_aliases() {
+        let full_addr = 0x1_0000_3000u64;
+        let backing = TestBackingStore {
+            cells: BTreeMap::from([((full_addr, 4), vec![0x78, 0x56, 0x34, 0x12])]),
+        };
+
+        let result = execute_block(
+            &[Stmt::Assign {
+                dst: Reg::X(1),
+                src: e_load(Expr::Reg(Reg::W(0)), 4),
+            }],
+            BTreeMap::from([(Reg::X(0), Value::U64(full_addr))]),
+            BTreeMap::new(),
+            &backing,
+            8,
+        );
+
+        assert_eq!(
+            result.final_registers.get(&Reg::X(1)),
+            Some(&Value::U64(0x1234_5678))
+        );
+        assert_eq!(result.stop, BlockStop::Completed);
     }
 
     #[test]
