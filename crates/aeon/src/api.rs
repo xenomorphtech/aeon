@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{HashMap, VecDeque};
 
 use serde_json::{json, Value};
 
@@ -14,12 +14,18 @@ use crate::il::{Expr, Stmt};
 use crate::lifter;
 use crate::object_layout::ConstructorObjectLayout;
 use crate::pointer_analysis;
+use crate::xref_graph;
+use crate::xref_scan;
+
+const DEFAULT_FUNCTION_CACHE_MAX_BYTES: usize = 4 * 1024 * 1024 * 1024;
+const DEFAULT_FUNCTION_CACHE_MAX_ENTRIES: usize = 256;
 
 pub struct AeonSession {
     path: String,
     binary: LoadedBinary,
     analysis_state: RefCell<AeonEngine>,
-    function_cache: RefCell<HashMap<u64, FunctionArtifacts>>,
+    function_cache: RefCell<FunctionArtifactCache>,
+    xref_graph_cache: RefCell<Option<xref_graph::XrefGraph>>,
 }
 
 impl AeonSession {
@@ -27,9 +33,10 @@ impl AeonSession {
         let binary = elf::load_elf(path)?;
         Ok(Self {
             path: path.to_string(),
-            analysis_state: RefCell::new(AeonEngine::with_binary(binary.clone())),
+            analysis_state: RefCell::new(AeonEngine::new()),
             binary,
-            function_cache: RefCell::new(HashMap::new()),
+            function_cache: RefCell::new(FunctionArtifactCache::new_from_env()),
+            xref_graph_cache: RefCell::new(None),
         })
     }
 
@@ -128,6 +135,7 @@ impl AeonSession {
 
     pub fn summary(&self) -> Value {
         let engine = self.analysis_state.borrow();
+        let function_cache = self.function_cache.borrow();
         json!({
             "status": "loaded",
             "path": self.path,
@@ -135,6 +143,8 @@ impl AeonSession {
             "text_section_size": format!("0x{:x}", self.binary.text_section_size),
             "total_functions": self.binary.functions.len(),
             "named_functions": self.binary.functions.iter().filter(|f| f.name.is_some()).count(),
+            "function_cache_max_bytes": function_cache.max_bytes,
+            "function_cache_max_entries": function_cache.max_entries,
             "blackboard": serde_json::to_value(engine.blackboard_summary()).unwrap(),
         })
     }
@@ -369,8 +379,77 @@ impl AeonSession {
         serde_json::to_value(pointer_analysis::scan_pointers(&self.binary)).unwrap()
     }
 
-    pub fn scan_vtables(&self) -> Value {
-        serde_json::to_value(pointer_analysis::scan_vtables(&self.binary)).unwrap()
+    pub fn scan_vtables(&self, include_functions: bool) -> Value {
+        serde_json::to_value(pointer_analysis::scan_vtables_for_output(
+            &self.binary,
+            include_functions,
+        ))
+        .unwrap()
+    }
+
+    pub fn scan_xrefs_pass(&self, threads: Option<usize>) -> Result<Value, String> {
+        let report = xref_scan::scan_all_xrefs(&self.binary, threads)?;
+        Ok(serde_json::to_value(report).unwrap())
+    }
+
+    pub fn xref_graph_summary(
+        &self,
+        threads: Option<usize>,
+    ) -> Result<xref_graph::XrefGraphSummaryReport, String> {
+        self.with_xref_graph(threads, |graph| Ok(graph.summary()))
+    }
+
+    pub fn xref_graph_build_stats(
+        &self,
+        threads: Option<usize>,
+    ) -> Result<xref_graph::XrefGraphBuildStats, String> {
+        xref_graph::XrefGraph::estimate(&self.binary, threads)
+    }
+
+    pub fn get_xref_graph_summary(&self, threads: Option<usize>) -> Result<Value, String> {
+        let report = self.xref_graph_summary(threads)?;
+        Ok(serde_json::to_value(report).unwrap())
+    }
+
+    pub fn find_xref_path_report(
+        &self,
+        start_addr: u64,
+        goal_addr: u64,
+        max_depth: usize,
+        include_all_paths: bool,
+        max_paths: usize,
+        threads: Option<usize>,
+    ) -> Result<xref_graph::XrefPathSearchReport, String> {
+        self.with_xref_graph(threads, |graph| {
+            graph.find_paths(
+                &self.binary,
+                start_addr,
+                goal_addr,
+                max_depth,
+                include_all_paths,
+                max_paths,
+            )
+        })
+    }
+
+    pub fn find_xref_paths(
+        &self,
+        start_addr: u64,
+        goal_addr: u64,
+        max_depth: usize,
+        include_all_paths: bool,
+        max_paths: usize,
+        threads: Option<usize>,
+    ) -> Result<Value, String> {
+        let report = self.find_xref_path_report(
+            start_addr,
+            goal_addr,
+            max_depth,
+            include_all_paths,
+            max_paths,
+            threads,
+        )?;
+        Ok(serde_json::to_value(report).unwrap())
     }
 
     pub fn scan_function_pointers(
@@ -565,16 +644,24 @@ impl AeonSession {
             .function_containing(addr)
             .ok_or_else(|| format!("No function containing 0x{:x}", addr))?;
         let mut cache = self.function_cache.borrow_mut();
+        cache.with_function(&self.binary, func, |artifacts| f(func, artifacts))
+    }
 
-        let artifacts = match cache.entry(func.addr) {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => {
-                let decoded = decode_function(&self.binary, func)?;
-                entry.insert(FunctionArtifacts::new(decoded))
-            }
-        };
+    fn with_xref_graph<T>(
+        &self,
+        threads: Option<usize>,
+        f: impl FnOnce(&xref_graph::XrefGraph) -> Result<T, String>,
+    ) -> Result<T, String> {
+        if self.xref_graph_cache.borrow().is_none() {
+            let graph = xref_graph::XrefGraph::build(&self.binary, threads)?;
+            *self.xref_graph_cache.borrow_mut() = Some(graph);
+        }
 
-        f(func, artifacts)
+        let cache = self.xref_graph_cache.borrow();
+        let graph = cache
+            .as_ref()
+            .expect("xref graph cache should be populated");
+        f(graph)
     }
 
     fn find_function(&self, addr: u64) -> Result<&FunctionInfo, String> {
@@ -968,6 +1055,124 @@ fn annotate_instruction_address(
 fn parse_hex_value(value: &str) -> Option<u64> {
     let trimmed = value.trim_start_matches("0x").trim_start_matches("0X");
     u64::from_str_radix(trimmed, 16).ok()
+}
+
+struct CachedFunctionArtifacts {
+    artifacts: FunctionArtifacts,
+    estimated_bytes: usize,
+}
+
+struct FunctionArtifactCache {
+    entries: HashMap<u64, CachedFunctionArtifacts>,
+    lru: VecDeque<u64>,
+    current_bytes: usize,
+    max_bytes: usize,
+    max_entries: usize,
+}
+
+impl FunctionArtifactCache {
+    fn new_from_env() -> Self {
+        Self {
+            entries: HashMap::new(),
+            lru: VecDeque::new(),
+            current_bytes: 0,
+            max_bytes: parse_cache_limit_bytes_from_env()
+                .unwrap_or(DEFAULT_FUNCTION_CACHE_MAX_BYTES),
+            max_entries: DEFAULT_FUNCTION_CACHE_MAX_ENTRIES,
+        }
+    }
+
+    fn with_function<T>(
+        &mut self,
+        binary: &LoadedBinary,
+        func: &FunctionInfo,
+        f: impl FnOnce(&mut FunctionArtifacts) -> Result<T, String>,
+    ) -> Result<T, String> {
+        if !self.entries.contains_key(&func.addr) {
+            let decoded = decode_function(binary, func)?;
+            self.insert(func.addr, FunctionArtifacts::new(decoded));
+        }
+
+        self.touch(func.addr);
+
+        let (result, old_size, new_size) = {
+            let entry = self.entries.get_mut(&func.addr).unwrap();
+            let old_size = entry.estimated_bytes;
+            let result = f(&mut entry.artifacts);
+            let new_size = entry.artifacts.estimated_bytes();
+            entry.estimated_bytes = new_size;
+            (result, old_size, new_size)
+        };
+
+        self.current_bytes = self.current_bytes.saturating_sub(old_size);
+        self.current_bytes = self.current_bytes.saturating_add(new_size);
+        self.evict_if_needed(Some(func.addr));
+        result
+    }
+
+    fn insert(&mut self, addr: u64, artifacts: FunctionArtifacts) {
+        let estimated_bytes = artifacts.estimated_bytes();
+        self.current_bytes = self.current_bytes.saturating_add(estimated_bytes);
+        self.entries.insert(
+            addr,
+            CachedFunctionArtifacts {
+                artifacts,
+                estimated_bytes,
+            },
+        );
+        self.touch(addr);
+        self.evict_if_needed(Some(addr));
+    }
+
+    fn touch(&mut self, addr: u64) {
+        if let Some(position) = self.lru.iter().position(|existing| *existing == addr) {
+            self.lru.remove(position);
+        }
+        self.lru.push_back(addr);
+    }
+
+    fn evict_if_needed(&mut self, protected: Option<u64>) {
+        while self.entries.len() > self.max_entries || self.current_bytes > self.max_bytes {
+            let Some(candidate) = self.lru.pop_front() else {
+                break;
+            };
+
+            if Some(candidate) == protected {
+                self.lru.push_back(candidate);
+                if self.entries.len() == 1 {
+                    break;
+                }
+                continue;
+            }
+
+            if let Some(entry) = self.entries.remove(&candidate) {
+                self.current_bytes = self.current_bytes.saturating_sub(entry.estimated_bytes);
+            }
+        }
+    }
+}
+
+fn parse_cache_limit_bytes_from_env() -> Option<usize> {
+    if let Some(value) = std::env::var_os("AEON_FUNCTION_CACHE_BYTES") {
+        return value.to_str().and_then(parse_nonzero_usize);
+    }
+
+    if let Some(value) = std::env::var_os("AEON_FUNCTION_CACHE_GB") {
+        return value
+            .to_str()
+            .and_then(parse_nonzero_usize)
+            .map(|gigabytes| gigabytes.saturating_mul(1024 * 1024 * 1024));
+    }
+
+    None
+}
+
+fn parse_nonzero_usize(value: &str) -> Option<usize> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("off") || trimmed == "0" {
+        return None;
+    }
+    trimmed.parse::<usize>().ok()
 }
 
 #[cfg(test)]

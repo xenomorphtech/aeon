@@ -27,10 +27,33 @@ enum Command {
     },
     VTables {
         binary_path: String,
+        include_functions: bool,
+        pretty: bool,
     },
     FuncPointers {
         binary_path: String,
         addr: u64,
+    },
+    XrefGraph {
+        binary_path: String,
+        threads: Option<usize>,
+    },
+    XrefGraphStats {
+        binary_path: String,
+        threads: Option<usize>,
+    },
+    XrefsPass {
+        binary_path: String,
+        threads: Option<usize>,
+    },
+    XrefPath {
+        binary_path: String,
+        start_addr: u64,
+        goal_addr: u64,
+        max_depth: usize,
+        include_all_paths: bool,
+        max_paths: usize,
+        threads: Option<usize>,
     },
     CallPath {
         binary_path: String,
@@ -44,6 +67,14 @@ enum Command {
 }
 
 fn main() {
+    match aeon::resource_limits::install_process_memory_limit() {
+        Ok(Some(limit_bytes)) => {
+            eprintln!("Applied process memory cap: {} bytes", limit_bytes);
+        }
+        Ok(None) => {}
+        Err(error) => eprintln!("Warning: failed to apply process memory cap: {}", error),
+    }
+
     let command = match parse_args() {
         Ok(command) => command,
         Err(message) => {
@@ -65,8 +96,12 @@ fn main() {
         | Command::Ssa { binary_path, .. }
         | Command::StackFrame { binary_path, .. }
         | Command::Pointers { binary_path }
-        | Command::VTables { binary_path }
+        | Command::VTables { binary_path, .. }
         | Command::FuncPointers { binary_path, .. }
+        | Command::XrefGraph { binary_path, .. }
+        | Command::XrefGraphStats { binary_path, .. }
+        | Command::XrefsPass { binary_path, .. }
+        | Command::XrefPath { binary_path, .. }
         | Command::CallPath { binary_path, .. } => binary_path,
         Command::Help => unreachable!(),
     };
@@ -134,14 +169,95 @@ fn main() {
             eprintln!("Scanning mapped data pointers...");
             session.scan_pointers()
         }
-        Command::VTables { .. } => {
+        Command::VTables {
+            include_functions,
+            pretty,
+            ..
+        } => {
             eprintln!("Detecting vtables...");
-            session.scan_vtables()
+            let report = aeon::pointer_analysis::scan_vtables_for_output(
+                session.binary(),
+                include_functions,
+            );
+            if pretty {
+                serde_json::to_writer_pretty(std::io::stdout(), &report).unwrap();
+            } else {
+                serde_json::to_writer(std::io::stdout(), &report).unwrap();
+            }
+            println!();
+            return;
         }
         Command::FuncPointers { addr, .. } => {
             eprintln!("Enumerating pointer references in 0x{:x}...", addr);
             match session.scan_function_pointers(Some(addr), 0, 1) {
                 Ok(report) => report,
+                Err(error) => {
+                    eprintln!("{}", error);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Command::XrefGraph { threads, .. } => {
+            eprintln!("Building reusable xref graph...");
+            match session.xref_graph_summary(threads) {
+                Ok(report) => {
+                    print_xref_graph_summary(&report);
+                    return;
+                }
+                Err(error) => {
+                    eprintln!("{}", error);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Command::XrefGraphStats { threads, .. } => {
+            eprintln!("Counting reusable xref graph edges...");
+            match session.xref_graph_build_stats(threads) {
+                Ok(report) => {
+                    print_xref_graph_build_stats(&report);
+                    return;
+                }
+                Err(error) => {
+                    eprintln!("{}", error);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Command::XrefsPass { threads, .. } => {
+            eprintln!("Scanning xrefs across all functions...");
+            match session.scan_xrefs_pass(threads) {
+                Ok(report) => report,
+                Err(error) => {
+                    eprintln!("{}", error);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Command::XrefPath {
+            start_addr,
+            goal_addr,
+            max_depth,
+            include_all_paths,
+            max_paths,
+            threads,
+            ..
+        } => {
+            eprintln!(
+                "Searching xref paths from 0x{:x} to 0x{:x}...",
+                start_addr, goal_addr
+            );
+            match session.find_xref_path_report(
+                start_addr,
+                goal_addr,
+                max_depth,
+                include_all_paths,
+                max_paths,
+                threads,
+            ) {
+                Ok(report) => {
+                    print_xref_path_report(&report);
+                    return;
+                }
                 Err(error) => {
                     eprintln!("{}", error);
                     std::process::exit(1);
@@ -178,6 +294,165 @@ fn main() {
     };
 
     println!("{}", serde_json::to_string_pretty(&output).unwrap());
+}
+
+fn print_xref_graph_summary(report: &aeon::xref_graph::XrefGraphSummaryReport) {
+    println!("Xref Graph");
+    println!(
+        "nodes: total={} functions={} vtables={} active={}",
+        report.total_nodes, report.function_nodes, report.vtable_nodes, report.active_nodes
+    );
+    println!(
+        "edges: total={} direct_calls={} tail_calls={} indirect_vtable_exact={} indirect_vtable_referenced={} indirect_vtable_slot_fallback={} vtable_slots={}",
+        report.total_edges,
+        report.direct_call_edges,
+        report.tail_call_edges,
+        report.indirect_vtable_exact_edges,
+        report.indirect_vtable_referenced_edges,
+        report.indirect_vtable_slot_fallback_edges,
+        report.vtable_slot_edges
+    );
+    println!(
+        "unresolved indirect sites: {}",
+        report.unresolved_indirect_sites
+    );
+    println!("truncated functions: {}", report.truncated_functions);
+    println!("threads used: {}", report.threads_used);
+    println!(
+        "build time: {:.3}s",
+        report.build_elapsed_ms as f64 / 1000.0
+    );
+}
+
+fn print_xref_graph_build_stats(report: &aeon::xref_graph::XrefGraphBuildStats) {
+    println!("Xref Graph Stats");
+    println!(
+        "nodes: functions={} vtables={}",
+        report.total_function_nodes, report.total_vtable_nodes
+    );
+    println!(
+        "edges: function_edges={} vtable_slot_edges={} total={}",
+        report.total_function_edges,
+        report.total_vtable_slot_edges,
+        report.total_function_edges + report.total_vtable_slot_edges
+    );
+    println!(
+        "edge kinds: direct_calls={} tail_calls={} indirect_vtable_exact={} indirect_vtable_referenced={} indirect_vtable_slot_fallback={}",
+        report.direct_call_edges,
+        report.tail_call_edges,
+        report.indirect_vtable_exact_edges,
+        report.indirect_vtable_referenced_edges,
+        report.indirect_vtable_slot_fallback_edges
+    );
+    println!("functions with edges: {}", report.functions_with_edges);
+    println!(
+        "max function edges: {} at 0x{:x}",
+        report.max_edges_in_function, report.max_edge_function_addr
+    );
+    println!(
+        "unresolved indirect sites: {}",
+        report.unresolved_indirect_sites
+    );
+    println!("truncated functions: {}", report.truncated_functions);
+    println!("threads used: {}", report.threads_used);
+    println!("elapsed: {:.3}s", report.elapsed_ms as f64 / 1000.0);
+}
+
+fn print_xref_path_report(report: &aeon::xref_graph::XrefPathSearchReport) {
+    println!("Xref Path");
+    println!("start: {}", format_xref_node(&report.start));
+    println!("goal: {}", format_xref_node(&report.goal));
+    println!("max depth: {}", report.max_depth);
+    println!(
+        "graph: nodes={} edges={} direct_edges={} vtable_edges={} unresolved_indirect_sites={}",
+        report.graph_node_count,
+        report.graph_edge_count,
+        report.direct_edge_count,
+        report.vtable_edge_count,
+        report.unresolved_indirect_sites
+    );
+
+    match &report.shortest_path {
+        Some(path) => print_xref_path("shortest path", path),
+        None => println!("shortest path: none"),
+    }
+
+    if let Some(paths) = &report.all_paths {
+        println!("all paths: {}", paths.len());
+        for (index, path) in paths.iter().enumerate() {
+            print_xref_path(&format!("path {}", index + 1), path);
+        }
+    }
+}
+
+fn print_xref_path(label: &str, path: &aeon::xref_graph::XrefPath) {
+    println!("{}: {} hops", label, path.edges.len());
+    if let Some(first) = path.nodes.first() {
+        println!("  0. {}", format_xref_node(first));
+    }
+
+    for (index, edge) in path.edges.iter().enumerate() {
+        println!("     --{}-->", format_xref_edge(edge));
+        println!(
+            "  {}. {}",
+            index + 1,
+            format_xref_node(&path.nodes[index + 1])
+        );
+    }
+}
+
+fn format_xref_node(node: &aeon::xref_graph::XrefNodeView) -> String {
+    match node.kind {
+        aeon::xref_graph::XrefNodeKind::Function => {
+            if let Some(name) = &node.name {
+                format!("function 0x{:x} ({})", node.addr, name)
+            } else {
+                format!("function 0x{:x}", node.addr)
+            }
+        }
+        aeon::xref_graph::XrefNodeKind::VTable => {
+            let mut suffix = Vec::new();
+            if let Some(section) = &node.section {
+                suffix.push(section.clone());
+            }
+            if let Some(group_id) = node.group_id {
+                suffix.push(format!("group {}", group_id));
+            }
+            if let Some(function_count) = node.function_count {
+                suffix.push(format!("{} slots", function_count));
+            }
+
+            if suffix.is_empty() {
+                format!("vtable 0x{:x}", node.addr)
+            } else {
+                format!("vtable 0x{:x} [{}]", node.addr, suffix.join(", "))
+            }
+        }
+    }
+}
+
+fn format_xref_edge(edge: &aeon::xref_graph::XrefEdgeView) -> String {
+    let mut parts = vec![match edge.kind {
+        aeon::xref_graph::XrefEdgeKind::DirectCall => "direct_call".to_string(),
+        aeon::xref_graph::XrefEdgeKind::TailCall => "tail_call".to_string(),
+        aeon::xref_graph::XrefEdgeKind::IndirectVtableExact => "indirect_vtable_exact".to_string(),
+        aeon::xref_graph::XrefEdgeKind::IndirectVtableReferenced => {
+            "indirect_vtable_referenced".to_string()
+        }
+        aeon::xref_graph::XrefEdgeKind::IndirectVtableSlotFallback => {
+            "indirect_vtable_slot_fallback".to_string()
+        }
+        aeon::xref_graph::XrefEdgeKind::VtableSlot => "vtable_slot".to_string(),
+    }];
+
+    if let Some(instruction_addr) = edge.instruction_addr {
+        parts.push(format!("@ 0x{:x}", instruction_addr));
+    }
+    if let Some(slot_offset) = edge.slot_offset {
+        parts.push(format!("slot +0x{:x}", slot_offset));
+    }
+
+    parts.join(", ")
 }
 
 fn parse_args() -> Result<Command, String> {
@@ -261,10 +536,21 @@ fn parse_args() -> Result<Command, String> {
         }
         "vtables" => {
             let binary_path = args.next().ok_or_else(usage)?;
-            if args.next().is_some() {
-                return Err(usage());
+            let mut include_functions = false;
+            let mut pretty = false;
+
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--full" => include_functions = true,
+                    "--pretty" => pretty = true,
+                    _ => return Err(usage()),
+                }
             }
-            Ok(Command::VTables { binary_path })
+            Ok(Command::VTables {
+                binary_path,
+                include_functions,
+                pretty,
+            })
         }
         "func-pointers" => {
             let binary_path = args.next().ok_or_else(usage)?;
@@ -274,6 +560,124 @@ fn parse_args() -> Result<Command, String> {
             }
             let addr = parse_hex_addr(&addr_str)?;
             Ok(Command::FuncPointers { binary_path, addr })
+        }
+        "xref-graph" => {
+            let binary_path = args.next().ok_or_else(usage)?;
+            let mut threads = None;
+
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--threads" => {
+                        let value = args.next().ok_or_else(usage)?;
+                        let parsed = value
+                            .parse()
+                            .map_err(|_| format!("invalid thread count: {}", value))?;
+                        threads = Some(parsed);
+                    }
+                    _ => return Err(usage()),
+                }
+            }
+
+            Ok(Command::XrefGraph {
+                binary_path,
+                threads,
+            })
+        }
+        "xref-graph-stats" => {
+            let binary_path = args.next().ok_or_else(usage)?;
+            let mut threads = None;
+
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--threads" => {
+                        let value = args.next().ok_or_else(usage)?;
+                        let parsed = value
+                            .parse()
+                            .map_err(|_| format!("invalid thread count: {}", value))?;
+                        threads = Some(parsed);
+                    }
+                    _ => return Err(usage()),
+                }
+            }
+
+            Ok(Command::XrefGraphStats {
+                binary_path,
+                threads,
+            })
+        }
+        "xrefs-pass" => {
+            let binary_path = args.next().ok_or_else(usage)?;
+            let mut threads = None;
+
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--threads" => {
+                        let value = args.next().ok_or_else(usage)?;
+                        let parsed = value
+                            .parse()
+                            .map_err(|_| format!("invalid thread count: {}", value))?;
+                        threads = Some(parsed);
+                    }
+                    _ => return Err(usage()),
+                }
+            }
+
+            Ok(Command::XrefsPass {
+                binary_path,
+                threads,
+            })
+        }
+        "xref-path" => {
+            let binary_path = args.next().ok_or_else(usage)?;
+            let start_addr = parse_hex_addr(&args.next().ok_or_else(usage)?)?;
+            let goal_addr = parse_hex_addr(&args.next().ok_or_else(usage)?)?;
+            let mut max_depth = 6usize;
+            let mut include_all_paths = false;
+            let mut max_paths = 32usize;
+            let mut threads = None;
+            let mut positional_depth_consumed = false;
+
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--all" => include_all_paths = true,
+                    "--max-depth" => {
+                        let value = args.next().ok_or_else(usage)?;
+                        max_depth = value
+                            .parse()
+                            .map_err(|_| format!("invalid max depth: {}", value))?;
+                    }
+                    "--max-paths" => {
+                        let value = args.next().ok_or_else(usage)?;
+                        max_paths = value
+                            .parse()
+                            .map_err(|_| format!("invalid max path count: {}", value))?;
+                    }
+                    "--threads" => {
+                        let value = args.next().ok_or_else(usage)?;
+                        let parsed = value
+                            .parse()
+                            .map_err(|_| format!("invalid thread count: {}", value))?;
+                        threads = Some(parsed);
+                    }
+                    value if !value.starts_with("--") && !positional_depth_consumed => {
+                        max_depth = value
+                            .parse()
+                            .map_err(|_| format!("invalid max depth: {}", value))?;
+                        positional_depth_consumed = true;
+                    }
+                    _ => return Err(usage()),
+                }
+            }
+
+            Ok(Command::XrefPath {
+                binary_path,
+                start_addr,
+                goal_addr,
+                max_depth,
+                include_all_paths,
+                max_paths,
+                threads,
+            })
         }
         "call-path" => {
             let binary_path = args.next().ok_or_else(usage)?;
@@ -337,8 +741,12 @@ fn usage() -> String {
         "  aeon ssa <binary> <addr> [--raw|--optimized]",
         "  aeon stack-frame <binary> <addr>",
         "  aeon pointers <binary>",
-        "  aeon vtables <binary>",
+        "  aeon vtables <binary> [--full] [--pretty]",
         "  aeon func-pointers <binary> <addr>",
+        "  aeon xref-graph <binary> [--threads N]",
+        "  aeon xref-graph-stats <binary> [--threads N]",
+        "  aeon xrefs-pass <binary> [--threads N]",
+        "  aeon xref-path <binary> <start_addr> <goal_addr> [max_depth] [--all] [--max-paths N] [--threads N]",
         "  aeon call-path <binary> <start_addr> <goal_addr> [max_depth] [--all] [--max-paths N]",
     ]
     .join("\n")

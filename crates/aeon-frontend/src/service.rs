@@ -38,7 +38,7 @@ impl AeonFrontend {
             "get_function_cfg" => self.tool_get_function_cfg(args),
             "get_xrefs" => self.tool_get_xrefs(args),
             "scan_pointers" => self.tool_scan_pointers(),
-            "scan_vtables" => self.tool_scan_vtables(),
+            "scan_vtables" => self.tool_scan_vtables(args),
             "get_function_pointers" => self.tool_get_function_pointers(args),
             "find_call_paths" => self.tool_find_call_paths(args),
             "get_bytes" => self.tool_get_bytes(args),
@@ -183,9 +183,10 @@ impl AeonFrontend {
         Ok(session.scan_pointers())
     }
 
-    fn tool_scan_vtables(&self) -> Result<Value, String> {
+    fn tool_scan_vtables(&self, args: &Value) -> Result<Value, String> {
         let session = self.require_session()?;
-        Ok(session.scan_vtables())
+        let include_functions = parse_bool_arg(args, "include_functions", false)?;
+        Ok(session.scan_vtables(include_functions))
     }
 
     fn tool_get_function_pointers(&self, args: &Value) -> Result<Value, String> {
@@ -406,7 +407,9 @@ pub fn tools_list() -> Value {
 
             tool_schema("scan_vtables",
                 "Detect candidate C++ vtables in .rodata/.data-style sections by finding arrays of function pointers and grouping related tables.",
-                json!({"type": "object", "properties": {}})),
+                json!({"type": "object", "properties": {
+                    "include_functions": {"type": "boolean", "description": "Include per-slot function entries for each detected vtable", "default": false}
+                }})),
 
             tool_schema("get_function_pointers",
                 "Enumerate pointer-valued operands and resolved code/data references for one function or a paginated slice of functions.",

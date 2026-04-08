@@ -11,7 +11,6 @@ use crate::lifter;
 
 const POINTER_SIZE: u64 = 8;
 const MIN_VTABLE_FUNCTIONS: usize = 3;
-const MAX_PLAUSIBLE_OFFSET_TO_TOP: i64 = 1 << 20;
 const MAX_SLOT_FALLBACK_TARGETS: usize = 8;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -65,10 +64,16 @@ pub struct TargetInfo {
     #[serde(serialize_with = "serialize_hex")]
     pub addr: u64,
     pub kind: AddressKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub section: Option<String>,
-    #[serde(serialize_with = "serialize_hex_opt")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_hex_opt"
+    )]
     pub function_addr: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub string_preview: Option<String>,
 }
 
@@ -140,6 +145,70 @@ pub struct VTableScanReport {
     pub total_groups: usize,
     pub groups: Vec<VTableGroup>,
     pub vtables: Vec<VTableInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SerializedVTableEntry {
+    #[serde(serialize_with = "serialize_hex")]
+    pub entry_addr: u64,
+    #[serde(serialize_with = "serialize_hex")]
+    pub slot_offset: u64,
+    #[serde(serialize_with = "serialize_hex")]
+    pub target_addr: u64,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_hex_opt"
+    )]
+    pub function_addr: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SerializedVTableInfo {
+    pub group_id: usize,
+    pub section: String,
+    #[serde(serialize_with = "serialize_hex")]
+    pub start_addr: u64,
+    #[serde(serialize_with = "serialize_hex")]
+    pub address_point: u64,
+    pub size_bytes: u64,
+    pub function_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset_to_top: Option<i64>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_hex_opt"
+    )]
+    pub typeinfo_addr: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub functions: Option<Vec<SerializedVTableEntry>>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SerializedVTableGroup {
+    pub group_id: usize,
+    pub section: String,
+    #[serde(serialize_with = "serialize_hex")]
+    pub start_addr: u64,
+    #[serde(serialize_with = "serialize_hex")]
+    pub end_addr: u64,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_hex_opt"
+    )]
+    pub typeinfo_addr: Option<u64>,
+    #[serde(serialize_with = "serialize_hex_vec")]
+    pub vtables: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SerializedVTableScanReport {
+    pub scanned_sections: Vec<String>,
+    pub total_vtables: usize,
+    pub total_groups: usize,
+    pub groups: Vec<SerializedVTableGroup>,
+    pub vtables: Vec<SerializedVTableInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -222,15 +291,19 @@ pub struct CallPathSearchReport {
 #[derive(Debug, Clone)]
 struct RawSectionPointer {
     addr: u64,
-    raw: u64,
     target: TargetInfo,
 }
 
-#[derive(Debug, Clone)]
-struct VTableHeader {
-    start_addr: u64,
-    offset_to_top: i64,
-    typeinfo_addr: Option<u64>,
+#[derive(Debug, Clone, Copy)]
+struct SectionWord {
+    addr: u64,
+    raw: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct VTableCandidateEntry {
+    entry_addr: u64,
+    target_addr: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -367,54 +440,7 @@ pub fn scan_vtables(binary: &LoadedBinary) -> VTableScanReport {
 
     for section in vtable_sections(binary) {
         scanned_sections.push(section.name.clone());
-        let entries = read_section_pointers(binary, section);
-        let mut index = 0usize;
-        while index < entries.len() {
-            let run_len = executable_run_len(&entries, index);
-            if run_len < MIN_VTABLE_FUNCTIONS {
-                index += 1;
-                continue;
-            }
-
-            let header = plausible_vtable_header(&entries, index);
-            let previous_is_exec = index > 0 && entries[index - 1].target.kind.is_executable();
-            if header.is_none() && previous_is_exec {
-                index += 1;
-                continue;
-            }
-
-            let start_index = index;
-            let end_index = index + run_len;
-            let functions: Vec<VTableEntry> = entries[start_index..end_index]
-                .iter()
-                .enumerate()
-                .map(|(position, entry)| VTableEntry {
-                    entry_addr: entry.addr,
-                    slot_offset: position as u64 * POINTER_SIZE,
-                    target: entry.target.clone(),
-                })
-                .collect();
-
-            let start_addr = header
-                .as_ref()
-                .map(|header| header.start_addr)
-                .unwrap_or(entries[start_index].addr);
-            let address_point = entries[start_index].addr;
-            let end_addr = entries[end_index - 1].addr + POINTER_SIZE;
-            vtables.push(VTableInfo {
-                group_id: 0,
-                section: section.name.clone(),
-                start_addr,
-                address_point,
-                size_bytes: end_addr - start_addr,
-                function_count: functions.len(),
-                offset_to_top: header.as_ref().map(|header| header.offset_to_top),
-                typeinfo_addr: header.and_then(|header| header.typeinfo_addr),
-                functions,
-            });
-
-            index = end_index;
-        }
+        scan_vtables_in_section(binary, section, &mut vtables);
     }
 
     vtables.sort_by(|lhs, rhs| {
@@ -431,6 +457,67 @@ pub fn scan_vtables(binary: &LoadedBinary) -> VTableScanReport {
         total_groups: groups.len(),
         groups,
         vtables,
+    }
+}
+
+pub fn scan_vtables_for_output(
+    binary: &LoadedBinary,
+    include_functions: bool,
+) -> SerializedVTableScanReport {
+    serialize_vtable_report(&scan_vtables(binary), include_functions)
+}
+
+pub fn serialize_vtable_report(
+    report: &VTableScanReport,
+    include_functions: bool,
+) -> SerializedVTableScanReport {
+    SerializedVTableScanReport {
+        scanned_sections: report.scanned_sections.clone(),
+        total_vtables: report.total_vtables,
+        total_groups: report.total_groups,
+        groups: report.groups.iter().map(serialize_vtable_group).collect(),
+        vtables: report
+            .vtables
+            .iter()
+            .map(|vtable| serialize_vtable_info(vtable, include_functions))
+            .collect(),
+    }
+}
+
+fn serialize_vtable_group(group: &VTableGroup) -> SerializedVTableGroup {
+    SerializedVTableGroup {
+        group_id: group.group_id,
+        section: group.section.clone(),
+        start_addr: group.start_addr,
+        end_addr: group.end_addr,
+        typeinfo_addr: group.typeinfo_addr,
+        vtables: group.vtables.clone(),
+    }
+}
+
+fn serialize_vtable_info(vtable: &VTableInfo, include_functions: bool) -> SerializedVTableInfo {
+    SerializedVTableInfo {
+        group_id: vtable.group_id,
+        section: vtable.section.clone(),
+        start_addr: vtable.start_addr,
+        address_point: vtable.address_point,
+        size_bytes: vtable.size_bytes,
+        function_count: vtable.function_count,
+        offset_to_top: vtable.offset_to_top,
+        typeinfo_addr: vtable.typeinfo_addr,
+        functions: include_functions.then(|| {
+            vtable
+                .functions
+                .iter()
+                .map(|entry| SerializedVTableEntry {
+                    entry_addr: entry.entry_addr,
+                    slot_offset: entry.slot_offset,
+                    target_addr: entry.target.addr,
+                    function_addr: entry.target.function_addr,
+                    name: entry.target.name.clone(),
+                })
+                .collect()
+        }),
     }
 }
 
@@ -594,6 +681,68 @@ fn vtable_sections(binary: &LoadedBinary) -> impl Iterator<Item = &SectionInfo> 
     })
 }
 
+fn scan_vtables_in_section(
+    binary: &LoadedBinary,
+    section: &SectionInfo,
+    vtables: &mut Vec<VTableInfo>,
+) {
+    let start_addr = align_up(section.address, POINTER_SIZE);
+    let end_addr = section.address + section.file_size;
+    let mut addr = start_addr;
+
+    while addr + POINTER_SIZE <= end_addr {
+        let word = read_section_word(binary, addr);
+        if word.raw != 0 {
+            addr += POINTER_SIZE;
+            continue;
+        }
+
+        let mut run_entries = Vec::new();
+        let mut cursor = addr + POINTER_SIZE;
+        while cursor + POINTER_SIZE <= end_addr {
+            let next_word = read_section_word(binary, cursor);
+            if !is_function_start(binary, next_word.raw) {
+                break;
+            }
+            run_entries.push(VTableCandidateEntry {
+                entry_addr: next_word.addr,
+                target_addr: next_word.raw,
+            });
+            cursor += POINTER_SIZE;
+        }
+
+        let trailing_zero =
+            cursor + POINTER_SIZE <= end_addr && read_section_word(binary, cursor).raw == 0;
+        if run_entries.len() >= MIN_VTABLE_FUNCTIONS && trailing_zero {
+            let functions: Vec<VTableEntry> = run_entries
+                .iter()
+                .enumerate()
+                .map(|(position, entry)| VTableEntry {
+                    entry_addr: entry.entry_addr,
+                    slot_offset: position as u64 * POINTER_SIZE,
+                    target: classify_target(binary, entry.target_addr),
+                })
+                .collect();
+
+            vtables.push(VTableInfo {
+                group_id: 0,
+                section: section.name.clone(),
+                start_addr: word.addr,
+                address_point: run_entries[0].entry_addr,
+                size_bytes: (cursor + POINTER_SIZE) - word.addr,
+                function_count: functions.len(),
+                offset_to_top: Some(0),
+                typeinfo_addr: None,
+                functions,
+            });
+            addr = cursor + POINTER_SIZE;
+            continue;
+        }
+
+        addr += POINTER_SIZE;
+    }
+}
+
 fn read_section_pointers(binary: &LoadedBinary, section: &SectionInfo) -> Vec<RawSectionPointer> {
     let start_addr = align_up(section.address, POINTER_SIZE);
     let end_addr = section.address + section.file_size;
@@ -613,7 +762,7 @@ fn read_section_pointers(binary: &LoadedBinary, section: &SectionInfo) -> Vec<Ra
         }
         let target = classify_target(binary, raw);
         if target.kind != AddressKind::Unknown {
-            pointers.push(RawSectionPointer { addr, raw, target });
+            pointers.push(RawSectionPointer { addr, target });
         }
         addr += POINTER_SIZE;
     }
@@ -621,38 +770,20 @@ fn read_section_pointers(binary: &LoadedBinary, section: &SectionInfo) -> Vec<Ra
     pointers
 }
 
-fn executable_run_len(entries: &[RawSectionPointer], start: usize) -> usize {
-    let mut len = 0usize;
-    for entry in &entries[start..] {
-        if !entry.target.kind.is_executable() {
-            break;
-        }
-        len += 1;
-    }
-    len
+fn read_section_word(binary: &LoadedBinary, addr: u64) -> SectionWord {
+    let Some(file_offset) = binary.vaddr_to_file_offset(addr) else {
+        return SectionWord { addr, raw: 0 };
+    };
+
+    let slice = &binary.data[file_offset..file_offset + POINTER_SIZE as usize];
+    let raw = u64::from_le_bytes(slice.try_into().unwrap());
+    SectionWord { addr, raw }
 }
 
-fn plausible_vtable_header(entries: &[RawSectionPointer], index: usize) -> Option<VTableHeader> {
-    if index < 2 {
-        return None;
-    }
-
-    let offset_to_top = entries[index - 2].raw as i64;
-    if offset_to_top.abs() > MAX_PLAUSIBLE_OFFSET_TO_TOP {
-        return None;
-    }
-
-    let typeinfo_raw = entries[index - 1].raw;
-    let typeinfo_addr = if typeinfo_raw == 0 {
-        None
-    } else {
-        Some(typeinfo_raw)
-    };
-    Some(VTableHeader {
-        start_addr: entries[index - 2].addr,
-        offset_to_top,
-        typeinfo_addr,
-    })
+fn is_function_start(binary: &LoadedBinary, addr: u64) -> bool {
+    binary
+        .function_containing(addr)
+        .is_some_and(|func| func.addr == addr)
 }
 
 fn assign_vtable_groups(vtables: &mut [VTableInfo]) -> Vec<VTableGroup> {
@@ -1157,44 +1288,66 @@ fn collect_unique_targets(
 }
 
 fn classify_target(binary: &LoadedBinary, addr: u64) -> TargetInfo {
-    if let Some(func) = binary.function_containing(addr) {
-        return TargetInfo {
-            addr,
-            kind: if func.addr == addr {
-                AddressKind::Function
-            } else {
-                AddressKind::Code
-            },
-            section: binary
+    match classify_target_shallow(binary, addr) {
+        AddressKind::Function | AddressKind::Code => {
+            let func = binary
+                .function_containing(addr)
+                .expect("executable target should resolve to a function");
+            TargetInfo {
+                addr,
+                kind: if func.addr == addr {
+                    AddressKind::Function
+                } else {
+                    AddressKind::Code
+                },
+                section: binary
+                    .section_containing(addr)
+                    .map(|section| section.name.clone()),
+                function_addr: Some(func.addr),
+                name: func.name.clone(),
+                string_preview: None,
+            }
+        }
+        AddressKind::Data => {
+            let alloc_section = binary
                 .section_containing(addr)
-                .map(|section| section.name.clone()),
-            function_addr: Some(func.addr),
-            name: func.name.clone(),
-            string_preview: None,
-        };
-    }
-
-    let alloc_section = binary
-        .section_containing(addr)
-        .filter(|section| section.is_alloc);
-    if alloc_section.is_some() || binary.contains_vaddr(addr) {
-        return TargetInfo {
+                .filter(|section| section.is_alloc);
+            TargetInfo {
+                addr,
+                kind: AddressKind::Data,
+                section: alloc_section.map(|section| section.name.clone()),
+                function_addr: None,
+                name: None,
+                string_preview: string_preview(binary, addr),
+            }
+        }
+        AddressKind::Unknown => TargetInfo {
             addr,
-            kind: AddressKind::Data,
-            section: alloc_section.map(|section| section.name.clone()),
+            kind: AddressKind::Unknown,
+            section: None,
             function_addr: None,
             name: None,
-            string_preview: string_preview(binary, addr),
-        };
+            string_preview: None,
+        },
     }
+}
 
-    TargetInfo {
-        addr,
-        kind: AddressKind::Unknown,
-        section: None,
-        function_addr: None,
-        name: None,
-        string_preview: None,
+fn classify_target_shallow(binary: &LoadedBinary, addr: u64) -> AddressKind {
+    if let Some(func) = binary.function_containing(addr) {
+        if func.addr == addr {
+            AddressKind::Function
+        } else {
+            AddressKind::Code
+        }
+    } else {
+        let alloc_section = binary
+            .section_containing(addr)
+            .filter(|section| section.is_alloc);
+        if alloc_section.is_some() || binary.contains_vaddr(addr) {
+            AddressKind::Data
+        } else {
+            AddressKind::Unknown
+        }
     }
 }
 
@@ -1571,8 +1724,11 @@ where
 mod tests {
     use std::path::PathBuf;
 
-    use super::{find_call_paths, scan_function_pointers, scan_pointers, scan_vtables};
-    use crate::elf::load_elf;
+    use super::{
+        find_call_paths, scan_function_pointers, scan_pointers, scan_vtables,
+        scan_vtables_for_output,
+    };
+    use crate::elf::{load_elf, FunctionInfo, LoadedBinary, SectionInfo, Segment};
 
     fn load_libunreal() -> Option<crate::elf::LoadedBinary> {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -1632,5 +1788,112 @@ mod tests {
         let report = find_call_paths(&binary, 0x05e66990, 0x05e66990, 0, false, 1).unwrap();
         let shortest = report.shortest_path.expect("expected trivial path");
         assert_eq!(shortest.functions, vec![0x05e66990]);
+    }
+
+    fn synthetic_rodata_binary(
+        words: &[u64],
+        functions: &[(u64, u64)],
+        mem_size: u64,
+    ) -> LoadedBinary {
+        let data = words
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .collect::<Vec<_>>();
+        let mut functions = functions
+            .iter()
+            .map(|&(addr, size)| FunctionInfo {
+                addr,
+                size,
+                name: None,
+            })
+            .collect::<Vec<_>>();
+        functions.sort_by_key(|func| func.addr);
+        let base_addr = 0x1000;
+        LoadedBinary {
+            data: data.clone(),
+            text_section_file_offset: 0,
+            text_section_addr: 0,
+            text_section_size: 0,
+            functions,
+            segments: vec![Segment {
+                file_offset: 0,
+                vaddr: base_addr,
+                file_size: data.len() as u64,
+                mem_size,
+            }],
+            sections: vec![SectionInfo {
+                name: ".rodata".to_string(),
+                address: base_addr,
+                size: mem_size,
+                file_offset: 0,
+                file_size: data.len() as u64,
+                is_alloc: true,
+                is_writable: false,
+                is_executable: false,
+            }],
+        }
+    }
+
+    #[test]
+    fn vtable_scan_requires_null_prefix_and_suffix() {
+        let binary = synthetic_rodata_binary(
+            &[0, 0x3000, 0x3010, 0x3020, 0x1111],
+            &[(0x3000, 4), (0x3010, 4), (0x3020, 4)],
+            0x4000,
+        );
+
+        let report = scan_vtables(&binary);
+        assert_eq!(report.total_vtables, 0);
+    }
+
+    #[test]
+    fn vtable_scan_matches_null_delimited_function_runs() {
+        let binary = synthetic_rodata_binary(
+            &[0, 0x3000, 0x3010, 0x3020, 0],
+            &[(0x3000, 4), (0x3010, 4), (0x3020, 4)],
+            0x4000,
+        );
+
+        let report = scan_vtables(&binary);
+        assert_eq!(report.total_vtables, 1);
+        let vtable = report.vtables.first().expect("expected vtable");
+        assert_eq!(vtable.start_addr, 0x1000);
+        assert_eq!(vtable.address_point, 0x1008);
+        assert_eq!(vtable.size_bytes, 40);
+        assert_eq!(vtable.offset_to_top, Some(0));
+        assert_eq!(vtable.typeinfo_addr, None);
+        assert_eq!(vtable.function_count, 3);
+    }
+
+    #[test]
+    fn vtable_summary_omits_functions() {
+        let binary = synthetic_rodata_binary(
+            &[0, 0x3000, 0x3010, 0x3020, 0],
+            &[(0x3000, 4), (0x3010, 4), (0x3020, 4)],
+            0x4000,
+        );
+
+        let report = scan_vtables_for_output(&binary, false);
+        let value = serde_json::to_value(report).unwrap();
+        assert!(value["vtables"][0].get("functions").is_none());
+        assert_eq!(value["vtables"][0]["function_count"], 3);
+    }
+
+    #[test]
+    fn vtable_full_output_uses_slim_function_entries() {
+        let binary = synthetic_rodata_binary(
+            &[0, 0x3000, 0x3010, 0x3020, 0],
+            &[(0x3000, 4), (0x3010, 4), (0x3020, 4)],
+            0x4000,
+        );
+
+        let report = scan_vtables_for_output(&binary, true);
+        let value = serde_json::to_value(report).unwrap();
+        let entry = &value["vtables"][0]["functions"][0];
+        assert_eq!(entry["entry_addr"], "0x1008");
+        assert_eq!(entry["slot_offset"], "0x0");
+        assert_eq!(entry["target_addr"], "0x3000");
+        assert_eq!(entry["function_addr"], "0x3000");
+        assert!(entry.get("target").is_none());
     }
 }
