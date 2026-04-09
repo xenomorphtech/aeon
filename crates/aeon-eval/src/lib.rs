@@ -602,7 +602,7 @@ fn normalize_stmt(stmt: &Stmt) -> Value {
         Stmt::Pair(a, b) => json!(["pair", normalize_stmt(a), normalize_stmt(b)]),
         Stmt::SetFlags { expr } => json!(["set_flags", normalize_expr(expr)]),
         Stmt::Barrier(name) => json!(["barrier", name]),
-        Stmt::Trap => json!(["trap"]),
+        Stmt::Trap { .. } => json!(["trap"]),
         Stmt::Intrinsic { name, operands } => {
             json!([
                 "intrinsic",

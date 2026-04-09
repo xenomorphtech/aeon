@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::mem::size_of;
 
 use aeon_reduce::pipeline::{reduce_block_local, reduce_function_cfg};
 use aeon_reduce::reduce_stack::{detect_prologue, PrologueInfo};
-use aeon_reduce::ssa::cfg::{build_cfg, Cfg};
-use aeon_reduce::ssa::construct::{build_ssa, SsaFunction};
+use aeon_reduce::ssa::cfg::{build_cfg, BasicBlock, Cfg};
+use aeon_reduce::ssa::construct::{build_ssa, SsaBlock, SsaFunction};
 use aeon_reduce::ssa::pipeline::{optimize_ssa, reduce_and_build_ssa};
 use aeon_reduce::ssa::types::{BlockId, RegLocation, SsaBranchCond, SsaExpr, SsaStmt, SsaVar};
 use aeonil::{BranchCond, Condition, Expr, Reg, Stmt, TrapKind};
@@ -111,6 +112,83 @@ impl FunctionArtifacts {
         }
         self.optimized_ssa.as_ref().unwrap()
     }
+
+    pub fn estimated_bytes(&self) -> usize {
+        size_of::<Self>()
+            + estimate_decoded_function_bytes(&self.decoded)
+            + self.reduced_cfg.as_ref().map(estimate_cfg_bytes).unwrap_or(0)
+            + self
+                .stack_frame
+                .as_ref()
+                .map(estimate_stack_frame_cache_bytes)
+                .unwrap_or(0)
+            + self.ssa.as_ref().map(estimate_ssa_function_bytes).unwrap_or(0)
+            + self
+                .optimized_ssa
+                .as_ref()
+                .map(estimate_ssa_function_bytes)
+                .unwrap_or(0)
+    }
+}
+
+const HASHMAP_ENTRY_OVERHEAD: usize = 24;
+const DECODED_STMT_HEAP_OVERHEAD: usize = 96;
+const REDUCED_STMT_HEAP_OVERHEAD: usize = 80;
+const SSA_STMT_HEAP_OVERHEAD: usize = 96;
+
+fn estimate_decoded_function_bytes(decoded: &DecodedFunction) -> usize {
+    size_of::<DecodedFunction>()
+        + decoded.instructions.capacity() * size_of::<DecodedInstruction>()
+        + decoded
+            .instructions
+            .iter()
+            .map(estimate_decoded_instruction_bytes)
+            .sum::<usize>()
+}
+
+fn estimate_decoded_instruction_bytes(instruction: &DecodedInstruction) -> usize {
+    instruction.asm.capacity()
+        + instruction.edges.capacity() * size_of::<u64>()
+        + DECODED_STMT_HEAP_OVERHEAD
+}
+
+fn estimate_cfg_bytes(cfg: &Cfg) -> usize {
+    size_of::<Cfg>()
+        + cfg.blocks.capacity() * size_of::<BasicBlock>()
+        + cfg.block_map.capacity() * (size_of::<(u64, BlockId)>() + HASHMAP_ENTRY_OVERHEAD)
+        + cfg
+            .blocks
+            .iter()
+            .map(estimate_basic_block_bytes)
+            .sum::<usize>()
+}
+
+fn estimate_basic_block_bytes(block: &BasicBlock) -> usize {
+    block.stmts.capacity() * size_of::<Stmt>()
+        + block.successors.capacity() * size_of::<BlockId>()
+        + block.predecessors.capacity() * size_of::<BlockId>()
+        + block.stmts.len() * REDUCED_STMT_HEAP_OVERHEAD
+}
+
+fn estimate_stack_frame_cache_bytes(frame: &Option<PrologueInfo>) -> usize {
+    size_of::<Option<PrologueInfo>>()
+        + frame
+            .as_ref()
+            .map(|info| info.saved_regs.capacity() * size_of::<(Reg, i64)>())
+            .unwrap_or(0)
+}
+
+fn estimate_ssa_function_bytes(ssa: &SsaFunction) -> usize {
+    size_of::<SsaFunction>()
+        + ssa.blocks.capacity() * size_of::<SsaBlock>()
+        + ssa.blocks.iter().map(estimate_ssa_block_bytes).sum::<usize>()
+}
+
+fn estimate_ssa_block_bytes(block: &SsaBlock) -> usize {
+    block.stmts.capacity() * size_of::<SsaStmt>()
+        + block.successors.capacity() * size_of::<BlockId>()
+        + block.predecessors.capacity() * size_of::<BlockId>()
+        + block.stmts.len() * SSA_STMT_HEAP_OVERHEAD
 }
 
 pub fn decode_function(
