@@ -8,10 +8,13 @@
 use aeon_jit::{JitCompiler, JitContext};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::context::MemoryProvider;
 use crate::dyncfg::DynCfg;
 use crate::dynffi::AEON_DYN_BAIL_SENTINEL;
+
+static DYN_TRACE_RUN_ID: AtomicU64 = AtomicU64::new(1);
 
 fn dyn_trace_path() -> &'static str {
     #[cfg(target_os = "android")]
@@ -40,6 +43,70 @@ fn dyn_trace_line(message: &str) {
         }
         let _ = writeln!(file, "{message}");
     }
+}
+
+fn dyn_trace_json_path() -> &'static str {
+    #[cfg(target_os = "android")]
+    {
+        "/data/user/0/com.netmarble.thered/files/aeon_dyn_trace.jsonl"
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        "/tmp/aeon_dyn_trace.jsonl"
+    }
+}
+
+fn json_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn dyn_trace_json_line(message: &str) {
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dyn_trace_json_path())
+    {
+        #[cfg(unix)]
+        {
+            let _ = std::fs::set_permissions(
+                dyn_trace_json_path(),
+                std::fs::Permissions::from_mode(0o644),
+            );
+        }
+        let _ = writeln!(file, "{message}");
+    }
+}
+
+fn fmt_hex_opt(value: Option<u64>) -> String {
+    match value {
+        Some(v) => format!("\"0x{v:x}\""),
+        None => "null".to_string(),
+    }
+}
+
+fn dyn_trace_step_json(
+    run_id: u64,
+    kind: &str,
+    step: usize,
+    pc: u64,
+    ctx: &JitContext,
+) {
+    dyn_trace_json_line(&format!(
+        "{{\"kind\":\"{kind}\",\"run_id\":{run_id},\"step\":{step},\"pc\":\"0x{pc:x}\",\"x0\":\"0x{:x}\",\"x1\":\"0x{:x}\",\"x2\":\"0x{:x}\",\"x3\":\"0x{:x}\",\"x19\":\"0x{:x}\",\"x20\":\"0x{:x}\",\"x21\":\"0x{:x}\",\"sp\":\"0x{:x}\",\"lr\":\"0x{:x}\"}}",
+        ctx.x[0], ctx.x[1], ctx.x[2], ctx.x[3], ctx.x[19], ctx.x[20], ctx.x[21], ctx.sp, ctx.x[30],
+    ));
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -114,6 +181,7 @@ impl DynamicRuntime {
         memory: &dyn MemoryProvider,
         config: DynamicRuntimeConfig,
     ) -> DynamicRuntimeResult {
+        let run_id = DYN_TRACE_RUN_ID.fetch_add(1, Ordering::Relaxed);
         let start_pc = ctx.pc;
         let mut path = Vec::new();
         let mut steps = 0usize;
@@ -121,13 +189,27 @@ impl DynamicRuntime {
             "run start_pc=0x{start_pc:x} max_steps={} range={:?}",
             config.max_steps, config.code_range
         ));
+        let (range_start, range_end) = match config.code_range {
+            Some((start, end)) => (Some(start), Some(end)),
+            None => (None, None),
+        };
+        dyn_trace_json_line(&format!(
+            "{{\"kind\":\"run_start\",\"run_id\":{run_id},\"start_pc\":\"0x{start_pc:x}\",\"max_steps\":{},\"range_start\":{},\"range_end\":{}}}",
+            config.max_steps,
+            fmt_hex_opt(range_start),
+            fmt_hex_opt(range_end),
+        ));
 
         loop {
             let pc = ctx.pc;
             dyn_trace_line(&format!("step={steps} pc=0x{pc:x}"));
+            dyn_trace_step_json(run_id, "step", steps, pc, ctx);
             if let Some((start, end)) = config.code_range {
                 if pc < start || pc >= end {
                     dyn_trace_line(&format!("stop=code_range_exit pc=0x{pc:x}"));
+                    dyn_trace_json_line(&format!(
+                        "{{\"kind\":\"stop\",\"run_id\":{run_id},\"reason\":\"code_range_exit\",\"step\":{steps},\"final_pc\":\"0x{pc:x}\"}}"
+                    ));
                     return DynamicRuntimeResult {
                         start_pc,
                         final_pc: pc,
@@ -141,6 +223,9 @@ impl DynamicRuntime {
 
             if steps >= config.max_steps {
                 dyn_trace_line(&format!("stop=max_steps pc=0x{pc:x}"));
+                dyn_trace_json_line(&format!(
+                    "{{\"kind\":\"stop\",\"run_id\":{run_id},\"reason\":\"max_steps\",\"step\":{steps},\"final_pc\":\"0x{pc:x}\"}}"
+                ));
                 return DynamicRuntimeResult {
                     start_pc,
                     final_pc: pc,
@@ -157,10 +242,21 @@ impl DynamicRuntime {
                         "compiled addr=0x{:x} id=0x{:x} size=0x{:x} term={:?}",
                         block.addr, block.block_id, block.size_bytes, block.terminator
                     ));
+                    dyn_trace_json_line(&format!(
+                        "{{\"kind\":\"compiled\",\"run_id\":{run_id},\"step\":{steps},\"addr\":\"0x{:x}\",\"block_id\":\"0x{:x}\",\"size_bytes\":{},\"terminator\":\"{:?}\"}}",
+                        block.addr,
+                        block.block_id,
+                        block.size_bytes,
+                        block.terminator,
+                    ));
                     block
                 }
                 Err(err) => {
                     dyn_trace_line(&format!("stop=lift_error pc=0x{pc:x} err={err:?}"));
+                    dyn_trace_json_line(&format!(
+                        "{{\"kind\":\"stop\",\"run_id\":{run_id},\"reason\":\"lift_error\",\"step\":{steps},\"final_pc\":\"0x{pc:x}\",\"error\":\"{}\"}}",
+                        json_escape(&format!("{err:?}"))
+                    ));
                     return DynamicRuntimeResult {
                         start_pc,
                         final_pc: pc,
@@ -173,6 +269,34 @@ impl DynamicRuntime {
             };
 
             path.push(block.addr);
+            if matches!(block.terminator, crate::dyncfg::BlockTerminator::DynamicCall) {
+                dyn_trace_line(&format!(
+                    "callsite addr=0x{:x} x0=0x{:x} x1=0x{:x} x2=0x{:x} x3=0x{:x} x19=0x{:x} x20=0x{:x} x21=0x{:x} sp=0x{:x} lr=0x{:x}",
+                    block.addr,
+                    ctx.x[0],
+                    ctx.x[1],
+                    ctx.x[2],
+                    ctx.x[3],
+                    ctx.x[19],
+                    ctx.x[20],
+                    ctx.x[21],
+                    ctx.sp,
+                    ctx.x[30],
+                ));
+                dyn_trace_json_line(&format!(
+                    "{{\"kind\":\"dynamic_call\",\"run_id\":{run_id},\"step\":{steps},\"addr\":\"0x{:x}\",\"x0\":\"0x{:x}\",\"x1\":\"0x{:x}\",\"x2\":\"0x{:x}\",\"x3\":\"0x{:x}\",\"x19\":\"0x{:x}\",\"x20\":\"0x{:x}\",\"x21\":\"0x{:x}\",\"sp\":\"0x{:x}\",\"lr\":\"0x{:x}\"}}",
+                    block.addr,
+                    ctx.x[0],
+                    ctx.x[1],
+                    ctx.x[2],
+                    ctx.x[3],
+                    ctx.x[19],
+                    ctx.x[20],
+                    ctx.x[21],
+                    ctx.sp,
+                    ctx.x[30],
+                ));
+            }
             dyn_trace_line(&format!("enter addr=0x{:x}", block.addr));
             let mut next_pc = unsafe { (block.entry)(ctx as *mut JitContext) };
             if matches!(block.terminator, crate::dyncfg::BlockTerminator::Return) {
@@ -180,10 +304,18 @@ impl DynamicRuntime {
             }
             steps += 1;
             dyn_trace_line(&format!("leave addr=0x{:x} next=0x{next_pc:x}", block.addr));
+            dyn_trace_json_line(&format!(
+                "{{\"kind\":\"leave\",\"run_id\":{run_id},\"step\":{},\"addr\":\"0x{:x}\",\"next_pc\":\"0x{next_pc:x}\"}}",
+                steps - 1,
+                block.addr,
+            ));
 
             if next_pc == AEON_DYN_BAIL_SENTINEL {
                 let bail_pc = ctx.pc;
                 dyn_trace_line(&format!("stop=bridge_bail pc=0x{bail_pc:x}"));
+                dyn_trace_json_line(&format!(
+                    "{{\"kind\":\"stop\",\"run_id\":{run_id},\"reason\":\"bridge_bail\",\"step\":{steps},\"final_pc\":\"0x{bail_pc:x}\"}}"
+                ));
                 return DynamicRuntimeResult {
                     start_pc,
                     final_pc: bail_pc,
@@ -197,6 +329,9 @@ impl DynamicRuntime {
             if next_pc == 0 {
                 ctx.pc = 0;
                 dyn_trace_line("stop=halted");
+                dyn_trace_json_line(&format!(
+                    "{{\"kind\":\"stop\",\"run_id\":{run_id},\"reason\":\"halted\",\"step\":{steps},\"final_pc\":\"0x0\"}}"
+                ));
                 return DynamicRuntimeResult {
                     start_pc,
                     final_pc: 0,

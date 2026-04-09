@@ -660,6 +660,24 @@ pub unsafe extern "C" fn aeon_dyn_runtime_branch_bridge(
         }
         aeon_dyn_branch_bridge_stage = 0xbb0561;
 
+        if dynamic_module_file_offset(target, "libart.so")
+            == Some(LIBART_ART_QUICK_UPDATE_INLINE_CACHE_OFFSET)
+        {
+            let resume_pc = dynamic_choose_bail_resume_pc(ctx_ref);
+            dynffi_trace_line(&format!(
+                "branch_bridge special_bail kind=art_quick_update_inline_cache_resume ctx_pc=0x{:x} target=0x{:x} resume=0x{:x} lr=0x{:x}",
+                ctx_ref.pc, target, resume_pc, ctx_ref.x[30]
+            ));
+            ctx_ref.pc = resume_pc;
+            aeon_dyn_branch_bridge_stage = 0xbac4;
+            aeon_dyn_branch_bridge_last_target = target;
+            aeon_dyn_branch_bridge_saved_x30 = ctx_ref.x[30];
+            aeon_dyn_branch_bridge_resume_target = resume_pc;
+            aeon_dyn_branch_bridge_ctx_pc = ctx_ref.pc;
+            return AEON_DYN_BAIL_SENTINEL;
+        }
+        aeon_dyn_branch_bridge_stage = 0xbb0562;
+
         if let Some(kind) = dynamic_should_bail_art_runtime_stub(target) {
             let resume_pc = target;
             dynffi_trace_line(&format!(

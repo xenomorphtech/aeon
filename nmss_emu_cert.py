@@ -27,11 +27,36 @@ from collections import deque
 from unicorn import *
 from unicorn.arm64_const import *
 
-BINARY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           "output/decrypted/nmsscr.dec")
 
-JIT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "jit_module.bin")
+def _first_existing_path(*candidates):
+    for path in candidates:
+        if path and os.path.exists(path):
+            return path
+    return candidates[0] if candidates else None
+
+
+def _load_session_overrides():
+    session_path = os.environ.get("NMSS_EMU_SESSION_JSON") or "/tmp/nmss_known_session.json"
+    if not session_path or not os.path.exists(session_path):
+        return None
+    with open(session_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    data["_path"] = session_path
+    return data
+
+BINARY_PATH = _first_existing_path(
+    os.environ.get("NMSS_EMU_BINARY"),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "output/decrypted/nmsscr.dec"),
+    "/home/sdancer/games/nmss/output/decrypted/nmsscr.dec",
+    "/home/sdancer/games/nmss_deob/output/decrypted/nmsscr.dec",
+)
+
+JIT_PATH = _first_existing_path(
+    os.environ.get("NMSS_EMU_JIT"),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "jit_module.bin"),
+    "/home/sdancer/games/nmss/jit_module.bin",
+    "/home/sdancer/games/nmss_deob/jit_module.bin",
+)
 
 CODE_BASE    = 0x0
 CODE_SIZE    = 0x600000  # Extended to cover BSS at 0x515000-0x595000
@@ -94,6 +119,21 @@ TEST_VECTORS = [
     ("DEADBEEF12345678", "7AA92CCBB4F7A03BAB08ABCC4B8B2B51330D486461367058"),
     ("FFFFFFFFFFFFFFFF", "3E369148823B89A9403C2C21CA3FD0C9DEA1271B4B2E3452"),
 ]
+
+_SESSION_OVERRIDES = _load_session_overrides()
+if _SESSION_OVERRIDES:
+    session_key_hex = _SESSION_OVERRIDES.get("session_key")
+    if session_key_hex:
+        SESSION_KEY = bytes.fromhex(session_key_hex)
+    if isinstance(_SESSION_OVERRIDES.get("score"), int):
+        SCORE = _SESSION_OVERRIDES["score"]
+    pairs = _SESSION_OVERRIDES.get("pairs") or []
+    if pairs:
+        TEST_VECTORS = [
+            (entry["challenge"], entry.get("token"))
+            for entry in pairs
+            if entry.get("challenge")
+        ]
 
 # JIT module ELF layout (from analysis of jit_module.bin):
 # LOAD[0]: vaddr=0x0       offset=0x0       filesz=0x410f20  (R/X)
@@ -261,6 +301,12 @@ CURRENT_SESSION_CAPTURE_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "current_session_capture.json",
 )
+JIT_LIVE_FLAT_PATH = _first_existing_path(
+    os.environ.get("NMSS_EMU_JIT_LIVE"),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "jit_live_flat.bin"),
+    "/home/sdancer/games/nmss/jit_live_flat.bin",
+    "/home/sdancer/games/nmss_deob/jit_live_flat.bin",
+)
 LIVE_JIT_CODE_OVERLAY_RANGES = (
     # Veneer/PLT stub page shared by callers in the cert path.
     (0x05F000, 0x060000),
@@ -347,8 +393,7 @@ class NMSSCertEmulator:
         self.verbose = verbose
         self.binary_data = open(BINARY_PATH, "rb").read()
         self.jit_data = open(JIT_PATH, "rb").read() if os.path.exists(JIT_PATH) else None
-        jit_live_flat_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jit_live_flat.bin")
-        self.jit_live_flat = open(jit_live_flat_path, "rb").read() if os.path.exists(jit_live_flat_path) else None
+        self.jit_live_flat = open(JIT_LIVE_FLAT_PATH, "rb").read() if JIT_LIVE_FLAT_PATH and os.path.exists(JIT_LIVE_FLAT_PATH) else None
         self.live_jit_stack_snapshot = self._load_live_jit_stack_snapshot()
         self._snapshot_jit_live_base = None
         self._snapshot_jit_live_size = 0

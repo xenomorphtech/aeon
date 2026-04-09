@@ -5,6 +5,7 @@ NMSS Capture Server — HTTP API wrapping frida CLI + Xerda.
 Endpoints:
     GET  /status                  — session state
     GET  /call?c=<hex16>          — call getCertValue, return token
+    GET  /prepare?c=<hex16>       — plain readiness preflight before mem/dynamic hooks
     GET  /translated/load         — load translated JIT ELF + map into the live Frida session
     GET  /translated/arm          — arm translated JIT dispatch for execute faults in the trapped JIT window
     GET  /translated/status       — translated JIT dispatch status
@@ -44,6 +45,9 @@ DYNAMIC_DEVICE_LIB = "/data/user/0/com.netmarble.thered/files/libaeon_instrument
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 OUTPUT_DIR = os.path.join(REPO_ROOT, "capture", "jit_hash")
 TRACE_PATH = os.path.join(OUTPUT_DIR, "trace.bin")
+DYNAMIC_TRACE_DEVICE_PATH = "/data/user/0/com.netmarble.thered/files/aeon_dyn_trace.jsonl"
+DYNAMIC_TRACE_HOST_PATH = os.path.join(OUTPUT_DIR, "dynamic_trace.jsonl")
+READY_CHALLENGE = "6BA4D60738580083"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("capture")
@@ -396,6 +400,321 @@ function setupHook() {
 
 [12,18,24,30].forEach(function(t){setTimeout(function(){Java.perform(function(){try{Java.use("java.lang.Runtime").getRuntime().exec("input keyevent 66");}catch(e){}});},t*1000);});
 
+function resolveAppLoader() {
+    var loader = null;
+    try {
+        var ActivityThread = Java.use('android.app.ActivityThread');
+        var app = ActivityThread.currentApplication();
+        if (app) loader = app.getClassLoader();
+        if (!loader) {
+            var at = ActivityThread.currentActivityThread();
+            if (at) {
+                var app2 = at.getApplication();
+                if (app2) loader = app2.getClassLoader();
+            }
+        }
+    } catch (e) {}
+    return loader;
+}
+
+var nmssLifecycle = {
+    hooks_installed: false,
+    game_oncreate: 0,
+    game_onresume: 0,
+    nmss_init: 0,
+    nmss_resume: 0,
+    nmss_last_error: null,
+    last_activity_class: null,
+    last_instance_source: null,
+    last_prepare_source: null,
+};
+
+function nowIso() {
+    return (new Date()).toISOString();
+}
+
+function noteLifecycle(key, extra) {
+    try {
+        nmssLifecycle[key] = (nmssLifecycle[key] || 0) + 1;
+        nmssLifecycle.last_event = key;
+        nmssLifecycle.last_event_at = nowIso();
+        if (extra) {
+            Object.keys(extra).forEach(function (name) {
+                nmssLifecycle[name] = extra[name];
+            });
+        }
+        console.log('[CAPTURE] lifecycle ' + key + ' ' + JSON.stringify(extra || {}));
+    } catch (e) {}
+}
+
+function installLifecycleHooks() {
+    if (nmssLifecycle.hooks_installed) return true;
+    return withAppLoader(function () {
+        try {
+            var GameActivity = Java.use('com.epicgames.unreal.GameActivity');
+            try {
+                var onCreate = GameActivity.onCreate.overload('android.os.Bundle');
+                onCreate.implementation = function (bundle) {
+                    noteLifecycle('game_oncreate', { activity_class: this.$className });
+                    nmssLifecycle.last_activity_class = this.$className;
+                    return onCreate.call(this, bundle);
+                };
+            } catch (e) {}
+            try {
+                var onResume = GameActivity.onResume.overload();
+                onResume.implementation = function () {
+                    noteLifecycle('game_onresume', { activity_class: this.$className });
+                    nmssLifecycle.last_activity_class = this.$className;
+                    return onResume.call(this);
+                };
+            } catch (e) {}
+        } catch (e) {
+            nmssLifecycle.nmss_last_error = 'GameActivity hook ERR:' + e;
+        }
+        try {
+            var NmssSa = Java.use('nmss.app.NmssSa');
+            try {
+                var init2 = NmssSa.init.overload('android.app.Activity', 'nmss.app.NmssSa$DetectCallBack');
+                init2.implementation = function (activity, callback) {
+                    noteLifecycle('nmss_init', {
+                        activity_class: activity ? activity.$className : 'null',
+                        has_callback: callback ? true : false
+                    });
+                    nmssLifecycle.last_activity_class = activity ? activity.$className : nmssLifecycle.last_activity_class;
+                    return init2.call(this, activity, callback);
+                };
+            } catch (e) {}
+            try {
+                var init3 = NmssSa.init.overload('android.app.Activity', 'nmss.app.NmssSa$DetectCallBack', 'java.lang.String');
+                init3.implementation = function (activity, callback, extra) {
+                    noteLifecycle('nmss_init', {
+                        activity_class: activity ? activity.$className : 'null',
+                        has_callback: callback ? true : false,
+                        extra: extra ? String(extra) : ''
+                    });
+                    nmssLifecycle.last_activity_class = activity ? activity.$className : nmssLifecycle.last_activity_class;
+                    return init3.call(this, activity, callback, extra);
+                };
+            } catch (e) {}
+            try {
+                var onResumeNmss = NmssSa.onResume.overload();
+                onResumeNmss.implementation = function () {
+                    noteLifecycle('nmss_resume');
+                    return onResumeNmss.call(this);
+                };
+            } catch (e) {}
+        } catch (e) {
+            nmssLifecycle.nmss_last_error = 'NmssSa hook ERR:' + e;
+        }
+        nmssLifecycle.hooks_installed = true;
+        console.log('[CAPTURE] lifecycle hooks installed');
+        return true;
+    });
+}
+
+function getCurrentGameActivity() {
+    return withAppLoader(function () {
+        try {
+            var GameActivity = Java.use('com.epicgames.unreal.GameActivity');
+            var current = GameActivity._activity.value;
+            if (current) return current;
+        } catch (e) {}
+        var found = null;
+        try {
+            Java.choose('com.epicgames.unreal.GameActivity', {
+                onMatch: function (instance) {
+                    found = instance;
+                },
+                onComplete: function () {}
+            });
+        } catch (e) {}
+        return found;
+    });
+}
+
+function waitForGameActivity(timeoutMs) {
+    return withAppLoader(function () {
+        var Thread = Java.use('java.lang.Thread');
+        var deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            var activity = getCurrentGameActivity();
+            if (activity) {
+                nmssLifecycle.last_activity_class = activity.$className;
+                return activity;
+            }
+            Thread.sleep(100);
+        }
+        return null;
+    });
+}
+
+function withAppLoader(fn) {
+    var previous = null;
+    var changed = false;
+    try {
+        var loader = resolveAppLoader();
+        if (loader) {
+            previous = Java.classFactory.loader;
+            Java.classFactory.loader = loader;
+            changed = true;
+        }
+        return fn();
+    } finally {
+        if (changed) {
+            Java.classFactory.loader = previous;
+        }
+    }
+}
+
+function getNmssInstance() {
+    return withAppLoader(function () {
+        var NmssSa = Java.use("nmss.app.NmssSa");
+        try {
+            var inst = NmssSa.getInstObj();
+            if (inst) {
+                nmssLifecycle.last_instance_source = 'getInstObj';
+                return inst;
+            }
+        } catch (e) {
+            nmssLifecycle.nmss_last_error = 'getInstObj ERR:' + e;
+        }
+        var found = null;
+        try {
+            Java.choose('nmss.app.NmssSa', {
+                onMatch: function (instance) {
+                    if (found === null) found = instance;
+                },
+                onComplete: function () {}
+            });
+        } catch (e) {
+            nmssLifecycle.nmss_last_error = 'choose ERR:' + e;
+        }
+        if (found) {
+            nmssLifecycle.last_instance_source = 'Java.choose';
+            return found;
+        }
+        return null;
+    });
+}
+
+function getAppClass(name) {
+    return withAppLoader(function () {
+        return Java.use(name);
+    });
+}
+
+function nmssStateSnapshot(inst) {
+    function stringifyValue(value) {
+        try { return value === null ? 'null' : String(value); } catch (e) { return '<err:' + e + '>'; }
+    }
+    if (!inst) return { inst: false };
+    function readField(name) {
+        try { return stringifyValue(inst[name].value); } catch (e) { return '<err>'; }
+    }
+    return {
+        inst: true,
+        m_bAppExit: readField('m_bAppExit'),
+        m_bIsRPExists: readField('m_bIsRPExists'),
+        m_nCode: readField('m_nCode'),
+        m_strMsg: readField('m_strMsg'),
+        m_activity: (function () {
+            try {
+                var a = inst.m_activity.value;
+                return a ? a.$className : 'null';
+            } catch (e) {
+                return '<err>';
+            }
+        })(),
+        m_detectCallBack: (function () {
+            try {
+                var cb = inst.m_detectCallBack.value;
+                return cb ? cb.$className : 'null';
+            } catch (e) {
+                return '<err>';
+            }
+        })(),
+    };
+}
+
+function prepareCertReadyCore(challenge, readyChallenge) {
+    var requestedChallenge = challenge || '6BA4D60738580083';
+    var warmChallenge = readyChallenge || '6BA4D60738580083';
+    var result = {
+        ok: false,
+        challenge: requestedChallenge,
+        ready_challenge: warmChallenge,
+        token: '',
+        token_len: 0,
+        bridge_init: 'skip',
+        load_cr: 'skip',
+        on_resume: 'skip',
+        run: 'skip',
+        state_before: null,
+        state_after: null,
+        error: null,
+    };
+    Java.performNow(function () {
+        try {
+            var waitedActivity = waitForGameActivity(5000);
+            if (waitedActivity) {
+                result.activity_class = waitedActivity.$className;
+            }
+            var NmssSa = getAppClass("nmss.app.NmssSa");
+            var Bridge = null;
+            try { Bridge = getAppClass("nmss.app.SecurityUnrealBridge"); } catch (e) {}
+            var inst = getNmssInstance();
+            result.instance_source = nmssLifecycle.last_instance_source;
+            result.state_before = nmssStateSnapshot(inst);
+            if (!inst) {
+                result.error = 'NO_INSTANCE';
+                result.lifecycle = JSON.parse(JSON.stringify(nmssLifecycle));
+                return;
+            }
+            var activity = null;
+            try { activity = inst.m_activity.value; } catch (e) {}
+            if (!activity) activity = waitedActivity;
+            var shouldInit = false;
+            try { shouldInit = !inst.m_activity.value && !!activity; } catch (e) { shouldInit = !!activity; }
+            if (Bridge && activity && shouldInit) {
+                try {
+                    var bridge = Bridge.$new();
+                    bridge.init(activity);
+                    result.bridge_init = 'ok';
+                } catch (e) {
+                    result.bridge_init = 'ERR:' + e;
+                }
+            } else if (activity) {
+                result.bridge_init = 'skip_existing_activity';
+            }
+            result.load_cr = 'deferred';
+            try { inst.onResume(); result.on_resume = 'ok'; } catch (e) { result.on_resume = 'ERR:' + e; }
+            try { inst.run(warmChallenge); result.run = 'ok'; } catch (e) { result.run = 'ERR:' + e; }
+            try {
+                var token = inst.getCertValue(requestedChallenge);
+                result.token = token ? token.toString() : '';
+                result.token_len = result.token.length;
+                result.ok = result.token_len > 0;
+            } catch (e) {
+                result.error = 'getCertValue ERR:' + e;
+            }
+            result.state_after = nmssStateSnapshot(inst);
+            result.lifecycle = JSON.parse(JSON.stringify(nmssLifecycle));
+            result.prepare_source = nmssLifecycle.last_instance_source || 'unknown';
+        } catch (outer) {
+            result.error = 'prepareCertReady ERR:' + outer;
+            result.lifecycle = JSON.parse(JSON.stringify(nmssLifecycle));
+        }
+    });
+    console.log('[CAPTURE] prepareCertReady challenge=' + requestedChallenge +
+                ' ready=' + warmChallenge +
+                ' token_len=' + result.token_len +
+                ' bridge_init=' + result.bridge_init +
+                ' load_cr=' + String(result.load_cr) +
+                ' on_resume=' + result.on_resume +
+                ' run=' + result.run);
+    return JSON.stringify(result);
+}
+
 rpc.exports = {
     ping: function() {
         return JSON.stringify({
@@ -409,7 +728,7 @@ rpc.exports = {
         });
     },
     callCert: function(c) {
-        var r=null; Java.performNow(function(){try{var i=Java.use("nmss.app.NmssSa").getInstObj();
+        var r=null; Java.performNow(function(){try{var i=getNmssInstance();
         if(!i){r='NO_INSTANCE';return;} r=i.getCertValue(c); if(r)r=r.toString();}catch(e){r='ERR:'+e;}}); return r||'';
     },
     captureCert: function(c) {
@@ -417,12 +736,224 @@ rpc.exports = {
         console.log('[CAPTURE] captureCert arm challenge=' + c);
         captureNext=true;
         pendingChallenge=c;
-        var r=null; Java.performNow(function(){try{var i=Java.use("nmss.app.NmssSa").getInstObj();
+        var r=null; Java.performNow(function(){try{var i=getNmssInstance();
         if(!i){r='NO_INSTANCE';return;} r=i.getCertValue(c); if(r)r=r.toString();}catch(e){r='ERR:'+e;}}); return r||'';
+    },
+    prepareCertReady: function(challenge, readyChallenge) {
+        return prepareCertReadyCore(challenge, readyChallenge);
+    },
+    nmssLifecycleState: function() {
+        return JSON.stringify(nmssLifecycle);
     },
 };
 console.log('[CAPTURE] Agent loaded, RPC ready');
 """.replace("__DEVICE_DIR__", DEVICE_DIR)
+
+MINIMAL_AGENT_JS = r"""
+'use strict';
+
+function resolveAppLoader() {
+    var loader = null;
+    try {
+        var ActivityThread = Java.use('android.app.ActivityThread');
+        var app = ActivityThread.currentApplication();
+        if (app) loader = app.getClassLoader();
+        if (!loader) {
+            var at = ActivityThread.currentActivityThread();
+            if (at) {
+                var app2 = at.getApplication();
+                if (app2) loader = app2.getClassLoader();
+            }
+        }
+    } catch (e) {}
+    return loader;
+}
+
+function withAppLoader(fn) {
+    var previous = null;
+    var changed = false;
+    try {
+        var loader = resolveAppLoader();
+        if (loader) {
+            previous = Java.classFactory.loader;
+            Java.classFactory.loader = loader;
+            changed = true;
+        }
+        return fn();
+    } finally {
+        if (changed) Java.classFactory.loader = previous;
+    }
+}
+
+function getCurrentGameActivity() {
+    return withAppLoader(function () {
+        try {
+            var GameActivity = Java.use('com.epicgames.unreal.GameActivity');
+            var current = GameActivity._activity.value;
+            if (current) return current;
+        } catch (e) {}
+        var found = null;
+        try {
+            Java.choose('com.epicgames.unreal.GameActivity', {
+                onMatch: function (instance) {
+                    if (found === null) found = instance;
+                },
+                onComplete: function () {}
+            });
+        } catch (e) {}
+        return found;
+    });
+}
+
+function waitForGameActivity(timeoutMs) {
+    return withAppLoader(function () {
+        var Thread = Java.use('java.lang.Thread');
+        var deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            var activity = getCurrentGameActivity();
+            if (activity) return activity;
+            Thread.sleep(100);
+        }
+        return null;
+    });
+}
+
+function getNmssInstance() {
+    return withAppLoader(function () {
+        var NmssSa = Java.use('nmss.app.NmssSa');
+        try {
+            var inst = NmssSa.getInstObj();
+            if (inst) return { inst: inst, source: 'getInstObj' };
+        } catch (e) {}
+        var found = null;
+        try {
+            Java.choose('nmss.app.NmssSa', {
+                onMatch: function (instance) {
+                    if (found === null) found = instance;
+                },
+                onComplete: function () {}
+            });
+        } catch (e) {}
+        return { inst: found, source: found ? 'Java.choose' : null };
+    });
+}
+
+function nmssStateSnapshot(inst) {
+    function stringifyValue(value) {
+        try { return value === null ? 'null' : String(value); } catch (e) { return '<err:' + e + '>'; }
+    }
+    if (!inst) return { inst: false };
+    function readField(name) {
+        try { return stringifyValue(inst[name].value); } catch (e) { return '<err>'; }
+    }
+    return {
+        inst: true,
+        m_bAppExit: readField('m_bAppExit'),
+        m_bIsRPExists: readField('m_bIsRPExists'),
+        m_nCode: readField('m_nCode'),
+        m_strMsg: readField('m_strMsg'),
+        m_activity: (function () {
+            try {
+                var a = inst.m_activity.value;
+                return a ? a.$className : 'null';
+            } catch (e) {
+                return '<err>';
+            }
+        })(),
+        m_detectCallBack: (function () {
+            try {
+                var cb = inst.m_detectCallBack.value;
+                return cb ? cb.$className : 'null';
+            } catch (e) {
+                return '<err>';
+            }
+        })(),
+    };
+}
+
+function prepareCertReadyCore(challenge, readyChallenge) {
+    var requestedChallenge = challenge || '6BA4D60738580083';
+    var warmChallenge = readyChallenge || '6BA4D60738580083';
+    var result = {
+        ok: false,
+        challenge: requestedChallenge,
+        ready_challenge: warmChallenge,
+        token: '',
+        token_len: 0,
+        bridge_init: 'skip',
+        load_cr: 'deferred',
+        on_resume: 'skip',
+        run: 'skip',
+        state_before: null,
+        state_after: null,
+        instance_source: null,
+        activity_class: null,
+        error: null,
+    };
+    Java.performNow(function () {
+        try {
+            var waitedActivity = waitForGameActivity(5000);
+            if (waitedActivity) result.activity_class = waitedActivity.$className;
+            var instanceInfo = getNmssInstance();
+            var inst = instanceInfo.inst;
+            result.instance_source = instanceInfo.source;
+            result.state_before = nmssStateSnapshot(inst);
+            if (!inst) {
+                result.error = 'NO_INSTANCE';
+                return;
+            }
+            var activity = null;
+            try { activity = inst.m_activity.value; } catch (e) {}
+            if (!activity) activity = waitedActivity;
+            if (activity) result.bridge_init = 'skip_existing_activity';
+            try { inst.onResume(); result.on_resume = 'ok'; } catch (e) { result.on_resume = 'ERR:' + e; }
+            try { inst.run(warmChallenge); result.run = 'ok'; } catch (e) { result.run = 'ERR:' + e; }
+            try {
+                var token = inst.getCertValue(requestedChallenge);
+                result.token = token ? token.toString() : '';
+                result.token_len = result.token.length;
+                result.ok = result.token_len > 0;
+            } catch (e) {
+                result.error = 'getCertValue ERR:' + e;
+            }
+            result.state_after = nmssStateSnapshot(inst);
+        } catch (outer) {
+            result.error = 'prepareCertReady ERR:' + outer;
+        }
+    });
+    console.log('[CAPTURE] minimal prepareCertReady challenge=' + requestedChallenge +
+                ' ready=' + warmChallenge +
+                ' token_len=' + result.token_len +
+                ' source=' + result.instance_source +
+                ' on_resume=' + result.on_resume +
+                ' run=' + result.run);
+    return JSON.stringify(result);
+}
+
+rpc.exports = {
+    ping: function() {
+        return JSON.stringify({ target: 'minimal_ready' });
+    },
+    callCert: function(c) {
+        var r = null;
+        Java.performNow(function () {
+            try {
+                var info = getNmssInstance();
+                if (!info.inst) { r = 'NO_INSTANCE'; return; }
+                r = info.inst.getCertValue(c);
+                if (r) r = r.toString();
+            } catch (e) {
+                r = 'ERR:' + e;
+            }
+        });
+        return r || '';
+    },
+    prepareCertReady: function(challenge, readyChallenge) {
+        return prepareCertReadyCore(challenge, readyChallenge);
+    }
+};
+console.log('[CAPTURE] Minimal agent loaded, RPC ready');
+"""
 
 
 class FridaCLI:
@@ -435,7 +966,7 @@ class FridaCLI:
         self._rlines_lock = threading.Lock()
         self.loaded_scripts = []
 
-    def start(self, spawn=True, pid=None):
+    def start(self, spawn=True, pid=None, agent_source=None):
         subprocess.run(
             ADB + ["forward", f"tcp:{XERDA_HOST_PORT}", f"tcp:{XERDA_DEVICE_PORT}"],
             capture_output=True,
@@ -443,7 +974,7 @@ class FridaCLI:
         )
         agent = "/tmp/aeon_capture_agent.js"
         with open(agent, "w") as f:
-            f.write(AGENT_JS)
+            f.write(agent_source if agent_source is not None else AGENT_JS)
         if spawn:
             cmd = ["frida", "-H", f"localhost:{XERDA_HOST_PORT}", "-f", PACKAGE, "-l", agent]
         else:
@@ -653,6 +1184,26 @@ def parse_thread_ids(params):
     return thread_ids
 
 
+def parse_json_result(value):
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            try:
+                return json.loads(stripped)
+            except Exception:
+                return value
+    return value
+
+
+def prepare_cert_ready(challenge, ready_challenge=READY_CHALLENGE, timeout=60):
+    expr = (
+        f"rpc.exports.prepareCertReady("
+        f"{json.dumps(challenge)}, {json.dumps(ready_challenge)})"
+    )
+    result = bridge.eval_rpc(expr, timeout=timeout) if bridge.alive else None
+    return parse_json_result(result)
+
+
 def pull_capture():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     files = {}
@@ -672,6 +1223,18 @@ def pull_capture():
         )
         if os.path.exists(p):
             files[name] = os.path.getsize(p)
+    try:
+        os.remove(DYNAMIC_TRACE_HOST_PATH)
+    except FileNotFoundError:
+        pass
+    subprocess.run(
+        ADB + ["pull", DYNAMIC_TRACE_DEVICE_PATH, DYNAMIC_TRACE_HOST_PATH],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if os.path.exists(DYNAMIC_TRACE_HOST_PATH):
+        files[os.path.basename(DYNAMIC_TRACE_HOST_PATH)] = os.path.getsize(DYNAMIC_TRACE_HOST_PATH)
     return files
 
 
@@ -796,9 +1359,11 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/call":
             c = (params.get("c") or ["6BA4D60738580083"])[0]
             call_timeout = parse_int_param(params, "timeout", 120, minimum=5, maximum=300)
+            prepare = parse_bool_param(params, "prepare", default=False)
             fixed_trace = parse_bool_param(params, "fixed_trace", default=False)
             stalker = parse_bool_param(params, "stalker", default=False)
             thread_ids = parse_thread_ids(params)
+            prepare_result = prepare_cert_ready(c, timeout=min(call_timeout, 60)) if prepare and bridge.alive else None
             stalker_armed = bridge.eval_rpc(
                 "globalThis.__jitGateStalkerArm && globalThis.__jitGateStalkerArm()",
                 timeout=5,
@@ -811,6 +1376,40 @@ class Handler(BaseHTTPRequestHandler):
                     timeout=10,
                 )
             result = bridge.eval_rpc(f"rpc.exports.callCert('{c}')", timeout=call_timeout)
+            page_trace_pending = None
+            if bridge.alive:
+                pending_deadline = time.time() + 10.0
+                pending_waited = 0.0
+                while time.time() < pending_deadline:
+                    try:
+                        page_trace_pending = bridge.eval_rpc(
+                            "globalThis.__nmssCorePageTraceCtl && globalThis.__nmssCorePageTraceCtl.pendingExactHooks && JSON.stringify(globalThis.__nmssCorePageTraceCtl.pendingExactHooks())",
+                            timeout=5,
+                        )
+                    except Exception:
+                        page_trace_pending = None
+                        break
+                    try:
+                        if not page_trace_pending:
+                            break
+                        pending_obj = json.loads(page_trace_pending)
+                        if not any(bool(pending_obj.get(k)) for k in ("pre", "saved", "next", "ret", "cont140358", "cont1549ac")):
+                            break
+                        if bool(pending_obj.get("closed")):
+                            break
+                    except Exception:
+                        break
+                    time.sleep(0.1)
+                    pending_waited += 0.1
+                try:
+                    if page_trace_pending and pending_waited > 0:
+                        log.info(f"Page trace pending wait: {pending_waited:.1f}s pending={page_trace_pending}")
+                except Exception:
+                    pass
+            page_trace_disarm = bridge.eval_rpc(
+                "globalThis.__nmssCorePageTraceCtl && globalThis.__nmssCorePageTraceCtl.disarmAll('after /call')",
+                timeout=5,
+            ) if bridge.alive else None
             stalker_dump = bridge.eval_rpc(
                 "globalThis.__jitGateStalkerDump && globalThis.__jitGateStalkerDump()",
                 timeout=5,
@@ -821,11 +1420,25 @@ class Handler(BaseHTTPRequestHandler):
             ) if stalker and bridge.alive else None
             self._json(200, {
                 "challenge": c,
+                "prepare": prepare_result,
                 "token": result,
+                "page_trace_pending": page_trace_pending,
+                "page_trace_disarm": page_trace_disarm,
                 "fixed_trace_arm": fixed_trace_arm,
                 "stalker_armed": stalker_armed,
                 "stalker": stalker_dump,
                 "stalker_stop": stalker_stop,
+            })
+
+        elif parsed.path == "/prepare":
+            c = (params.get("c") or [READY_CHALLENGE])[0]
+            timeout = parse_int_param(params, "timeout", 60, minimum=10, maximum=300)
+            ready_challenge = (params.get("ready") or [READY_CHALLENGE])[0]
+            result = prepare_cert_ready(c, ready_challenge=ready_challenge, timeout=timeout)
+            self._json(200, {
+                "challenge": c,
+                "ready_challenge": ready_challenge,
+                "result": result,
             })
 
         elif parsed.path == "/fixed-trace/arm":
@@ -857,6 +1470,14 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/memdump":
             c = (params.get("c") or ["6BA4D60738580083"])[0]
             call_timeout = parse_int_param(params, "timeout", 300, minimum=10, maximum=600)
+            prepare_result = prepare_cert_ready(c, timeout=min(call_timeout, 60)) if bridge.alive else None
+            if not (isinstance(prepare_result, dict) and (prepare_result.get("token") or "")):
+                self._json(409, {
+                    "challenge": c,
+                    "error": "plain readiness preflight returned empty token",
+                    "prepare": prepare_result,
+                })
+                return
             log.info(f"Memdump: arm + getCertValue({c})")
             # 1. Arm memdump
             arm_result = bridge.eval_rpc(
@@ -881,6 +1502,7 @@ class Handler(BaseHTTPRequestHandler):
             log.info(f"Memdump: pulled {len(files)} files, {sum(files.values()) / (1024*1024):.1f}MB total")
             self._json(200, {
                 "challenge": c,
+                "prepare": prepare_result,
                 "token": token,
                 "arm": arm_result,
                 "status": status,
@@ -911,12 +1533,21 @@ class Handler(BaseHTTPRequestHandler):
 
         elif parsed.path == "/capture":
             c = (params.get("c") or ["6BA4D60738580083"])[0]
+            prepare_result = prepare_cert_ready(c, timeout=60) if bridge.alive else None
+            if not (isinstance(prepare_result, dict) and (prepare_result.get("token") or "")):
+                self._json(409, {
+                    "challenge": c,
+                    "error": "plain readiness preflight returned empty token",
+                    "prepare": prepare_result,
+                })
+                return
             log.info(f"Capture JIT hash: getCertValue({c})")
             result = bridge.eval_rpc(f"rpc.exports.captureCert('{c}')", timeout=20)
             time.sleep(3)  # wait for file writes on device
             files = pull_capture()
             self._json(200, {
                 "challenge": c,
+                "prepare": prepare_result,
                 "token": result,
                 "capture_dir": OUTPUT_DIR,
                 "files": files,
@@ -925,6 +1556,14 @@ class Handler(BaseHTTPRequestHandler):
 
         elif parsed.path == "/trace":
             c = (params.get("c") or ["6BA4D60738580083"])[0]
+            prepare_result = prepare_cert_ready(c, timeout=60) if bridge.alive else None
+            if not (isinstance(prepare_result, dict) and (prepare_result.get("token") or "")):
+                self._json(409, {
+                    "challenge": c,
+                    "error": "plain readiness preflight returned empty token",
+                    "prepare": prepare_result,
+                })
+                return
             log.info(f"Trace JIT hash: getCertValue({c})")
             result = bridge.eval_rpc(f"rpc.exports.captureCert('{c}')", timeout=20)
             time.sleep(3)  # wait for file writes on device
@@ -932,6 +1571,7 @@ class Handler(BaseHTTPRequestHandler):
             trace = run_aeon_trace()
             self._json(200, {
                 "challenge": c,
+                "prepare": prepare_result,
                 "token": result,
                 "capture_dir": OUTPUT_DIR,
                 "files": files,
@@ -1095,8 +1735,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8877)
     parser.add_argument("--attach", action="store_true")
+    parser.add_argument("--minimal", action="store_true", help="use minimal readiness-only Frida agent")
     parser.add_argument("--relay-js", action="append", default=[], help="extra .js file to load into the Frida REPL after startup")
     args = parser.parse_args()
+
+    agent_source = MINIMAL_AGENT_JS if args.minimal else AGENT_JS
 
     if args.attach:
         r = subprocess.run(ADB + ["shell", "su 0 pidof com.netmarble.thered"],
@@ -1104,9 +1747,9 @@ def main():
         pid = r.stdout.strip()
         if not pid:
             log.error("Game not running"); sys.exit(1)
-        bridge.start(spawn=False, pid=int(pid))
+        bridge.start(spawn=False, pid=int(pid), agent_source=agent_source)
     else:
-        bridge.start(spawn=True)
+        bridge.start(spawn=True, agent_source=agent_source)
 
     log.info("Waiting for agent...")
     for _ in range(60):
@@ -1128,6 +1771,7 @@ def main():
     log.info(f"Capture server on :{args.port}")
     log.info(f"  GET /status        — check readiness")
     log.info(f"  GET /call?c=<hex>  — call getCertValue")
+    log.info(f"  GET /prepare?c=<hex> — plain onResume/run readiness preflight")
     log.info(f"  GET /call?c=<hex>&fixed_trace=1 — arm fixed-thread trace for this call")
     log.info(f"  GET /translated/load[?elf=...&map=...] — load translated JIT ELF + map")
     log.info(f"  GET /translated/arm[?elf=...&map=...&min_pc=0x...&max_steps=4096] — arm translated dispatch")

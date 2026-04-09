@@ -71,6 +71,20 @@
             prepareStage: null,
             prepareStages: [],
         },
+        nmssCore: {
+            hooksInstalled: false,
+            hooks: {},
+            entries: [],
+            active: null,
+            last: null,
+            trace: {
+                active: false,
+                threadId: null,
+                startedAt: null,
+                summary: {},
+                top: [],
+            },
+        },
         memdump: {
             armed: false,
             captured: false,
@@ -115,6 +129,7 @@
         },
         dynamic: {
             armed: false,
+            traceAllThreads: true,
             loaded: false,
             loadError: null,
             minPc: null,
@@ -169,6 +184,7 @@
     var ENABLE_POST_RESUME_DEBUG = false;
     var MEMDUMP_CHUNK = 0x10000;
     var originalCallCertExport = null;
+    var READY_CHALLENGE = '6BA4D60738580083';
 
     function parseJsonMaybe(value) {
         if (typeof value !== 'string') return value;
@@ -1330,6 +1346,78 @@
         return true;
     }
 
+    function dynamicPromoteSimpleEpilogueExit(pending, finalPc) {
+        if (!pending || !pending.ctxPtr || !finalPc) return null;
+        try {
+            var pc = normalizeWordPtr(finalPc);
+            if (!dynamicPtrInCurrentCodeRange(pc)) return null;
+            var epPc = pc;
+            var restoreW0 = false;
+            var tailW0 = 0;
+            var w0 = epPc.readU32();
+            var w1 = epPc.add(4).readU32();
+            var w2 = epPc.add(8).readU32();
+            if (!((w1 === 0x910083ff) && (w2 === 0xd65f03c0) && ((w0 & 0xffc003ff) === 0xa94003e0))) {
+                var t0 = pc.readU32();
+                var t1 = pc.add(4).readU32();
+                var t2 = pc.add(8).readU32();
+                var t3 = pc.add(12).readU32();
+                var t4 = pc.add(16).readU32();
+                if (t0 === 0x53087c01 &&
+                    t1 === 0x4a010000 &&
+                    ((t2 & 0xffc003ff) === 0xa94003e0) &&
+                    t3 === 0x910083ff &&
+                    t4 === 0xd65f03c0) {
+                    var curX0 = readWordExact(pending.ctxPtr.add(translatedOffsetX(0)));
+                    var curW0 = u64Number(curX0) >>> 0;
+                    var tmpW1 = (curW0 >>> 16) >>> 0;
+                    tailW0 = (curW0 ^ tmpW1) >>> 0;
+                    restoreW0 = true;
+                    epPc = pc.add(8);
+                    w0 = epPc.readU32();
+                    w1 = epPc.add(4).readU32();
+                    w2 = epPc.add(8).readU32();
+                } else {
+                    return null;
+                }
+            }
+            var rn = (w0 >>> 5) & 0x1f;
+            var rt = w0 & 0x1f;
+            var rt2 = (w0 >>> 10) & 0x1f;
+            var imm7 = (w0 >>> 15) & 0x7f;
+            if (rn !== 31 || rt2 !== 30 || rt > 30) {
+                return null;
+            }
+            var signedImm7 = (imm7 & 0x40) ? (imm7 - 0x80) : imm7;
+            var loadOffset = signedImm7 * 8;
+            var addImm12 = (w1 >>> 10) & 0xfff;
+            var addShift = (w1 >>> 22) & 0x3;
+            var sp = readWordExact(pending.ctxPtr.add(translatedOffsetSp()));
+            var slotBase = sp.add(loadOffset);
+            var restoredRt = readWordExact(slotBase);
+            var restoredLr = readWordExact(slotBase.add(8));
+            if (restoreW0) {
+                writeWordExact(pending.ctxPtr.add(translatedOffsetX(0)), ptr(tailW0 >>> 0));
+            }
+            writeWordExact(pending.ctxPtr.add(translatedOffsetX(rt)), restoredRt);
+            writeWordExact(pending.ctxPtr.add(translatedOffsetX(30)), restoredLr);
+            var newSp = sp.add(addImm12 << (addShift === 1 ? 12 : 0));
+            writeWordExact(pending.ctxPtr.add(translatedOffsetSp()), newSp);
+            console.log('[CAPTURE] [GATE] dynamic promote epilogue final=' + fmtPtr(pc) +
+                ' ep=' + fmtPtr(epPc) +
+                ' reg=x' + rt +
+                ' restored_reg=' + fmtPtr(restoredRt) +
+                ' restored_lr=' + fmtPtr(restoredLr) +
+                (restoreW0 ? ' restored_w0=0x' + tailW0.toString(16) : '') +
+                ' sp=' + fmtPtr(sp) +
+                ' new_sp=' + fmtPtr(newSp));
+            return normalizeWordPtr(restoredLr);
+        } catch (e) {
+            noteFailure('dynamic promote epilogue', e);
+            return null;
+        }
+    }
+
     function dynamicIsNonCallableExternalTarget(value) {
         if (!value) return false;
         if (dynamicPtrInCurrentCodeRange(value)) return false;
@@ -1785,6 +1873,12 @@
             ' info=0x' + normalizeWordPtr(raw.info_pc).toString().replace(/^0x/, '') +
             (raw.raw_hex ? ' raw=' + raw.raw_hex : ''));
         var finalPcPtr = normalizeWordPtr(raw.final_pc);
+        if (raw.stop_code === 2) {
+            var promotedFinal = dynamicPromoteSimpleEpilogueExit(trap.pending, finalPcPtr);
+            if (promotedFinal && !promotedFinal.isNull()) {
+                finalPcPtr = promotedFinal;
+            }
+        }
         if (raw.stop_code === 2 && dynamicShouldSanitizeExitPc(finalPcPtr)) {
             var fallbackPc = dynamicChooseFallbackExitPc(trap.pending, finalPcPtr);
             if (fallbackPc && !fallbackPc.isNull() && !fallbackPc.equals(finalPcPtr)) {
@@ -2375,6 +2469,92 @@
         list.push(item);
     }
 
+    function noteNmssCoreEntry(info) {
+        state.nmssCore.last = info;
+        pushLimited(state.nmssCore.entries, info, 32);
+    }
+
+    function resetNmssCoreTrace() {
+        state.nmssCore.trace.active = false;
+        state.nmssCore.trace.threadId = null;
+        state.nmssCore.trace.startedAt = null;
+        state.nmssCore.trace.summary = {};
+        state.nmssCore.trace.top = [];
+    }
+
+    function summarizeNmssCoreTrace(summary) {
+        var items = [];
+        Object.keys(summary || {}).forEach(function (key) {
+            var count = summary[key];
+            var addr = null;
+            try { addr = ptr(key); } catch (e) {}
+            var info = addr ? describeAddr(addr) : { addr: key };
+            items.push({
+                target: info.addr || key,
+                count: count,
+                module: info.module || null,
+                offset: info.offset || null,
+                symbol: info.symbol || null,
+            });
+        });
+        items.sort(function (a, b) {
+            return (b.count >>> 0) - (a.count >>> 0);
+        });
+        return items.slice(0, 16);
+    }
+
+    function startNmssCoreTrace(threadId) {
+        if (!(threadId > 0)) return false;
+        if (state.nmssCore.trace.active && state.nmssCore.trace.threadId === threadId) return true;
+        try {
+            resetNmssCoreTrace();
+            state.nmssCore.trace.active = true;
+            state.nmssCore.trace.threadId = threadId;
+            state.nmssCore.trace.startedAt = (new Date()).toISOString();
+            console.log('[CAPTURE] [GATE] nmss core trace start thread=' + threadId);
+            return true;
+        } catch (e) {
+            noteFailure('nmss core trace start thread=' + threadId, e);
+            resetNmssCoreTrace();
+            return false;
+        }
+    }
+
+    function stopNmssCoreTrace(threadId, reason) {
+        if (!state.nmssCore.trace.active) return false;
+        var tracedThreadId = state.nmssCore.trace.threadId;
+        state.nmssCore.trace.top = summarizeNmssCoreTrace(state.nmssCore.trace.summary);
+        console.log('[CAPTURE] [GATE] nmss core trace stop thread=' +
+            (tracedThreadId === null || tracedThreadId === undefined ? 'unknown' : tracedThreadId) +
+            ' reason=' + (reason || 'leave') +
+            ' top=' + JSON.stringify(state.nmssCore.trace.top.slice(0, 8)));
+        state.nmssCore.last_trace = {
+            thread_id: tracedThreadId,
+            reason: reason || 'leave',
+            started_at: state.nmssCore.trace.startedAt,
+            finished_at: (new Date()).toISOString(),
+            top: state.nmssCore.trace.top.slice(0, 16),
+        };
+        resetNmssCoreTrace();
+        return true;
+    }
+
+    function chooseCallScopeRootThreadId(challenge) {
+        var fallback = currentThreadIdMaybe();
+        try {
+            var last = state.nmssCore && state.nmssCore.last;
+            if (!last) return fallback;
+            if (!last.thread_id && last.thread_id !== 0) return fallback;
+            var lastAt = last.at ? Date.parse(last.at) : NaN;
+            var ageMs = isNaN(lastAt) ? null : (nowMillis() - lastAt);
+            if (ageMs !== null && ageMs > 10000) return fallback;
+            if (challenge && last.challenge && String(challenge) !== String(last.challenge)) return fallback;
+            return last.thread_id;
+        } catch (e) {
+            return fallback;
+        }
+    }
+
     function currentThreadIdMaybe() {
         try {
             return Process.getCurrentThreadId();
@@ -2410,7 +2590,7 @@
     function dynamicShouldSkipNonRootMainThread(threadId) {
         var activeCall = state.dynamic && state.dynamic.activeCall;
         if (!activeCall) return false;
-        var rootThreadId = activeCall.root_thread_id;
+        var rootThreadId = dynamicEffectiveRootThreadId(activeCall);
         if (rootThreadId === null || rootThreadId === undefined) return false;
         if (threadId === rootThreadId) return false;
         try {
@@ -2457,17 +2637,95 @@
     function dynamicShouldAdmitNewThread(threadId, name) {
         var activeCall = state.dynamic && state.dynamic.activeCall;
         if (!activeCall) return false;
-        var rootThreadId = activeCall.root_thread_id;
+        if (isBackgroundArtThreadName(name)) return false;
+        if (state.dynamic && state.dynamic.traceAllThreads) return true;
+        var rootThreadId = dynamicEffectiveRootThreadId(activeCall);
         if (threadId === rootThreadId) return true;
         if (dynamicShouldSkipNonRootMainThread(threadId)) return false;
         return dynamicIsLikelyWorkerThreadName(name);
     }
 
+    function dynamicEffectiveRootThreadId(activeCall) {
+        if (!activeCall) return null;
+        if (activeCall.native_root_thread_id !== null && activeCall.native_root_thread_id !== undefined) {
+            return activeCall.native_root_thread_id;
+        }
+        if (activeCall.root_thread_id !== null && activeCall.root_thread_id !== undefined) {
+            return activeCall.root_thread_id;
+        }
+        return null;
+    }
+
+    function dynamicActiveRootNativeResume() {
+        try {
+            var activeCall = state.dynamic && state.dynamic.activeCall;
+            if (!activeCall) return null;
+            var rootThreadId = dynamicEffectiveRootThreadId(activeCall);
+            if (rootThreadId === null || rootThreadId === undefined) return null;
+            return nativeResumeForThread(rootThreadId);
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function dynamicChooseForeignPostResumeResumePc(cpuCtx) {
+        if (!cpuCtx) return null;
+        var candidates = [cpuCtx.lr, cpuCtx.x30];
+        for (var i = 0; i < candidates.length; i++) {
+            try {
+                var p = normalizeWordPtr(candidates[i]);
+                if (p.isNull()) continue;
+                if (dynamicPtrInCurrentCodeRange(p)) continue;
+                if (!dynamicHasExecutableRange(p)) continue;
+                return p;
+            } catch (e) {}
+        }
+        return null;
+    }
+
+    function dynamicMaybeQuarantineForeignPostResume(details, threadId, dynThreadName, why) {
+        if (!details || !details.context) return false;
+        if (threadId === null || threadId === undefined) return false;
+        if (hasClaim(state.dynamic.threadClaims, threadId)) return false;
+        var activeCall = state.dynamic && state.dynamic.activeCall;
+        if (!activeCall) return false;
+        var rootThreadId = dynamicEffectiveRootThreadId(activeCall);
+        if (rootThreadId === null || rootThreadId === undefined) return false;
+        if (threadId === rootThreadId) return false;
+        var rootResume = dynamicActiveRootNativeResume();
+        if (!rootResume) return false;
+        var resumePc = dynamicChooseForeignPostResumeResumePc(details.context);
+        if (!resumePc || resumePc.isNull()) {
+            console.log('[CAPTURE] [GATE] dynamic quarantine miss thread=' + threadId +
+                ' name=' + (dynThreadName || '<unknown>') +
+                ' pc=' + fmtPtr(details.context.pc) +
+                ' lr=' + fmtPtr(details.context.lr) +
+                ' root=' + dynamicCurrentRootThreadLabel() +
+                ' root_final=' + (rootResume.final_pc || '<none>') +
+                ' reason=' + (why || 'foreign-post-resume'));
+            return false;
+        }
+        details.context.pc = resumePc;
+        console.log('[CAPTURE] [GATE] dynamic quarantine foreign thread=' + threadId +
+            ' name=' + (dynThreadName || '<unknown>') +
+            ' pc=' + fmtPtr(details.context.pc) +
+            ' resume=' + fmtPtr(resumePc) +
+            ' root=' + dynamicCurrentRootThreadLabel() +
+            ' root_final=' + (rootResume.final_pc || '<none>') +
+            ' reason=' + (why || 'foreign-post-resume'));
+        return true;
+    }
+
     function dynamicCurrentRootThreadLabel() {
         try {
             var activeCall = state.dynamic && state.dynamic.activeCall;
-            if (activeCall && activeCall.root_thread_id !== null && activeCall.root_thread_id !== undefined) {
-                return String(activeCall.root_thread_id);
+            var rootThreadId = dynamicEffectiveRootThreadId(activeCall);
+            if (rootThreadId !== null && rootThreadId !== undefined) {
+                if (activeCall && activeCall.native_root_thread_id !== null && activeCall.native_root_thread_id !== undefined &&
+                    rootThreadId === activeCall.native_root_thread_id) {
+                    return String(rootThreadId) + ' (native)';
+                }
+                return String(rootThreadId);
             }
         } catch (e) {}
         return '<none>';
@@ -3110,6 +3368,17 @@
         };
     }
 
+    function shouldActivateCorridor() {
+        return !!(
+            state.translated.armed ||
+            state.dynamic.armed ||
+            state.stalker.armed ||
+            state.freeze.armed ||
+            state.memdump.armed ||
+            state.fixedTraceArm
+        );
+    }
+
     function topThreadIds(limit) {
         var maxThreads = parseInt(limit || 3, 10);
         if (!(maxThreads > 0)) maxThreads = 3;
@@ -3155,7 +3424,7 @@
         Java.performNow(function () {
             var r = null;
             try {
-                var inst = Java.use('nmss.app.NmssSa').getInstObj();
+                var inst = getNmssInstance();
                 if (!inst) {
                     r = 'NO_INSTANCE';
                 } else {
@@ -3168,6 +3437,364 @@
             token = r || '';
         });
         return token;
+    }
+
+    function resolveAppLoader() {
+        var loader = null;
+        try {
+            var ActivityThread = Java.use('android.app.ActivityThread');
+            var app = ActivityThread.currentApplication();
+            if (app) loader = app.getClassLoader();
+            if (!loader) {
+                var at = ActivityThread.currentActivityThread();
+                if (at) {
+                    var app2 = at.getApplication();
+                    if (app2) loader = app2.getClassLoader();
+                }
+            }
+        } catch (e) {}
+        return loader;
+    }
+
+    function withAppLoader(fn) {
+        var previous = null;
+        var changed = false;
+        try {
+            var loader = resolveAppLoader();
+            if (loader) {
+                previous = Java.classFactory.loader;
+                Java.classFactory.loader = loader;
+                changed = true;
+            }
+            return fn();
+        } finally {
+            if (changed) {
+                Java.classFactory.loader = previous;
+            }
+        }
+    }
+
+    function getAppClass(name) {
+        return withAppLoader(function () {
+            return Java.use(name);
+        });
+    }
+
+    function getNmssInstance() {
+        return withAppLoader(function () {
+            return Java.use('nmss.app.NmssSa').getInstObj();
+        });
+    }
+
+    function nmssCoreThreadMatches(threadId) {
+        var active = state.nmssCore && state.nmssCore.active;
+        if (active && active.thread_id !== null && active.thread_id !== undefined) {
+            return active.thread_id === threadId;
+        }
+        return false;
+    }
+
+    function installNmssCoreHooks() {
+        if (state.nmssCore.hooksInstalled) return true;
+        var entry = null;
+        var owner = null;
+        var moduleObj = null;
+        var NMSS_NATIVE_GET_CERT_OFFSET = 0x1400ec;
+        var NMSS_CORE_INIT_OFFSET = 0x122fb8;
+        var NMSS_CORE_BODY_OFFSET = 0x123288;
+        var NMSS_CORE_HELPERS = [
+            { name: 'nmss_core_exec_a', offset: 0x128eb4 },
+        ];
+        try {
+            entry = Module.findExportByName(null, 'Java_nmss_app_NmssSa_nmssNativeGetCertValue');
+        } catch (e) {}
+        if (!entry || entry.isNull()) {
+            try {
+                Process.enumerateModules().some(function (mod) {
+                    if ((mod.name || '') !== 'libnmsssa.so') return false;
+                    moduleObj = mod;
+                    owner = mod.name;
+                    entry = mod.base.add(NMSS_NATIVE_GET_CERT_OFFSET);
+                    return false;
+                });
+            } catch (e) {}
+        }
+        if (!entry || entry.isNull()) {
+            console.log('[CAPTURE] [GATE] nmss core hook export not found');
+            return false;
+        }
+        if (!owner) {
+            try {
+                var mod = Process.findModuleByAddress(entry);
+                if (mod) owner = mod.name || null;
+            } catch (e) {}
+        }
+        if (!moduleObj && owner) {
+            try {
+                moduleObj = Process.findModuleByName(owner);
+            } catch (e) {}
+        }
+        try {
+            Interceptor.attach(entry, {
+                onEnter: function (args) {
+                    var threadId = currentThreadIdMaybe();
+                    var challenge = null;
+                    try {
+                        challenge = args[3].isNull() ? null : Java.vm.getEnv().getStringUtfChars(args[3], null).readCString();
+                    } catch (e) {}
+                    var info = {
+                        at: (new Date()).toISOString(),
+                        thread_id: threadId,
+                        thread_name: threadNameMaybe(threadId),
+                        challenge: challenge,
+                        pc: fmtPtr(this.context.pc),
+                        lr: fmtPtr(this.context.lr),
+                        x0: fmtPtr(this.context.x0),
+                        bt: exceptionBacktrace(this.context, 8),
+                    };
+                    state.nmssCore.active = info;
+                    noteNmssCoreEntry(info);
+                    startNmssCoreTrace(threadId);
+                    if (state.dynamic && state.dynamic.activeCall) {
+                        if (state.dynamic.activeCall.root_thread_id !== threadId) {
+                            state.dynamic.activeCall.root_thread_id = threadId;
+                        }
+                        state.dynamic.activeCall.native_root_thread_id = threadId;
+                        state.dynamic.activeCall.native_root_thread_name = info.thread_name || null;
+                        ensureClaim(state.dynamic.threadClaims, threadId, {
+                            first_pc: info.pc || null,
+                            challenge: challenge || null,
+                            seeded_by: 'nmss_core_entry',
+                            runtime: null,
+                            sourceBase: 0,
+                            sourceSize: 0,
+                        });
+                    }
+                    console.log('[CAPTURE] [GATE] nmss core entry thread=' +
+                        (threadId === null || threadId === undefined ? 'unknown' : threadId) +
+                        ' name=' + (info.thread_name || '<unknown>') +
+                        ' challenge=' + (challenge || '<null>') +
+                        ' pc=' + info.pc +
+                        ' lr=' + info.lr +
+                        ' bt=' + JSON.stringify(info.bt));
+                },
+                onLeave: function (retval) {
+                    var active = state.nmssCore.active;
+                    var resultStr = null;
+                    try {
+                        resultStr = retval.isNull() ? '' : Java.vm.getEnv().getStringUtfChars(retval, null).readCString();
+                    } catch (e) {}
+                    stopNmssCoreTrace(active && active.thread_id !== undefined ? active.thread_id : null, 'nmss_core_leave');
+                    var info = Object.assign({}, active || {}, {
+                        leave_at: (new Date()).toISOString(),
+                        retval: fmtPtr(retval),
+                        token_len: resultStr ? resultStr.length : 0,
+                    });
+                    state.nmssCore.active = null;
+                    state.nmssCore.last = info;
+                    console.log('[CAPTURE] [GATE] nmss core leave thread=' +
+                        (info.thread_id === null || info.thread_id === undefined ? 'unknown' : info.thread_id) +
+                        ' token_len=' + (resultStr ? resultStr.length : 0) +
+                        ' retval=' + fmtPtr(retval));
+                }
+            });
+            if (moduleObj && moduleObj.base) {
+                var coreInit = moduleObj.base.add(NMSS_CORE_INIT_OFFSET);
+                var coreBody = moduleObj.base.add(NMSS_CORE_BODY_OFFSET);
+                Interceptor.attach(coreInit, {
+                    onEnter: function () {
+                        var threadId = currentThreadIdMaybe();
+                        if (!nmssCoreThreadMatches(threadId)) return;
+                        console.log('[CAPTURE] [GATE] nmss core init enter thread=' + threadId +
+                            ' pc=' + fmtPtr(this.context.pc) +
+                            ' lr=' + fmtPtr(this.context.lr));
+                    },
+                    onLeave: function (retval) {
+                        var threadId = currentThreadIdMaybe();
+                        if (!nmssCoreThreadMatches(threadId)) return;
+                        console.log('[CAPTURE] [GATE] nmss core init leave thread=' + threadId +
+                            ' ret=' + fmtPtr(retval));
+                    }
+                });
+                Interceptor.attach(coreBody, {
+                    onEnter: function (args) {
+                        var threadId = currentThreadIdMaybe();
+                        if (!nmssCoreThreadMatches(threadId)) return;
+                        console.log('[CAPTURE] [GATE] nmss core body enter thread=' + threadId +
+                            ' pc=' + fmtPtr(this.context.pc) +
+                            ' lr=' + fmtPtr(this.context.lr) +
+                            ' x0=' + fmtPtr(args[0]) +
+                            ' x1=' + fmtPtr(args[1]) +
+                            ' x2=' + fmtPtr(args[2]));
+                    },
+                    onLeave: function (retval) {
+                        var threadId = currentThreadIdMaybe();
+                        if (!nmssCoreThreadMatches(threadId)) return;
+                        console.log('[CAPTURE] [GATE] nmss core body leave thread=' + threadId +
+                            ' ret=' + fmtPtr(retval));
+                    }
+                });
+                state.nmssCore.hooks.core_init = coreInit;
+                state.nmssCore.hooks.core_body = coreBody;
+                NMSS_CORE_HELPERS.forEach(function (helper) {
+                    var helperAddr = moduleObj.base.add(helper.offset);
+                    Interceptor.attach(helperAddr, {
+                        onEnter: function (args) {
+                            var threadId = currentThreadIdMaybe();
+                            if (!nmssCoreThreadMatches(threadId)) return;
+                            console.log('[CAPTURE] [GATE] ' + helper.name +
+                                ' enter thread=' + threadId +
+                                ' pc=' + fmtPtr(this.context.pc) +
+                                ' lr=' + fmtPtr(this.context.lr) +
+                                ' x0=' + fmtPtr(args[0]) +
+                                ' x1=' + fmtPtr(args[1]) +
+                                ' x2=' + fmtPtr(args[2]));
+                        },
+                        onLeave: function (retval) {
+                            var threadId = currentThreadIdMaybe();
+                            if (!nmssCoreThreadMatches(threadId)) return;
+                            console.log('[CAPTURE] [GATE] ' + helper.name +
+                                ' leave thread=' + threadId +
+                                ' ret=' + fmtPtr(retval));
+                        }
+                    });
+                    state.nmssCore.hooks[helper.name] = helperAddr;
+                });
+            }
+            state.nmssCore.hooks.entry = entry;
+            state.nmssCore.hooksInstalled = true;
+            console.log('[CAPTURE] [GATE] nmss core hook installed entry=' + entry +
+                ' module=' + (owner || '<unknown>') +
+                (moduleObj ? ' offset=0x' + u64Number(entry.sub(moduleObj.base)).toString(16) : ''));
+            return true;
+        } catch (e) {
+            noteFailure('install nmss core hook', e);
+            return false;
+        }
+    }
+
+    function nmssStateSnapshot(inst) {
+        function stringifyValue(value) {
+            try {
+                return value === null ? 'null' : String(value);
+            } catch (e) {
+                return '<err:' + e + '>';
+            }
+        }
+        if (!inst) return { inst: false };
+        function readField(name) {
+            try {
+                return stringifyValue(inst[name].value);
+            } catch (e) {
+                return '<err>';
+            }
+        }
+        return {
+            inst: true,
+            m_bAppExit: readField('m_bAppExit'),
+            m_bIsRPExists: readField('m_bIsRPExists'),
+            m_nCode: readField('m_nCode'),
+            m_strMsg: readField('m_strMsg'),
+            m_activity: (function () {
+                try {
+                    var a = inst.m_activity.value;
+                    return a ? a.$className : 'null';
+                } catch (e) {
+                    return '<err>';
+                }
+            })(),
+            m_detectCallBack: (function () {
+                try {
+                    var cb = inst.m_detectCallBack.value;
+                    return cb ? cb.$className : 'null';
+                } catch (e) {
+                    return '<err>';
+                }
+            })(),
+        };
+    }
+
+    function prepareCertReadyCore(challenge, readyChallenge) {
+        var requestedChallenge = challenge || READY_CHALLENGE;
+        var warmChallenge = readyChallenge || READY_CHALLENGE;
+        var result = {
+            ok: false,
+            challenge: requestedChallenge,
+            ready_challenge: warmChallenge,
+            token: '',
+            token_len: 0,
+            bridge_init: 'skip',
+            load_cr: 'skip',
+            on_resume: 'skip',
+            run: 'skip',
+            state_before: null,
+            state_after: null,
+            error: null,
+        };
+        Java.performNow(function () {
+            try {
+                var NmssSa = getAppClass('nmss.app.NmssSa');
+                var Bridge = null;
+                try {
+                    Bridge = getAppClass('nmss.app.SecurityUnrealBridge');
+                } catch (e) {}
+                var inst = NmssSa.getInstObj();
+                result.state_before = nmssStateSnapshot(inst);
+                if (!inst) {
+                    result.error = 'NO_INSTANCE';
+                    return;
+                }
+                var activity = null;
+                try {
+                    activity = inst.m_activity.value;
+                } catch (e) {}
+                if (Bridge && activity) {
+                    try {
+                        var bridge = Bridge.$new();
+                        bridge.init(activity);
+                        result.bridge_init = 'ok';
+                    } catch (e) {
+                        result.bridge_init = 'ERR:' + e;
+                    }
+                }
+                try {
+                    result.load_cr = !!inst.loadCr();
+                } catch (e) {
+                    result.load_cr = 'ERR:' + e;
+                }
+                try {
+                    inst.onResume();
+                    result.on_resume = 'ok';
+                } catch (e) {
+                    result.on_resume = 'ERR:' + e;
+                }
+                try {
+                    inst.run(warmChallenge);
+                    result.run = 'ok';
+                } catch (e) {
+                    result.run = 'ERR:' + e;
+                }
+                try {
+                    var token = inst.getCertValue(requestedChallenge);
+                    result.token = token ? token.toString() : '';
+                    result.token_len = result.token.length;
+                    result.ok = result.token_len > 0;
+                } catch (e) {
+                    result.error = 'getCertValue ERR:' + e;
+                }
+                result.state_after = nmssStateSnapshot(inst);
+            } catch (outer) {
+                result.error = 'prepareCertReady ERR:' + outer;
+            }
+        });
+        console.log('[CAPTURE] [GATE] prepareCertReady challenge=' + requestedChallenge +
+            ' ready=' + warmChallenge +
+            ' token_len=' + result.token_len +
+            ' bridge_init=' + result.bridge_init +
+            ' load_cr=' + String(result.load_cr) +
+            ' on_resume=' + result.on_resume +
+            ' run=' + result.run);
+        return JSON.stringify(result);
     }
 
     function noHotThreadsTrace(challenge) {
@@ -3741,6 +4368,7 @@
         reassertTrapProtectionIfArmed();
         var status = {
             armed: state.dynamic.armed,
+            trace_all_threads: !!state.dynamic.traceAllThreads,
             loaded: state.dynamic.loaded,
             load_error: state.dynamic.loadError,
             min_pc: state.dynamic.minPc ? state.dynamic.minPc.toString() : null,
@@ -3779,6 +4407,7 @@
     globalThis.__jitGateDynamicStatus = function () {
         return JSON.stringify({
             armed: state.dynamic.armed,
+            trace_all_threads: !!state.dynamic.traceAllThreads,
             loaded: state.dynamic.loaded,
             load_error: state.dynamic.loadError,
             load_stage: state.dynamic.lastLoadStage,
@@ -3834,6 +4463,12 @@
         };
         rpc.exports.jitGateDynamicStatus = function () {
             return globalThis.__jitGateDynamicStatus();
+        };
+        rpc.exports.prepareCertReady = function (challenge, readyChallenge) {
+            return prepareCertReadyCore(
+                challenge !== undefined && challenge !== null ? String(challenge) : undefined,
+                readyChallenge !== undefined && readyChallenge !== null ? String(readyChallenge) : undefined
+            );
         };
     }
 
@@ -4010,8 +4645,31 @@
                         }
                         return true;
                     }
+                    if (!hasClaim(state.dynamic.threadClaims, threadId)) {
+                        var rootResume = dynamicActiveRootNativeResume();
+                        var rootThreadId = dynamicEffectiveRootThreadId(state.dynamic.activeCall);
+                        if (!state.dynamic.traceAllThreads &&
+                            rootResume && rootThreadId !== null && rootThreadId !== undefined && threadId !== rootThreadId) {
+                            if (dynamicMaybeQuarantineForeignPostResume(details, threadId, dynThreadName, 'admission-frozen-root-native-resume')) {
+                                return true;
+                            }
+                            console.log('[CAPTURE] [GATE] dynamic freeze new claim miss thread=' + threadId +
+                                ' name=' + (dynThreadName || '<unknown>') +
+                                ' pc=' + event.pc +
+                                ' lr=' + fmtPtr(details.context.lr) +
+                                ' root=' + dynamicCurrentRootThreadLabel() +
+                                ' root_final=' + (rootResume.final_pc || '<none>'));
+                            if (!activatePage(pageBase)) {
+                                return false;
+                            }
+                            return true;
+                        }
+                    }
                     if (!hasClaim(state.dynamic.threadClaims, threadId) &&
                         isBackgroundArtThreadName(dynThreadName)) {
+                        if (dynamicMaybeQuarantineForeignPostResume(details, threadId, dynThreadName, 'background-root-native-resume')) {
+                            return true;
+                        }
                         console.log('[CAPTURE] [GATE] dynamic skip background thread=' + threadId +
                             ' name=' + dynThreadName +
                             ' pc=' + event.pc);
@@ -4020,8 +4678,12 @@
                         }
                         return true;
                     }
-                    if (!hasClaim(state.dynamic.threadClaims, threadId) &&
+                    if (!state.dynamic.traceAllThreads &&
+                        !hasClaim(state.dynamic.threadClaims, threadId) &&
                         dynamicShouldSkipNonRootMainThread(threadId)) {
+                        if (dynamicMaybeQuarantineForeignPostResume(details, threadId, dynThreadName, 'non-root-main-root-native-resume')) {
+                            return true;
+                        }
                         console.log('[CAPTURE] [GATE] dynamic skip non-root main thread=' + threadId +
                             ' name=' + (dynThreadName || '<unknown>') +
                             ' root=' + dynamicCurrentRootThreadLabel() +
@@ -4031,8 +4693,12 @@
                         }
                         return true;
                     }
-                    if (!hasClaim(state.dynamic.threadClaims, threadId) &&
+                    if (!state.dynamic.traceAllThreads &&
+                        !hasClaim(state.dynamic.threadClaims, threadId) &&
                         !dynamicShouldAdmitNewThread(threadId, dynThreadName)) {
+                        if (dynamicMaybeQuarantineForeignPostResume(details, threadId, dynThreadName, 'non-worker-root-native-resume')) {
+                            return true;
+                        }
                         console.log('[CAPTURE] [GATE] dynamic skip non-worker thread=' + threadId +
                             ' name=' + (dynThreadName || '<unknown>') +
                             ' root=' + dynamicCurrentRootThreadLabel() +
@@ -4042,8 +4708,12 @@
                         }
                         return true;
                     }
-                    if (!hasClaim(state.dynamic.threadClaims, threadId) &&
+                    if (!state.dynamic.traceAllThreads &&
+                        !hasClaim(state.dynamic.threadClaims, threadId) &&
                         dynamicShouldSkipSelfReturnWorker(threadId, details.context)) {
+                        if (dynamicMaybeQuarantineForeignPostResume(details, threadId, dynThreadName, 'self-return-root-native-resume')) {
+                            return true;
+                        }
                         console.log('[CAPTURE] [GATE] dynamic skip self-return worker thread=' + threadId +
                             ' name=' + (dynThreadName || '<unknown>') +
                             ' root=' + dynamicCurrentRootThreadLabel() +
@@ -4185,7 +4855,7 @@
         var origMaybeAdoptJit = maybeAdoptJit;
         maybeAdoptJit = function (target, source) {
             var mod = origMaybeAdoptJit(target, source);
-            if (mod && mod.base) {
+            if (mod && mod.base && shouldActivateCorridor()) {
                 var range = findExecRangeFor(mod.base);
                 if (range !== null && isTrapCandidate(range)) {
                     installForRange(range);
@@ -4212,7 +4882,7 @@
             var priorDynamicThreadClaims = state.dynamic.threadClaims;
             var priorPendingThreads = state.dynamic.pendingThreads;
             var scopeStartedAt = (new Date()).toISOString();
-            var rootThreadId = currentThreadIdMaybe();
+            var rootThreadId = chooseCallScopeRootThreadId(challenge);
             var protectedTranslatedRange = false;
             if (useTranslatedScope) {
                 state.translated.activeThreadId = rootThreadId;
@@ -4333,6 +5003,10 @@
                 var plainToken = runCallWithTranslatedScope(challenge, function () {
                     return originalCallCertExport(challenge);
                 });
+                console.log('[CAPTURE] [GATE] callCert plain return challenge=' + (challenge || '<none>') +
+                    ' token_len=' + (plainToken ? String(plainToken).length : 0) +
+                    ' pending=' + dynamicPendingCount() +
+                    ' deferred=' + (state.dynamic.deferredCleanup ? 'yes' : 'no'));
                 if (state.memdump.captured && !state.memdump.after) {
                     console.log('[CAPTURE] [GATE] memdump after-snapshot (plain call path)');
                     try {
@@ -4347,6 +5021,10 @@
                 var mdToken = runCallWithTranslatedScope(challenge, function () {
                     return originalCallCertExport(challenge);
                 });
+                console.log('[CAPTURE] [GATE] callCert memdump return challenge=' + (challenge || '<none>') +
+                    ' token_len=' + (mdToken ? String(mdToken).length : 0) +
+                    ' pending=' + dynamicPendingCount() +
+                    ' deferred=' + (state.dynamic.deferredCleanup ? 'yes' : 'no'));
                 if (state.memdump.captured && !state.memdump.after) {
                     console.log('[CAPTURE] [GATE] memdump after-snapshot (memdump path)');
                     try {
@@ -4390,16 +5068,13 @@
         console.log('[CAPTURE] [GATE] wrapped rpc.exports.callCert');
     }
 
-    setTimeout(function () {
-        if (typeof jitMod !== 'undefined' && jitMod && jitMod.base) {
-            var initialRange = findExecRangeFor(jitMod.base);
-            if (initialRange !== null && isTrapCandidate(initialRange)) {
-                installForRange(initialRange);
-                return;
-            }
-        }
-        if (!state.currentBase) {
-            installForRange(chooseTrapRange());
-        }
-    }, 0);
+    try {
+        Java.performNow(function () {
+            installNmssCoreHooks();
+        });
+    } catch (e) {
+        noteFailure('install nmss core hooks bootstrap', e);
+    }
+
+    console.log('[CAPTURE] [GATE] relay passive until explicit arm');
 })();
