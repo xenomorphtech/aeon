@@ -569,6 +569,10 @@ pub unsafe extern "C" fn aeon_dyn_runtime_resume_trampoline(
 #[no_mangle]
 pub unsafe extern "C" fn aeon_dyn_runtime_branch_bridge(ctx: *mut JitContext, target: u64) -> u64 {
     if let Some(ctx_ref) = ctx.as_mut() {
+        // If the guest LR points back into the translated corridor, returning
+        // directly to the raw JIT page can confuse ART stack walking. We still
+        // record that condition as tail_mode for diagnostics, but the bridge
+        // now routes both cases through the call-and-capture path below.
         let tail_mode = dynamic_ptr_in_code_range(ctx_ref.x[30]);
         let target_desc = if let Some((label, off)) = dynamic_mapping_label_and_offset(target) {
             format!("{label}+0x{off:x}")
@@ -920,40 +924,7 @@ aeon_dyn_runtime_branch_bridge_impl:
     ldr  x15, [x30, #120]
     ldr  x16, [x30, #128]
     ldr  x18, [x30, #144]
-    ldr  x20, [x19, #AEON_SCRATCH_TAILMODE]
-    cbz  x20, 2f
-    ldr  x12, [x19, #AEON_SCRATCH_SAVED_X30]
-    str  x12, [x19, #AEON_SCRATCH_DBG_OUT_X30]
-    adrp x14, :got:aeon_dyn_branch_bridge_outgoing_x30
-    ldr  x14, [x14, #:got_lo12:aeon_dyn_branch_bridge_outgoing_x30]
-    str  x12, [x14]
-    mov  x12, #0x0
-    str  x12, [x19, #AEON_SCRATCH_DBG_POST_X30]
-    adrp x14, :got:aeon_dyn_branch_bridge_post_call_x30
-    ldr  x14, [x14, #:got_lo12:aeon_dyn_branch_bridge_post_call_x30]
-    str  x12, [x14]
-    ldr  x12, [x19, #AEON_SCRATCH_SAVED_X30]
-    str  x12, [x19, #AEON_SCRATCH_DBG_RESUME]
-    adrp x14, :got:aeon_dyn_branch_bridge_resume_target
-    ldr  x14, [x14, #:got_lo12:aeon_dyn_branch_bridge_resume_target]
-    str  x12, [x14]
-    ldr  x11, [x30, #248]
-    mov  sp, x11
-    ldr  x11, [x30, #88]
-    ldr  x20, [x30, #160]
-    ldr  x21, [x30, #168]
-    ldr  x22, [x30, #176]
-    ldr  x23, [x30, #184]
-    ldr  x24, [x30, #192]
-    ldr  x25, [x30, #200]
-    ldr  x26, [x30, #208]
-    ldr  x27, [x30, #216]
-    ldr  x28, [x30, #224]
-    ldr  x29, [x30, #232]
-    ldr  x12, [x30, #152]
-    ldr  x30, [x19, #AEON_SCRATCH_SAVED_X30]
-    mov  x19, x12
-    br   x17
+    b    2f
 2:
     adr  x12, 3f
     str  x12, [x19, #AEON_SCRATCH_DBG_OUT_X30]
