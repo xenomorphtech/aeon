@@ -101,10 +101,30 @@
             runs: [],
             recentBlocks: [],
             lastRun: null,
+            lastCoverage: null,
             lastLoadStage: null,
             logReads: false,
             logTraps: true,
             logBlocks: true,
+            trace: {
+                installed: false,
+                slabBase: null,
+                slabSize: 0,
+                codeBase: null,
+                codeSize: 0,
+                dataBase: null,
+                dataSize: 0,
+                stubBase: null,
+                countersBase: null,
+                counterSlots: 0,
+                blockIds: [],
+                maxBlockId: -1,
+                seqBase: null,
+                ringBase: null,
+                ringCapacity: 0,
+                ringMask: 0,
+                ringEntrySize: 32,
+            },
         },
         dynamic: {
             armed: false,
@@ -144,6 +164,25 @@
     var EXEC_PROTECTIONS = ['r-x', '--x'];
     var ACTIVE_EXEC_SIZE = 0x50000;
     var PAGE_SIZE = 0x1000;
+    var TRACE_CODE_PAGES = 1;
+    var TRACE_RING_ENTRY_SIZE = 32;
+    var TRACE_MIN_RING_CAPACITY = 0x10000;
+    var TRACE_MAX_RING_CAPACITY = 0x100000;
+    var TRACE_SUMMARY_BLOCK_LIMIT = 64;
+    var TRACE_SUMMARY_EVENT_LIMIT = 128;
+    var TRACE_STUB_HEX =
+        'ea0300aa69030010290140f92b0d0a8b6cfd5fc88c0500916cfd0dc8adffff35' +
+        'ce020010ce0140f9cffd5fc8f0050091d0fd0dc8adffff3551020010310240f9' +
+        'f101118a21020010210040f92214118b481680d2010000d44a0400f9400800f9' +
+        '010080d2410c00f94ffc9fc8c0035fd600000000000000000000000000000000' +
+        '00000000000000000000000000000000';
+    var TRACE_STUB_OFFSETS = {
+        counters: 0x70,
+        seq: 0x78,
+        ringMask: 0x80,
+        ringBase: 0x88,
+        size: 0x90,
+    };
     var AEON_SCRATCH_STAGE = 0x18;
     var AEON_SCRATCH_LAST_TARGET = 0x20;
     var AEON_SCRATCH_TAIL_MODE = 0x28;
@@ -158,6 +197,7 @@
     var TRAP_WINDOW_DEVICE_DIR = '/data/local/tmp/aeon_capture/trap_windows';
     var FREEZE_STATUS_PATH = '/data/local/tmp/aeon_capture/freeze.json';
     var MEMDUMP_CHUNK = 0x10000;
+    var READY_CHALLENGE = '6BA4D60738580083';
     var originalCallCertExport = null;
 
     function parseJsonMaybe(value) {
@@ -482,6 +522,201 @@
         return out.buffer;
     }
 
+    function alignUp(value, alignment) {
+        if (alignment <= 0) return value;
+        return Math.ceil(value / alignment) * alignment;
+    }
+
+    function nextPow2(value) {
+        var n = 1;
+        while (n < value) n <<= 1;
+        return n;
+    }
+
+    function translatedTraceBlockIds() {
+        var seen = {};
+        var ids = [];
+        Object.keys(state.translated.blockIdMap || {}).forEach(function (key) {
+            var id = u64Number(key);
+            if (seen[id]) return;
+            seen[id] = true;
+            ids.push(id);
+        });
+        ids.sort(function (a, b) { return a - b; });
+        return ids;
+    }
+
+    function translatedTraceRingCapacity(blockCount) {
+        var target = Math.max(TRACE_MIN_RING_CAPACITY, blockCount * 16);
+        return Math.min(TRACE_MAX_RING_CAPACITY, nextPow2(target));
+    }
+
+    function translatedTraceStatusSummary(options) {
+        var t = state.translated;
+        var trace = t.trace;
+        if (!trace || !trace.installed || !trace.seqBase || trace.seqBase.isNull()) {
+            return {
+                installed: false,
+            };
+        }
+        var opts = options || {};
+        var includeZeroes = !!opts.includeZeroes;
+        var maxCounters = opts.maxCounters === undefined || opts.maxCounters === null
+            ? TRACE_SUMMARY_BLOCK_LIMIT
+            : Math.max(0, parseInt(opts.maxCounters, 10) || 0);
+        var maxEvents = opts.maxEvents === undefined || opts.maxEvents === null
+            ? TRACE_SUMMARY_EVENT_LIMIT
+            : Math.max(0, parseInt(opts.maxEvents, 10) || 0);
+        var counters = [];
+        var topBlocks = [];
+        var hitBlocks = 0;
+        trace.blockIds.forEach(function (blockId) {
+            var hits = readU64Num(trace.countersBase.add(blockId * 8));
+            if (hits !== 0) hitBlocks++;
+            if (!includeZeroes && hits === 0) return;
+            counters.push({
+                block_id: '0x' + blockId.toString(16),
+                source_block: t.blockIdMap['0x' + blockId.toString(16)] || null,
+                hits: hits,
+            });
+        });
+        topBlocks = counters.filter(function (entry) { return entry.hits !== 0; }).slice();
+        topBlocks.sort(function (a, b) {
+            if (b.hits !== a.hits) return b.hits - a.hits;
+            return u64Number(a.block_id) - u64Number(b.block_id);
+        });
+        if (!includeZeroes && maxCounters > 0) {
+            counters = topBlocks.slice(0, maxCounters);
+        } else if (maxCounters > 0) {
+            counters = counters.slice(0, maxCounters);
+        }
+        if (maxCounters === 0) counters = [];
+        var totalHits = readU64Num(trace.seqBase);
+        var validEvents = Math.min(totalHits, trace.ringCapacity);
+        var events = [];
+        if (maxEvents > 0 && validEvents > 0) {
+            var startSeq = Math.max(0, totalHits - Math.min(validEvents, maxEvents));
+            for (var seq = startSeq; seq < totalHits; seq++) {
+                var idx = seq & trace.ringMask;
+                var entry = trace.ringBase.add(idx * trace.ringEntrySize);
+                var entrySeq = readU64Num(entry);
+                if (entrySeq !== seq) continue;
+                var blockId = readU64Num(entry.add(8));
+                events.push({
+                    seq: entrySeq,
+                    block_id: '0x' + blockId.toString(16),
+                    source_block: t.blockIdMap['0x' + blockId.toString(16)] || null,
+                    thread_id: readU64Num(entry.add(16)),
+                });
+            }
+        }
+        return {
+            installed: true,
+            slab_base: trace.slabBase ? trace.slabBase.toString() : null,
+            slab_size: trace.slabSize,
+            stub_base: trace.stubBase ? trace.stubBase.toString() : null,
+            counters_base: trace.countersBase ? trace.countersBase.toString() : null,
+            counter_slots: trace.counterSlots,
+            block_count: trace.blockIds.length,
+            max_block_id: trace.maxBlockId,
+            seq_base: trace.seqBase ? trace.seqBase.toString() : null,
+            ring_base: trace.ringBase ? trace.ringBase.toString() : null,
+            ring_capacity: trace.ringCapacity,
+            ring_mask: '0x' + trace.ringMask.toString(16),
+            total_hits: totalHits,
+            hit_blocks: hitBlocks,
+            top_blocks: topBlocks.slice(0, TRACE_SUMMARY_BLOCK_LIMIT),
+            block_counters: counters,
+            events: events,
+        };
+    }
+
+    function translatedResetTrace() {
+        var trace = state.translated.trace;
+        if (!trace || !trace.installed || !trace.dataBase || trace.dataBase.isNull()) return false;
+        trace.dataBase.writeByteArray(new Uint8Array(trace.dataSize));
+        state.translated.recentBlocks = [];
+        state.translated.lastCoverage = null;
+        return true;
+    }
+
+    function translatedEnsureTrace() {
+        var t = state.translated;
+        var blockIds = translatedTraceBlockIds();
+        if (blockIds.length === 0) {
+            t.trace = {
+                installed: false,
+                slabBase: null,
+                slabSize: 0,
+                codeBase: null,
+                codeSize: 0,
+                dataBase: null,
+                dataSize: 0,
+                stubBase: null,
+                countersBase: null,
+                counterSlots: 0,
+                blockIds: [],
+                maxBlockId: -1,
+                seqBase: null,
+                ringBase: null,
+                ringCapacity: 0,
+                ringMask: 0,
+                ringEntrySize: TRACE_RING_ENTRY_SIZE,
+            };
+            return null;
+        }
+        var maxBlockId = blockIds[blockIds.length - 1];
+        var counterSlots = maxBlockId + 1;
+        var ringCapacity = translatedTraceRingCapacity(blockIds.length);
+        var ringBytes = ringCapacity * TRACE_RING_ENTRY_SIZE;
+        var counterBytes = alignUp(counterSlots * 8, 8);
+        var dataBytes = alignUp(counterBytes + 8 + ringBytes, PAGE_SIZE);
+        var codeBytes = TRACE_CODE_PAGES * PAGE_SIZE;
+        var slabSize = codeBytes + dataBytes;
+        var slabBase = Memory.alloc(slabSize);
+        slabBase.writeByteArray(new Uint8Array(slabSize));
+        var codeBase = slabBase;
+        var dataBase = slabBase.add(codeBytes);
+        var countersBase = dataBase;
+        var seqBase = countersBase.add(counterBytes);
+        var ringBase = seqBase.add(8);
+        Memory.protect(codeBase, codeBytes, 'rwx');
+        Memory.protect(dataBase, dataBytes, 'rw-');
+        Memory.patchCode(codeBase, TRACE_STUB_OFFSETS.size, function (code) {
+            code.writeByteArray(hexToBytes(TRACE_STUB_HEX));
+            writeWordExact(code.add(TRACE_STUB_OFFSETS.counters), countersBase);
+            writeWordExact(code.add(TRACE_STUB_OFFSETS.seq), seqBase);
+            writeWordExact(code.add(TRACE_STUB_OFFSETS.ringMask), ptr('0x' + (ringCapacity - 1).toString(16)));
+            writeWordExact(code.add(TRACE_STUB_OFFSETS.ringBase), ringBase);
+        });
+        Memory.protect(codeBase, codeBytes, 'r-x');
+        t.trace = {
+            installed: true,
+            slabBase: slabBase,
+            slabSize: slabSize,
+            codeBase: codeBase,
+            codeSize: codeBytes,
+            dataBase: dataBase,
+            dataSize: dataBytes,
+            stubBase: codeBase,
+            countersBase: countersBase,
+            counterSlots: counterSlots,
+            blockIds: blockIds,
+            maxBlockId: maxBlockId,
+            seqBase: seqBase,
+            ringBase: ringBase,
+            ringCapacity: ringCapacity,
+            ringMask: ringCapacity - 1,
+            ringEntrySize: TRACE_RING_ENTRY_SIZE,
+        };
+        translatedResetTrace();
+        console.log('[CAPTURE] [GATE] translated trace installed blocks=' + blockIds.length +
+                    ' slots=' + counterSlots +
+                    ' ring=' + ringCapacity +
+                    ' slab=' + slabBase);
+        return t.trace;
+    }
+
     function translatedJitContextSize() {
         return (31 * 8) + 8 + 8 + 8 + (32 * 16) + 8;
     }
@@ -747,42 +982,47 @@
 
     function translatedInstallHooks() {
         var t = state.translated;
-        if (t.helperCallbacks.translate) return;
-        t.helperCallbacks.translate = new NativeCallback(function (sourceTarget) {
-            return sourceTarget;
-        }, 'uint64', ['uint64']);
-        t.helperCallbacks.bridge = new NativeCallback(function (ctx, sourceTarget) {
-            return sourceTarget;
-        }, 'uint64', ['pointer', 'uint64']);
-        t.helperCallbacks.unknown = new NativeCallback(function (sourceTarget) {
-            console.log('[CAPTURE] [GATE] translated unknown block target=' + ptr(sourceTarget));
-        }, 'void', ['uint64']);
-        t.helperCallbacks.memRead = new NativeCallback(function (addr) {
-            if (t.logReads) console.log('[CAPTURE] [GATE] translated read addr=' + ptr(addr));
-        }, 'void', ['uint64']);
-        t.helperCallbacks.trap = new NativeCallback(function (blockAddr, kindCode, imm) {
-            if (t.logTraps) console.log('[CAPTURE] [GATE] translated trap block=' + ptr(blockAddr) + ' kind=' + kindCode + ' imm=0x' + Number(imm).toString(16));
-        }, 'void', ['uint64', 'uint64', 'uint64']);
-        t.helperCallbacks.blockEnter = new NativeCallback(function (blockId) {
-            var blockIdNum = u64Number(blockId);
-            var blockIdKey = '0x' + blockIdNum.toString(16);
-            var sourceBlock = t.blockIdMap[blockIdKey.toLowerCase()] || null;
-            var record = {
-                block_id: blockIdKey,
-                source_block: sourceBlock,
-            };
-            pushLimited(t.recentBlocks, record, 128);
-            if (t.logBlocks) {
-                console.log('[CAPTURE] [GATE] translated block id=' + blockIdKey +
-                    (sourceBlock ? ' source=' + sourceBlock : ' source=<unknown>'));
-            }
-        }, 'void', ['uint64']);
+        if (!t.helperCallbacks.translate) {
+            t.helperCallbacks.translate = new NativeCallback(function (sourceTarget) {
+                return sourceTarget;
+            }, 'uint64', ['uint64']);
+            t.helperCallbacks.bridge = new NativeCallback(function (ctx, sourceTarget) {
+                return sourceTarget;
+            }, 'uint64', ['pointer', 'uint64']);
+            t.helperCallbacks.unknown = new NativeCallback(function (sourceTarget) {
+                console.log('[CAPTURE] [GATE] translated unknown block target=' + ptr(sourceTarget));
+            }, 'void', ['uint64']);
+            t.helperCallbacks.memRead = new NativeCallback(function (addr) {
+                if (t.logReads) console.log('[CAPTURE] [GATE] translated read addr=' + ptr(addr));
+            }, 'void', ['uint64']);
+            t.helperCallbacks.trap = new NativeCallback(function (blockAddr, kindCode, imm) {
+                if (t.logTraps) console.log('[CAPTURE] [GATE] translated trap block=' + ptr(blockAddr) + ' kind=' + kindCode + ' imm=0x' + Number(imm).toString(16));
+            }, 'void', ['uint64', 'uint64', 'uint64']);
+            t.helperCallbacks.blockEnter = new NativeCallback(function (blockId) {
+                var blockIdNum = u64Number(blockId);
+                var blockIdKey = '0x' + blockIdNum.toString(16);
+                var sourceBlock = t.blockIdMap[blockIdKey.toLowerCase()] || null;
+                var record = {
+                    block_id: blockIdKey,
+                    source_block: sourceBlock,
+                };
+                pushLimited(t.recentBlocks, record, 128);
+                if (t.logBlocks) {
+                    console.log('[CAPTURE] [GATE] translated block id=' + blockIdKey +
+                        (sourceBlock ? ' source=' + sourceBlock : ' source=<unknown>'));
+                }
+            }, 'void', ['uint64']);
+        }
         translatedPatchHelper(t.helperAddrs.translate, t.helperCallbacks.translate);
         translatedPatchHelper(t.helperAddrs.bridge, t.helperCallbacks.bridge);
         translatedPatchHelper(t.helperAddrs.unknown, t.helperCallbacks.unknown);
         translatedPatchHelper(t.helperAddrs.memRead, t.helperCallbacks.memRead);
         translatedPatchHelper(t.helperAddrs.trap, t.helperCallbacks.trap);
-        translatedPatchHelper(t.helperAddrs.blockEnter, t.helperCallbacks.blockEnter);
+        if (t.trace && t.trace.installed && t.trace.stubBase && !t.trace.stubBase.isNull()) {
+            translatedPatchHelper(t.helperAddrs.blockEnter, t.trace.stubBase);
+        } else if (t.helperCallbacks.blockEnter) {
+            translatedPatchHelper(t.helperAddrs.blockEnter, t.helperCallbacks.blockEnter);
+        }
     }
 
     function translatedLoad(elfPath, mapPath) {
@@ -817,6 +1057,7 @@
         state.translated.recentBlocks = [];
         state.translated.sourceBase = parsed.sourceBase;
         state.translated.sourceSize = parsed.sourceSize;
+        translatedEnsureTrace();
         console.log('[CAPTURE] [GATE] translated load stage=resolve_hooks');
         state.translated.lastLoadStage = 'resolve_hooks';
         state.translated.helperAddrs = {
@@ -2531,6 +2772,187 @@
         return threadIds;
     }
 
+    function nmssJavaString(value) {
+        return Java.use('java.lang.String').$new(String(value || ''));
+    }
+
+    function nmssResolveCurrentActivity() {
+        var ActivityThread = Java.use('android.app.ActivityThread');
+        var thread = ActivityThread.currentActivityThread();
+        if (!thread) return null;
+        try {
+            var activities = thread.mActivities.value;
+            var iter = activities.values().iterator();
+            var fallback = null;
+            while (iter.hasNext()) {
+                var record = iter.next();
+                var activity = record.activity.value;
+                if (!activity) continue;
+                if (fallback === null) fallback = activity;
+                try {
+                    if (!record.paused.value) return activity;
+                } catch (e) {
+                    return activity;
+                }
+            }
+            return fallback;
+        } catch (e) {
+            try {
+                return ActivityThread.currentApplication();
+            } catch (inner) {
+                return null;
+            }
+        }
+    }
+
+    function nmssResolveHandles() {
+        var ActivityThread = Java.use('android.app.ActivityThread');
+        var activity = null;
+        var app = null;
+        var loader = null;
+        var factory = null;
+        var NmssSa = null;
+        try {
+            activity = nmssResolveCurrentActivity();
+        } catch (e) {}
+        try {
+            app = ActivityThread.currentApplication();
+        } catch (e) {}
+        try {
+            if (activity) loader = activity.getClassLoader();
+        } catch (e) {}
+        try {
+            if (!loader && app) loader = app.getClassLoader();
+        } catch (e) {}
+        try {
+            if (loader) factory = Java.ClassFactory.get(loader);
+        } catch (e) {}
+        try {
+            NmssSa = factory ? factory.use('nmss.app.NmssSa') : Java.use('nmss.app.NmssSa');
+        } catch (e) {
+            NmssSa = Java.use('nmss.app.NmssSa');
+        }
+        return {
+            activity: activity,
+            app: app,
+            loader: loader,
+            NmssSa: NmssSa,
+        };
+    }
+
+    function nmssInvokeReflective(instance, name, args) {
+        var cls = instance.getClass();
+        var methods = cls.getDeclaredMethods();
+        var objectArgs = [];
+        args = args || [];
+        for (var i = 0; i < args.length; i++) {
+            if (typeof args[i] === 'string') {
+                objectArgs.push(nmssJavaString(args[i]));
+            } else {
+                objectArgs.push(args[i]);
+            }
+        }
+        for (var m = 0; m < methods.length; m++) {
+            var method = methods[m];
+            try {
+                if (method.getName() !== name) continue;
+                var types = method.getParameterTypes();
+                if (types.length !== objectArgs.length) continue;
+                if (types.length === 1 && typeof args[0] === 'string') {
+                    var typeName = String(types[0].getName());
+                    if (typeName !== 'java.lang.String' &&
+                        typeName !== 'java.lang.CharSequence' &&
+                        typeName !== 'java.lang.Object') {
+                        continue;
+                    }
+                }
+                method.setAccessible(true);
+                return method.invoke(instance, Java.array('java.lang.Object', objectArgs));
+            } catch (e) {}
+        }
+        throw new Error('method not found: ' + name + '/' + args.length);
+    }
+
+    function nmssInvokeMethod(instance, name, args) {
+        args = args || [];
+        try {
+            if (args.length === 0 && typeof instance[name] === 'function') {
+                return instance[name]();
+            }
+            if (args.length === 1 && typeof instance[name] === 'function') {
+                return instance[name](args[0]);
+            }
+        } catch (e) {}
+        return nmssInvokeReflective(instance, name, args);
+    }
+
+    function nmssRunOnMainThread(action) {
+        var Handler = Java.use('android.os.Handler');
+        var Looper = Java.use('android.os.Looper');
+        var CountDownLatch = Java.use('java.util.concurrent.CountDownLatch');
+        var TimeUnit = Java.use('java.util.concurrent.TimeUnit');
+        var latch = CountDownLatch.$new(1);
+        var result = { ok: false, error: null, value: null };
+        var RunnableClass = Java.registerClass({
+            name: 'com.aeon.JitGateNmss' + Date.now() + '_' + Math.floor(Math.random() * 100000),
+            implements: [Java.use('java.lang.Runnable')],
+            methods: {
+                run: function () {
+                    try {
+                        result.value = action();
+                        result.ok = true;
+                    } catch (e) {
+                        result.error = String(e);
+                    } finally {
+                        latch.countDown();
+                    }
+                }
+            }
+        });
+        Handler.$new(Looper.getMainLooper()).post(RunnableClass.$new());
+        var ok = latch.await(20, TimeUnit.SECONDS.value);
+        if (!ok) {
+            return { ok: false, error: 'timeout_20s', value: null };
+        }
+        return result;
+    }
+
+    function nmssPrepareFlow(certChallenge, readyChallenge) {
+        var certInput = String(certChallenge || READY_CHALLENGE);
+        var readyInput = String(readyChallenge || READY_CHALLENGE);
+        return nmssRunOnMainThread(function () {
+            var currentThreadId = null;
+            try {
+                currentThreadId = Process.getCurrentThreadId();
+            } catch (e) {}
+            var handles = nmssResolveHandles();
+            var inst = handles.NmssSa.getInstObj();
+            if (!inst) {
+                return {
+                    ok: false,
+                    error: 'NO_INSTANCE',
+                    challenge: certInput,
+                    ready_challenge: readyInput,
+                    activity_class: handles.activity ? String(handles.activity.getClass().getName()) : null,
+                    thread_id: currentThreadId,
+                };
+            }
+            nmssInvokeMethod(inst, 'onResume', []);
+            nmssInvokeMethod(inst, 'run', [readyInput]);
+            var cert = nmssInvokeMethod(inst, 'getCertValue', [certInput]);
+            var token = cert ? cert.toString() : '';
+            return {
+                ok: token.length > 0,
+                error: token.length > 0 ? null : 'empty_cert',
+                challenge: certInput,
+                ready_challenge: readyInput,
+                token: token,
+                activity_class: handles.activity ? String(handles.activity.getClass().getName()) : null,
+                thread_id: currentThreadId,
+            };
+        });
+    }
+
     function callCertValue(challenge) {
         if (typeof originalCallCertExport === 'function') {
             try {
@@ -2543,12 +2965,17 @@
         Java.performNow(function () {
             var r = null;
             try {
-                var inst = Java.use('nmss.app.NmssSa').getInstObj();
-                if (!inst) {
-                    r = 'NO_INSTANCE';
+                var result = nmssRunOnMainThread(function () {
+                    var handles = nmssResolveHandles();
+                    var inst = handles.NmssSa.getInstObj();
+                    if (!inst) return 'NO_INSTANCE';
+                    var cert = nmssInvokeMethod(inst, 'getCertValue', [challenge]);
+                    return cert ? cert.toString() : '';
+                });
+                if (!result.ok) {
+                    r = 'ERR:' + result.error;
                 } else {
-                    r = inst.getCertValue(challenge);
-                    if (r) r = r.toString();
+                    r = result.value;
                 }
             } catch (inner) {
                 r = 'ERR:' + inner;
@@ -2557,6 +2984,34 @@
         });
         return token;
     }
+
+    globalThis.__jitGatePrepareNmss = function (certChallenge, readyChallenge) {
+        var result = null;
+        if (typeof Java === 'undefined') {
+            return {
+                ok: false,
+                error: 'java_undefined',
+                challenge: String(certChallenge || READY_CHALLENGE),
+                ready_challenge: String(readyChallenge || READY_CHALLENGE),
+            };
+        }
+        if (!Java.available) {
+            return {
+                ok: false,
+                error: 'java_unavailable',
+                challenge: String(certChallenge || READY_CHALLENGE),
+                ready_challenge: String(readyChallenge || READY_CHALLENGE),
+            };
+        }
+        Java.performNow(function () {
+            try {
+                result = nmssPrepareFlow(certChallenge, readyChallenge);
+            } catch (e) {
+                result = { ok: false, error: String(e), challenge: String(certChallenge || READY_CHALLENGE), ready_challenge: String(readyChallenge || READY_CHALLENGE) };
+            }
+        });
+        return result;
+    };
 
     function noHotThreadsTrace(challenge) {
         return {
@@ -3048,6 +3503,11 @@
             active_call: state.translated.activeCall,
             claimed_thread_ids: claimedThreadIds(state.translated.claimedThreads),
             recent_blocks: state.translated.recentBlocks,
+            trace: translatedTraceStatusSummary({
+                includeZeroes: false,
+                maxCounters: TRACE_SUMMARY_BLOCK_LIMIT,
+                maxEvents: TRACE_SUMMARY_EVENT_LIMIT,
+            }),
         };
         console.log('[CAPTURE] [GATE] translated ARM loaded=' + state.translated.loaded +
                     ' minPc=' + (status.min_pc || '<none>') +
@@ -3062,9 +3522,101 @@
         state.translated.activeChallenge = null;
         state.translated.activeCall = null;
         state.translated.claimedThreads = {};
+        state.translated.lastCoverage = null;
         restoreExecProtection();
         console.log('[CAPTURE] [GATE] translated DISARMED');
         return JSON.stringify({ armed: false });
+    };
+
+    globalThis.__jitGateTranslatedScopeBegin = function (challenge, threadId) {
+        var rootThreadId = threadId !== undefined && threadId !== null
+            ? parseInt(threadId, 10)
+            : currentThreadIdMaybe();
+        state.translated.activeThreadId = rootThreadId;
+        state.translated.activeChallenge = challenge || null;
+        state.translated.activeCall = {
+            challenge: challenge || null,
+            root_thread_id: rootThreadId,
+            started_at: (new Date()).toISOString(),
+            seeded_by: 'manual_scope',
+        };
+        state.translated.claimedThreads = {};
+        if (rootThreadId !== null && rootThreadId !== undefined && rootThreadId > 0) {
+            ensureClaim(state.translated.claimedThreads, rootThreadId, {
+                first_pc: null,
+                challenge: challenge || null,
+                seeded_by: 'manual_scope',
+            });
+        }
+        translatedResetTrace();
+        if (state.currentBase && state.currentSize) {
+            var currentRange = findExecRangeFor(state.currentBase) || chooseTrapRange();
+            if (currentRange) {
+                ensureTrapProtection(currentRange);
+            }
+        }
+        return JSON.stringify({
+            armed: state.translated.armed,
+            root_thread_id: rootThreadId,
+            active_call: state.translated.activeCall,
+            trace: translatedTraceStatusSummary({
+                includeZeroes: false,
+                maxCounters: TRACE_SUMMARY_BLOCK_LIMIT,
+                maxEvents: TRACE_SUMMARY_EVENT_LIMIT,
+            }),
+        });
+    };
+
+    globalThis.__jitGateTranslatedScopeEnd = function () {
+        state.translated.lastCoverage = translatedTraceStatusSummary({
+            includeZeroes: true,
+            maxCounters: state.translated.trace && state.translated.trace.blockIds
+                ? state.translated.trace.blockIds.length
+                : 0,
+            maxEvents: TRACE_SUMMARY_EVENT_LIMIT,
+        });
+        if (state.translated.lastCoverage && state.translated.lastCoverage.installed) {
+            state.translated.recentBlocks = state.translated.lastCoverage.events.map(function (entry) {
+                return {
+                    block_id: entry.block_id,
+                    source_block: entry.source_block,
+                    thread_id: entry.thread_id,
+                    seq: entry.seq,
+                };
+            });
+        }
+        state.translated.activeThreadId = null;
+        state.translated.activeChallenge = null;
+        state.translated.activeCall = null;
+        state.translated.claimedThreads = {};
+        if (!reassertTrapProtectionIfArmed()) {
+            restoreExecProtection();
+        }
+        return JSON.stringify({
+            armed: state.translated.armed,
+            last_coverage: state.translated.lastCoverage,
+            recent_blocks: state.translated.recentBlocks,
+        });
+    };
+
+    globalThis.__jitGateTranslatedTraceReset = function () {
+        var reset = translatedResetTrace();
+        return JSON.stringify({
+            reset: reset,
+            trace: translatedTraceStatusSummary({
+                includeZeroes: false,
+                maxCounters: TRACE_SUMMARY_BLOCK_LIMIT,
+                maxEvents: TRACE_SUMMARY_EVENT_LIMIT,
+            }),
+        });
+    };
+
+    globalThis.__jitGateTranslatedTraceDump = function (maxCounters, maxEvents, includeZeroes) {
+        return JSON.stringify(translatedTraceStatusSummary({
+            includeZeroes: !!includeZeroes,
+            maxCounters: maxCounters,
+            maxEvents: maxEvents,
+        }));
     };
 
     globalThis.__jitGateTranslatedStatus = function () {
@@ -3084,8 +3636,14 @@
             active_call: state.translated.activeCall,
             claimed_thread_ids: claimedThreadIds(state.translated.claimedThreads),
             last_run: state.translated.lastRun,
+            last_coverage: state.translated.lastCoverage,
             recent_runs: state.translated.runs,
             recent_blocks: state.translated.recentBlocks,
+            trace: translatedTraceStatusSummary({
+                includeZeroes: false,
+                maxCounters: TRACE_SUMMARY_BLOCK_LIMIT,
+                maxEvents: TRACE_SUMMARY_EVENT_LIMIT,
+            }),
         });
     };
 
@@ -3188,6 +3746,9 @@
     };
 
     if (typeof rpc !== 'undefined' && rpc && rpc.exports) {
+        rpc.exports.jitGatePrepareNmss = function (certChallenge, readyChallenge) {
+            return JSON.stringify(globalThis.__jitGatePrepareNmss(certChallenge, readyChallenge));
+        };
         rpc.exports.jitGateTranslatedLoad = function (elfPath, mapPath) {
             return globalThis.__jitGateTranslatedLoad(String(elfPath), String(mapPath));
         };
@@ -3201,6 +3762,18 @@
         };
         rpc.exports.jitGateTranslatedClear = function () {
             return globalThis.__jitGateTranslatedClear();
+        };
+        rpc.exports.jitGateTranslatedScopeBegin = function (challenge, threadId) {
+            return globalThis.__jitGateTranslatedScopeBegin(challenge, threadId);
+        };
+        rpc.exports.jitGateTranslatedScopeEnd = function () {
+            return globalThis.__jitGateTranslatedScopeEnd();
+        };
+        rpc.exports.jitGateTranslatedTraceReset = function () {
+            return globalThis.__jitGateTranslatedTraceReset();
+        };
+        rpc.exports.jitGateTranslatedTraceDump = function (maxCounters, maxEvents, includeZeroes) {
+            return globalThis.__jitGateTranslatedTraceDump(maxCounters, maxEvents, includeZeroes);
         };
         rpc.exports.jitGateTranslatedStatus = function () {
             return globalThis.__jitGateTranslatedStatus();
@@ -3439,6 +4012,15 @@
                 state.translated.activeCall &&
                 (!state.translated.minPc || (details.context && ptr(details.context.pc).compare(state.translated.minPc) >= 0))) {
                 try {
+                    if (state.translated.activeThreadId !== null &&
+                        state.translated.activeThreadId !== undefined &&
+                        threadId !== state.translated.activeThreadId &&
+                        !hasClaim(state.translated.claimedThreads, threadId)) {
+                        if (!activatePage(pageBase)) {
+                            return false;
+                        }
+                        return true;
+                    }
                     if (!hasClaim(state.translated.claimedThreads, threadId)) {
                         ensureClaim(state.translated.claimedThreads, threadId, {
                             first_pc: event.pc,
@@ -3574,6 +4156,7 @@
                         seeded_by: 'call_scope',
                     });
                 }
+                translatedResetTrace();
                 if (state.currentBase && state.currentSize) {
                     var currentRange = findExecRangeFor(state.currentBase) || chooseTrapRange();
                     if (currentRange) {
@@ -3623,6 +4206,27 @@
             } finally {
                 var scopeDynamicClaims = state.dynamic.threadClaims;
                 if (useTranslatedScope) {
+                    state.translated.lastCoverage = translatedTraceStatusSummary({
+                        includeZeroes: true,
+                        maxCounters: state.translated.trace && state.translated.trace.blockIds
+                            ? state.translated.trace.blockIds.length
+                            : 0,
+                        maxEvents: TRACE_SUMMARY_EVENT_LIMIT,
+                    });
+                    if (state.translated.lastCoverage && state.translated.lastCoverage.installed) {
+                        state.translated.recentBlocks = state.translated.lastCoverage.events.map(function (entry) {
+                            return {
+                                block_id: entry.block_id,
+                                source_block: entry.source_block,
+                                thread_id: entry.thread_id,
+                                seq: entry.seq,
+                            };
+                        });
+                        console.log('[CAPTURE] [GATE] translated coverage total_hits=' +
+                                    state.translated.lastCoverage.total_hits +
+                                    ' hit_blocks=' + state.translated.lastCoverage.hit_blocks +
+                                    ' events=' + state.translated.lastCoverage.events.length);
+                    }
                     state.translated.activeThreadId = priorThreadId;
                     state.translated.activeChallenge = priorChallenge;
                     state.translated.activeCall = priorTranslatedCall;

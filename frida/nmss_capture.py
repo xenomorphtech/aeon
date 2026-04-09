@@ -36,7 +36,7 @@ XERDA_HOST_PORT = 27043
 XERDA_DEVICE_PORT = 27042
 XERDA_SERVER_PATH = "/data/local/tmp/xerda-server"
 PACKAGE = "com.netmarble.thered"
-ADB = ["adb", "-s", "localhost:5555"]
+ADB = ["adb", "-s", "localhost:5556"]
 DEVICE_DIR = "/data/local/tmp/aeon_capture"
 TRANSLATED_DEVICE_ELF = "/data/local/tmp/jit_exec_alias_0x9b5fe000.translated.elf"
 TRANSLATED_DEVICE_MAP = "/data/local/tmp/jit_exec_alias_0x9b5fe000.translated.map.json.compact.blockmap.jsonl"
@@ -55,6 +55,7 @@ var RESOLVE_ENCODER_OFFSET = 0x209dc4;
 var BLR_X8_OFFSET = 0x20b548;
 var ROOT_DIR = '__DEVICE_DIR__';
 var DIR = ROOT_DIR + '/jit_hash';
+var READY_CHALLENGE = '6BA4D60738580083';
 var ANALYSIS_BASE = 0x10000000;
 var CERT_ENCODER_ENTRY_OFFSET = 0x10828c;
 var TRACE_RANGE_START = 0x10828c;
@@ -136,6 +137,257 @@ var pendingChallenge = '';
 var jitMod = null;
 var jitHookBase = null;
 var jitHookState = {};
+
+function makeJson(value) {
+    try {
+        return JSON.stringify(value);
+    } catch (e) {
+        return JSON.stringify({ error: String(e) });
+    }
+}
+
+function javaString(value) {
+    return Java.use('java.lang.String').$new(String(value || ''));
+}
+
+function resolveCurrentActivity() {
+    var ActivityThread = Java.use('android.app.ActivityThread');
+    var thread = ActivityThread.currentActivityThread();
+    if (!thread) return null;
+    var activities = null;
+    try {
+        activities = thread.mActivities.value;
+    } catch (e) {}
+    var fallback = null;
+    if (activities) {
+        try {
+            var iter = activities.values().iterator();
+            while (iter.hasNext()) {
+                var record = iter.next();
+                var activity = record.activity.value;
+                if (!activity) continue;
+                if (fallback === null) fallback = activity;
+                try {
+                    if (!record.paused.value) return activity;
+                } catch (e) {
+                    return activity;
+                }
+            }
+        } catch (e) {}
+    }
+    return fallback;
+}
+
+function resolveNmssHandles() {
+    var ActivityThread = Java.use('android.app.ActivityThread');
+    var activity = null;
+    var app = null;
+    var loader = null;
+    var factory = null;
+    var NmssSa = null;
+    try {
+        activity = resolveCurrentActivity();
+    } catch (e) {}
+    try {
+        app = ActivityThread.currentApplication();
+    } catch (e) {}
+    try {
+        if (activity) loader = activity.getClassLoader();
+    } catch (e) {}
+    try {
+        if ((loader === null || loader === undefined) && app) loader = app.getClassLoader();
+    } catch (e) {}
+    try {
+        if (loader) factory = Java.ClassFactory.get(loader);
+    } catch (e) {}
+    try {
+        NmssSa = factory ? factory.use('nmss.app.NmssSa') : Java.use('nmss.app.NmssSa');
+    } catch (e) {
+        NmssSa = Java.use('nmss.app.NmssSa');
+    }
+    return {
+        activity: activity,
+        app: app,
+        loader: loader,
+        NmssSa: NmssSa,
+    };
+}
+
+function invokeMethodReflective(instance, name, args) {
+    var cls = instance.getClass();
+    var methods = cls.getDeclaredMethods();
+    var objectArgs = [];
+    for (var i = 0; i < args.length; i++) {
+        if (typeof args[i] === 'string') {
+            objectArgs.push(javaString(args[i]));
+        } else {
+            objectArgs.push(args[i]);
+        }
+    }
+    for (var m = 0; m < methods.length; m++) {
+        var method = methods[m];
+        try {
+            if (method.getName() !== name) continue;
+            var types = method.getParameterTypes();
+            if (types.length !== objectArgs.length) continue;
+            if (types.length === 1 && typeof args[0] === 'string') {
+                var typeName = String(types[0].getName());
+                if (typeName !== 'java.lang.String' &&
+                    typeName !== 'java.lang.CharSequence' &&
+                    typeName !== 'java.lang.Object') {
+                    continue;
+                }
+            }
+            method.setAccessible(true);
+            return method.invoke(instance, Java.array('java.lang.Object', objectArgs));
+        } catch (e) {}
+    }
+    throw new Error('method not found: ' + name + '/' + args.length);
+}
+
+function invokeInstanceMethod(instance, name, args) {
+    args = args || [];
+    try {
+        if (args.length === 0 && typeof instance[name] === 'function') {
+            return instance[name]();
+        }
+        if (args.length === 1 && typeof instance[name] === 'function') {
+            return instance[name](args[0]);
+        }
+    } catch (e) {}
+    return invokeMethodReflective(instance, name, args);
+}
+
+function runOnMainThread(action) {
+    var Handler = Java.use('android.os.Handler');
+    var Looper = Java.use('android.os.Looper');
+    var CountDownLatch = Java.use('java.util.concurrent.CountDownLatch');
+    var TimeUnit = Java.use('java.util.concurrent.TimeUnit');
+    var latch = CountDownLatch.$new(1);
+    var result = { ok: false, error: null, value: null };
+    var RunnableClass = Java.registerClass({
+        name: 'com.aeon.NmssRun' + Date.now() + '_' + Math.floor(Math.random() * 100000),
+        implements: [Java.use('java.lang.Runnable')],
+        methods: {
+            run: function () {
+                try {
+                    result.value = action();
+                    result.ok = true;
+                } catch (e) {
+                    result.error = String(e);
+                } finally {
+                    latch.countDown();
+                }
+            }
+        }
+    });
+    Handler.$new(Looper.getMainLooper()).post(RunnableClass.$new());
+    var ok = latch.await(20, TimeUnit.SECONDS.value);
+    if (!ok) {
+        return { ok: false, error: 'timeout_20s', value: null };
+    }
+    return result;
+}
+
+function stringifyValue(value) {
+    if (value === null || value === undefined) return '';
+    try {
+        return value.toString();
+    } catch (e) {
+        return String(value);
+    }
+}
+
+function prepareNmssFlow(certChallenge, readyChallenge) {
+    var certInput = String(certChallenge || READY_CHALLENGE);
+    var readyInput = String(readyChallenge || READY_CHALLENGE);
+    return runOnMainThread(function () {
+        var handles = resolveNmssHandles();
+        var NmssSa = handles.NmssSa;
+        var inst = NmssSa.getInstObj();
+        if (!inst) {
+            return {
+                ok: false,
+                error: 'NO_INSTANCE',
+                challenge: certInput,
+                ready_challenge: readyInput,
+                activity_class: handles.activity ? String(handles.activity.getClass().getName()) : null,
+                app_class: handles.app ? String(handles.app.getClass().getName()) : null,
+                loader: handles.loader ? String(handles.loader) : null,
+            };
+        }
+        var onResumeResult = '';
+        var runResult = '';
+        try {
+            onResumeResult = stringifyValue(invokeInstanceMethod(inst, 'onResume', []));
+        } catch (e) {
+            return {
+                ok: false,
+                error: 'onResume:' + e,
+                challenge: certInput,
+                ready_challenge: readyInput,
+                activity_class: handles.activity ? String(handles.activity.getClass().getName()) : null,
+                app_class: handles.app ? String(handles.app.getClass().getName()) : null,
+                loader: handles.loader ? String(handles.loader) : null,
+            };
+        }
+        try {
+            runResult = stringifyValue(invokeInstanceMethod(inst, 'run', [readyInput]));
+        } catch (e) {
+            return {
+                ok: false,
+                error: 'run:' + e,
+                challenge: certInput,
+                ready_challenge: readyInput,
+                activity_class: handles.activity ? String(handles.activity.getClass().getName()) : null,
+                app_class: handles.app ? String(handles.app.getClass().getName()) : null,
+                loader: handles.loader ? String(handles.loader) : null,
+                on_resume_result: onResumeResult,
+            };
+        }
+        var tokenValue = '';
+        try {
+            var cert = invokeInstanceMethod(inst, 'getCertValue', [certInput]);
+            tokenValue = cert ? cert.toString() : '';
+        } catch (e) {
+            return {
+                ok: false,
+                error: 'getCertValue:' + e,
+                challenge: certInput,
+                ready_challenge: readyInput,
+                activity_class: handles.activity ? String(handles.activity.getClass().getName()) : null,
+                app_class: handles.app ? String(handles.app.getClass().getName()) : null,
+                loader: handles.loader ? String(handles.loader) : null,
+                on_resume_result: onResumeResult,
+                run_result: runResult,
+            };
+        }
+        return {
+            ok: tokenValue.length > 0,
+            error: tokenValue.length > 0 ? null : 'empty_cert',
+            challenge: certInput,
+            ready_challenge: readyInput,
+            token: tokenValue,
+            activity_class: handles.activity ? String(handles.activity.getClass().getName()) : null,
+            app_class: handles.app ? String(handles.app.getClass().getName()) : null,
+            loader: handles.loader ? String(handles.loader) : null,
+            on_resume_result: onResumeResult,
+            run_result: runResult,
+        };
+    });
+}
+
+function callCertMainThread(challenge) {
+    var certInput = String(challenge || READY_CHALLENGE);
+    return runOnMainThread(function () {
+        var handles = resolveNmssHandles();
+        var NmssSa = handles.NmssSa;
+        var inst = NmssSa.getInstObj();
+        if (!inst) return 'NO_INSTANCE';
+        var cert = invokeInstanceMethod(inst, 'getCertValue', [certInput]);
+        return cert ? cert.toString() : '';
+    });
+}
 
 function findNmsscr() {
     var ranges = Process.enumerateRanges('r-x');
@@ -405,20 +657,56 @@ rpc.exports = {
             jit_size:jitMod?jitMod.size:0,
             target:'jit_hash',
             trace_range:'0x' + TRACE_RANGE_START.toString(16) + '..0x' + TRACE_RANGE_END.toString(16),
-            capture_points:JIT_CAPTURE_POINTS.map(function(p) { return p.label + '@0x' + p.offset.toString(16); })
+            capture_points:JIT_CAPTURE_POINTS.map(function(p) { return p.label + '@0x' + p.offset.toString(16); }),
+            ready_challenge: READY_CHALLENGE,
         });
     },
+    prepareNmss: function(certChallenge, readyChallenge) {
+        var result = null;
+        Java.performNow(function() {
+            try {
+                result = prepareNmssFlow(certChallenge, readyChallenge);
+            } catch (e) {
+                result = { ok: false, error: String(e), challenge: String(certChallenge || READY_CHALLENGE), ready_challenge: String(readyChallenge || READY_CHALLENGE) };
+            }
+        });
+        return makeJson(result || { ok: false, error: 'prepare_failed' });
+    },
     callCert: function(c) {
-        var r=null; Java.performNow(function(){try{var i=Java.use("nmss.app.NmssSa").getInstObj();
-        if(!i){r='NO_INSTANCE';return;} r=i.getCertValue(c); if(r)r=r.toString();}catch(e){r='ERR:'+e;}}); return r||'';
+        var r = '';
+        Java.performNow(function() {
+            try {
+                var result = callCertMainThread(c);
+                if (!result.ok) {
+                    r = 'ERR:' + result.error;
+                    return;
+                }
+                r = stringifyValue(result.value);
+            } catch (e) {
+                r = 'ERR:' + e;
+            }
+        });
+        return r || '';
     },
     captureCert: function(c) {
         setupHook();
         console.log('[CAPTURE] captureCert arm challenge=' + c);
         captureNext=true;
         pendingChallenge=c;
-        var r=null; Java.performNow(function(){try{var i=Java.use("nmss.app.NmssSa").getInstObj();
-        if(!i){r='NO_INSTANCE';return;} r=i.getCertValue(c); if(r)r=r.toString();}catch(e){r='ERR:'+e;}}); return r||'';
+        var r = '';
+        Java.performNow(function() {
+            try {
+                var result = callCertMainThread(c);
+                if (!result.ok) {
+                    r = 'ERR:' + result.error;
+                    return;
+                }
+                r = stringifyValue(result.value);
+            } catch (e) {
+                r = 'ERR:' + e;
+            }
+        });
+        return r || '';
     },
 };
 console.log('[CAPTURE] Agent loaded, RPC ready');
@@ -653,6 +941,20 @@ def parse_thread_ids(params):
     return thread_ids
 
 
+def decode_rpc_json(value):
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text:
+        return value
+    if text[0] not in "[{":
+        return value
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return value
+
+
 def pull_capture():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     files = {}
@@ -791,6 +1093,19 @@ class Handler(BaseHTTPRequestHandler):
                 "ready": bridge.ready,
                 "ping": ping,
                 "relay_scripts": bridge.loaded_scripts[-20:],
+            })
+
+        elif parsed.path == "/prepare":
+            c = (params.get("c") or [None])[0]
+            ready_challenge = (params.get("ready") or params.get("warm") or ["6BA4D60738580083"])[0]
+            cert_challenge = c or ready_challenge
+            call_timeout = parse_int_param(params, "timeout", 120, minimum=5, maximum=300)
+            expr = f"rpc.exports.prepareNmss({json.dumps(cert_challenge)}, {json.dumps(ready_challenge)})"
+            result = bridge.eval_rpc(expr, timeout=call_timeout)
+            self._json(200, {
+                "challenge": cert_challenge,
+                "ready_challenge": ready_challenge,
+                "result": decode_rpc_json(result),
             })
 
         elif parsed.path == "/call":
@@ -1025,6 +1340,7 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/":
             self._json(200, {"endpoints": {
                 "GET /status": "session state",
+                "GET /prepare[?c=<hex16>&ready=<hex16>&timeout=120]": "run safe NMSS readiness flow: onResume -> run(ready) -> getCertValue(c)",
                 "GET /call?c=<hex16>": "call getCertValue",
                 "GET /call?c=<hex16>&fixed_trace=1[&threads=tid,tid][&timeout=300]": "call getCertValue and arm in-process fixed-thread trace",
                 f"GET /translated/load[?elf={TRANSLATED_DEVICE_ELF}&map={TRANSLATED_DEVICE_MAP}]": "load translated JIT ELF + map into Frida session",
@@ -1127,6 +1443,7 @@ def main():
     )
     log.info(f"Capture server on :{args.port}")
     log.info(f"  GET /status        — check readiness")
+    log.info(f"  GET /prepare?[c=<hex>&ready=<hex>] — onResume + run(ready) + getCertValue(c)")
     log.info(f"  GET /call?c=<hex>  — call getCertValue")
     log.info(f"  GET /call?c=<hex>&fixed_trace=1 — arm fixed-thread trace for this call")
     log.info(f"  GET /translated/load[?elf=...&map=...] — load translated JIT ELF + map")

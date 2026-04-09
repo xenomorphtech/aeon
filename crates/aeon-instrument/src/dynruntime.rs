@@ -33,6 +33,26 @@ fn dyn_trace_line(message: &str) {
     }
 }
 
+fn dyn_trace_ctx(label: &str, ctx: &JitContext) {
+    dyn_trace_line(&format!(
+        "{label} pc=0x{:x} sp=0x{:x} lr=0x{:x} x0=0x{:x} x1=0x{:x} x2=0x{:x} x8=0x{:x} x19=0x{:x} x20=0x{:x} x21=0x{:x} x22=0x{:x} x23=0x{:x} x24=0x{:x} x28=0x{:x}",
+        ctx.pc,
+        ctx.sp,
+        ctx.x[30],
+        ctx.x[0],
+        ctx.x[1],
+        ctx.x[2],
+        ctx.x[8],
+        ctx.x[19],
+        ctx.x[20],
+        ctx.x[21],
+        ctx.x[22],
+        ctx.x[23],
+        ctx.x[24],
+        ctx.x[28],
+    ));
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct DynamicRuntimeConfig {
     pub max_steps: usize,
@@ -88,15 +108,12 @@ impl DynamicRuntime {
     }
 
     pub fn source_for_block_id(&self, block_id: u64) -> Option<u64> {
-        self.cfg
-            .addresses()
-            .into_iter()
-            .find(|addr| {
-                self.cfg
-                    .get_block(*addr)
-                    .map(|block| block.block_id == block_id)
-                    .unwrap_or(false)
-            })
+        self.cfg.addresses().into_iter().find(|addr| {
+            self.cfg
+                .get_block(*addr)
+                .map(|block| block.block_id == block_id)
+                .unwrap_or(false)
+        })
     }
 
     pub fn run(
@@ -116,6 +133,7 @@ impl DynamicRuntime {
         loop {
             let pc = ctx.pc;
             dyn_trace_line(&format!("step={steps} pc=0x{pc:x}"));
+            dyn_trace_ctx("step_ctx", ctx);
             if let Some((start, end)) = config.code_range {
                 if pc < start || pc >= end {
                     dyn_trace_line(&format!("stop=code_range_exit pc=0x{pc:x}"));
@@ -165,12 +183,14 @@ impl DynamicRuntime {
 
             path.push(block.addr);
             dyn_trace_line(&format!("enter addr=0x{:x}", block.addr));
+            dyn_trace_ctx("enter_ctx", ctx);
             let mut next_pc = unsafe { (block.entry)(ctx as *mut JitContext) };
             if matches!(block.terminator, crate::dyncfg::BlockTerminator::Return) {
                 next_pc = ctx.x[30];
             }
             steps += 1;
             dyn_trace_line(&format!("leave addr=0x{:x} next=0x{next_pc:x}", block.addr));
+            dyn_trace_ctx("leave_ctx", ctx);
 
             if next_pc == AEON_DYN_BAIL_SENTINEL {
                 let bail_pc = ctx.pc;

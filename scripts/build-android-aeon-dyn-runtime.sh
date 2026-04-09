@@ -31,6 +31,7 @@ fi
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="${LINKER}"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_AR="${AR}"
 export CC_aarch64_linux_android="${LINKER}"
+export AR_aarch64_linux_android="${AR}"
 export CFLAGS_aarch64_linux_android="${CLANG_ARGS}"
 export BINDGEN_EXTRA_CLANG_ARGS="${CLANG_ARGS}"
 export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="${CLANG_ARGS}"

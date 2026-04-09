@@ -247,6 +247,51 @@ fn dynamic_has_readable_mapping(value: u64, size: usize) -> bool {
 }
 
 #[cfg(target_arch = "aarch64")]
+fn dynamic_mapping_label_and_offset(value: u64) -> Option<(String, u64)> {
+    let value = dynamic_strip_ptr_tag(value);
+    let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
+    for line in maps.lines() {
+        let mut parts = line.split_whitespace();
+        let range = parts.next()?;
+        let _perms = parts.next()?;
+        let file_off_hex = parts.next()?;
+        let _dev = parts.next()?;
+        let _inode = parts.next()?;
+        let path = parts.next().unwrap_or("");
+        let (start_hex, end_hex) = range.split_once('-')?;
+        let start = u64::from_str_radix(start_hex, 16).ok()?;
+        let end = u64::from_str_radix(end_hex, 16).ok()?;
+        if value < start || value >= end {
+            continue;
+        }
+        let file_off = u64::from_str_radix(file_off_hex, 16).ok()?;
+        let load_bias = start.checked_sub(file_off)?;
+        let module_off = value.checked_sub(load_bias)?;
+        let label = if path.is_empty() {
+            "[anonymous]".to_string()
+        } else {
+            path.to_string()
+        };
+        return Some((label, module_off));
+    }
+    None
+}
+
+#[cfg(target_arch = "aarch64")]
+fn dynamic_is_callable_external_target(value: u64) -> bool {
+    if value == 0 {
+        return false;
+    }
+    if dynamic_ptr_in_code_range(value) {
+        return false;
+    }
+    if !dynamic_looks_code_aligned(value) {
+        return false;
+    }
+    dynamic_has_executable_mapping(value)
+}
+
+#[cfg(target_arch = "aarch64")]
 fn dynamic_is_non_callable_external_target(value: u64) -> bool {
     if value == 0 {
         return true;
@@ -280,7 +325,9 @@ fn dynamic_should_bail_art_checkpoint_jni_start(ctx: &JitContext, target: u64) -
     let Some(target_off) = dynamic_module_file_offset(target, "libart.so") else {
         return false;
     };
-    if target_off != LIBART_JNI_METHOD_START_OFFSET && target_off != LIBART_JNI_METHOD_START_SYNC_OFFSET {
+    if target_off != LIBART_JNI_METHOD_START_OFFSET
+        && target_off != LIBART_JNI_METHOD_START_SYNC_OFFSET
+    {
         return false;
     }
     let x0 = dynamic_strip_ptr_tag(ctx.x[0]);
@@ -480,9 +527,7 @@ fn dynffi_trace_bridge_probe(ctx: &JitContext, target: u64) {
             }
         }
     } else {
-        dynffi_trace_line(&format!(
-            "bridge_probe_thread x0=0x{x0:x} readable=false"
-        ));
+        dynffi_trace_line(&format!("bridge_probe_thread x0=0x{x0:x} readable=false"));
     }
 }
 
@@ -522,11 +567,25 @@ pub unsafe extern "C" fn aeon_dyn_runtime_resume_trampoline(
 
 #[cfg(target_arch = "aarch64")]
 #[no_mangle]
-pub unsafe extern "C" fn aeon_dyn_runtime_branch_bridge(
-    ctx: *mut JitContext,
-    target: u64,
-) -> u64 {
+pub unsafe extern "C" fn aeon_dyn_runtime_branch_bridge(ctx: *mut JitContext, target: u64) -> u64 {
     if let Some(ctx_ref) = ctx.as_mut() {
+        let tail_mode = dynamic_ptr_in_code_range(ctx_ref.x[30]);
+        let target_desc = if let Some((label, off)) = dynamic_mapping_label_and_offset(target) {
+            format!("{label}+0x{off:x}")
+        } else {
+            "unmapped".to_string()
+        };
+        dynffi_trace_line(&format!(
+            "branch_bridge enter ctx_pc=0x{:x} target=0x{:x} target_desc={} saved_x30=0x{:x} tail_mode={} x0=0x{:x} x1=0x{:x} sp=0x{:x}",
+            ctx_ref.pc,
+            target,
+            target_desc,
+            ctx_ref.x[30],
+            if tail_mode { 1 } else { 0 },
+            ctx_ref.x[0],
+            ctx_ref.x[1],
+            ctx_ref.sp
+        ));
         dynffi_trace_bridge_probe(ctx_ref, target);
         if dynamic_should_bail_art_checkpoint_jni_start(ctx_ref, target) {
             let resume_pc = ctx_ref.pc;
@@ -576,10 +635,7 @@ pub unsafe extern "C" fn aeon_dyn_runtime_branch_bridge(
 
 #[cfg(not(target_arch = "aarch64"))]
 #[no_mangle]
-pub extern "C" fn aeon_dyn_runtime_branch_bridge(
-    _ctx: *mut JitContext,
-    target: u64,
-) -> u64 {
+pub extern "C" fn aeon_dyn_runtime_branch_bridge(_ctx: *mut JitContext, target: u64) -> u64 {
     target
 }
 
@@ -1059,9 +1115,7 @@ pub extern "C" fn aeon_dyn_runtime_resume_handoff_size() -> usize {
     AEON_DYN_RESUME_HANDOFF_SIZE
 }
 
-fn stop_to_result(
-    result: crate::dynruntime::DynamicRuntimeResult,
-) -> AeonDynRuntimeResult {
+fn stop_to_result(result: crate::dynruntime::DynamicRuntimeResult) -> AeonDynRuntimeResult {
     let (stop_code, info_pc) = match result.stop {
         DynamicRuntimeStop::Halted => (STOP_HALTED, 0),
         DynamicRuntimeStop::MaxSteps => (STOP_MAX_STEPS, 0),
@@ -1166,7 +1220,10 @@ pub unsafe extern "C" fn aeon_dyn_runtime_set_memory_read_callback(
     let Some(handle) = (handle as *mut DynamicRuntimeHandle).as_mut() else {
         return;
     };
-    handle.runtime.compiler_mut().set_memory_read_callback(callback);
+    handle
+        .runtime
+        .compiler_mut()
+        .set_memory_read_callback(callback);
 }
 
 #[no_mangle]
@@ -1177,7 +1234,10 @@ pub unsafe extern "C" fn aeon_dyn_runtime_set_memory_write_callback(
     let Some(handle) = (handle as *mut DynamicRuntimeHandle).as_mut() else {
         return;
     };
-    handle.runtime.compiler_mut().set_memory_write_callback(callback);
+    handle
+        .runtime
+        .compiler_mut()
+        .set_memory_write_callback(callback);
 }
 
 #[no_mangle]
@@ -1429,8 +1489,7 @@ mod tests {
     }
 
     #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
-    static TRAP_ACTIVE: std::sync::atomic::AtomicBool =
-        std::sync::atomic::AtomicBool::new(false);
+    static TRAP_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
     #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
     extern "C" fn trap_resume_handler(
@@ -1522,8 +1581,7 @@ mod tests {
 
         let mut out = AeonDynRuntimeResult::default();
         eprintln!("before direct run_out");
-        let direct_stop =
-            unsafe { aeon_dyn_runtime_run_out(handle, &mut ctx, &mut out) };
+        let direct_stop = unsafe { aeon_dyn_runtime_run_out(handle, &mut ctx, &mut out) };
         eprintln!(
             "after direct run_out stop={} final_pc=0x{:x} x0=0x{:x} x1=0x{:x}",
             direct_stop, out.final_pc, ctx.x[0], ctx.x[1]
@@ -1537,8 +1595,7 @@ mod tests {
 
         eprintln!("before trampoline");
         TRAP_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
-        let ret =
-            unsafe { aeon_dyn_runtime_resume_trampoline(handle, &mut ctx, &mut out) };
+        let ret = unsafe { aeon_dyn_runtime_resume_trampoline(handle, &mut ctx, &mut out) };
         TRAP_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
         eprintln!("after trampoline ret=0x{ret:x}");
 

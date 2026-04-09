@@ -8,8 +8,8 @@ use object::read::{ObjectSection, ObjectSymbol, RelocationFlags};
 use object::{Object, RelocationEncoding, RelocationKind, RelocationTarget, SymbolKind};
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::fs;
 use std::fmt::Write as _;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -25,13 +25,12 @@ const PIC_TEXT_BASE: u64 = 0x1000;
 const FCMLA_8H_HELPER_NAME: &str = "aeon_fcmla_8h";
 const DEFAULT_HASH_BUCKET_COUNT: u32 = 4099;
 const FCMLA_8H_HELPER_CODE: &[u8] = &[
-    0x09, 0x40, 0x04, 0x91, 0x29, 0x11, 0x01, 0x8b, 0x0a, 0x40, 0x04, 0x91, 0x4a, 0x11, 0x02,
-    0x8b, 0x20, 0x01, 0xc0, 0x3d, 0x41, 0x01, 0xc0, 0x3d, 0x62, 0x00, 0x67, 0x9e, 0xe4, 0x00,
-    0x00, 0xb4, 0x9f, 0x68, 0x01, 0xf1, 0xe0, 0x00, 0x00, 0x54, 0x9f, 0xd0, 0x02, 0xf1, 0xe0,
-    0x00, 0x00, 0x54, 0x9f, 0x38, 0x04, 0xf1, 0xe0, 0x00, 0x00, 0x54, 0x20, 0x10, 0x42, 0x6f,
-    0x06, 0x00, 0x00, 0x14, 0x20, 0x30, 0x42, 0x6f, 0x04, 0x00, 0x00, 0x14, 0x20, 0x50, 0x42,
-    0x6f, 0x02, 0x00, 0x00, 0x14, 0x20, 0x70, 0x42, 0x6f, 0x20, 0x01, 0x80, 0x3d, 0xc0, 0x03,
-    0x5f, 0xd6,
+    0x09, 0x40, 0x04, 0x91, 0x29, 0x11, 0x01, 0x8b, 0x0a, 0x40, 0x04, 0x91, 0x4a, 0x11, 0x02, 0x8b,
+    0x20, 0x01, 0xc0, 0x3d, 0x41, 0x01, 0xc0, 0x3d, 0x62, 0x00, 0x67, 0x9e, 0xe4, 0x00, 0x00, 0xb4,
+    0x9f, 0x68, 0x01, 0xf1, 0xe0, 0x00, 0x00, 0x54, 0x9f, 0xd0, 0x02, 0xf1, 0xe0, 0x00, 0x00, 0x54,
+    0x9f, 0x38, 0x04, 0xf1, 0xe0, 0x00, 0x00, 0x54, 0x20, 0x10, 0x42, 0x6f, 0x06, 0x00, 0x00, 0x14,
+    0x20, 0x30, 0x42, 0x6f, 0x04, 0x00, 0x00, 0x14, 0x20, 0x50, 0x42, 0x6f, 0x02, 0x00, 0x00, 0x14,
+    0x20, 0x70, 0x42, 0x6f, 0x20, 0x01, 0x80, 0x3d, 0xc0, 0x03, 0x5f, 0xd6,
 ];
 
 #[derive(Debug, Clone)]
@@ -362,10 +361,7 @@ impl TranslationCompilation {
         }
         let mut block_id_map = BTreeMap::new();
         for record in &self.block_ids {
-            block_id_map.insert(
-                format_hex(record.block_id),
-                format_hex(record.source_block),
-            );
+            block_id_map.insert(format_hex(record.block_id), format_hex(record.source_block));
         }
         let mut trap_block_map = BTreeMap::new();
         for trap in &self.trap_blocks {
@@ -549,7 +545,8 @@ pub fn format_compact_map_jsonl(map: &CompactTranslationMap) -> Result<String, S
     writeln!(
         out,
         "{}",
-        serde_json::to_string(&meta).map_err(|err| format!("serialize compact jsonl meta: {err}"))?
+        serde_json::to_string(&meta)
+            .map_err(|err| format!("serialize compact jsonl meta: {err}"))?
     )
     .map_err(|err| format!("format compact jsonl meta: {err}"))?;
     for (src, sym) in &map.block_map {
@@ -567,11 +564,7 @@ pub fn format_compact_map_jsonl(map: &CompactTranslationMap) -> Result<String, S
         .map_err(|err| format!("format compact jsonl block {src}: {err}"))?;
     }
     for (id, src) in &map.block_id_map {
-        let record = CompactMapJsonlBlockId {
-            kind: "i",
-            id,
-            src,
-        };
+        let record = CompactMapJsonlBlockId { kind: "i", id, src };
         writeln!(
             out,
             "{}",
@@ -807,9 +800,7 @@ fn link_object_in_process(input: &[u8]) -> Result<Vec<u8>, String> {
         build::elf::Dynamic::Auto {
             tag: elf::DT_STRTAB,
         },
-        build::elf::Dynamic::Auto {
-            tag: elf::DT_STRSZ,
-        },
+        build::elf::Dynamic::Auto { tag: elf::DT_STRSZ },
         build::elf::Dynamic::Auto { tag: elf::DT_HASH },
         build::elf::Dynamic::Integer {
             tag: elf::DT_SYMENT,
@@ -844,9 +835,7 @@ fn link_object_in_process(input: &[u8]) -> Result<Vec<u8>, String> {
     segment.append_section(builder.sections.get_mut(dynstr_id));
     segment.append_section(builder.sections.get_mut(hash_id));
 
-    let dynamic_load = builder
-        .segments
-        .add_load_segment(elf::PF_R, PIC_PAGE_ALIGN);
+    let dynamic_load = builder.segments.add_load_segment(elf::PF_R, PIC_PAGE_ALIGN);
     dynamic_load.append_section(builder.sections.get_mut(dynamic_id));
 
     let dynamic_segment = builder.segments.add();
@@ -945,7 +934,8 @@ fn apply_text_relocation<'data>(
         .checked_add(offset)
         .ok_or_else(|| format!("relocation place overflow at {offset:#x}"))?
         as i128;
-    let start = usize::try_from(offset).map_err(|_| format!("relocation offset too large: {offset:#x}"))?;
+    let start =
+        usize::try_from(offset).map_err(|_| format!("relocation offset too large: {offset:#x}"))?;
 
     match (relocation.kind(), relocation.encoding(), relocation.size()) {
         (RelocationKind::Absolute, _, 64) => {
@@ -1021,7 +1011,9 @@ fn relocation_target_address<'data>(
                 .section_index()
                 .ok_or_else(|| format!("symbol {name} missing section"))?;
             if section != text_index {
-                return Err(format!("unsupported relocation target {name} in section {section:?}"));
+                return Err(format!(
+                    "unsupported relocation target {name} in section {section:?}"
+                ));
             }
             text_vaddr
                 .checked_add(symbol.address())
@@ -1269,14 +1261,24 @@ mod tests {
                 .map(|record| record.symbol.as_str()),
             Some("on_block_enter")
         );
-        assert_eq!(map.block_id_map.get("0x0").map(String::as_str), Some("0x1000"));
-        assert_eq!(map.block_id_map.get("0x1").map(String::as_str), Some("0x2000"));
         assert_eq!(
-            map.trap_block_map.get("0x1000").map(|record| record.kind.as_str()),
+            map.block_id_map.get("0x0").map(String::as_str),
+            Some("0x1000")
+        );
+        assert_eq!(
+            map.block_id_map.get("0x1").map(String::as_str),
+            Some("0x2000")
+        );
+        assert_eq!(
+            map.trap_block_map
+                .get("0x1000")
+                .map(|record| record.kind.as_str()),
             Some("udf")
         );
         assert_eq!(
-            map.trap_block_map.get("0x1000").map(|record| record.imm.as_str()),
+            map.trap_block_map
+                .get("0x1000")
+                .map(|record| record.imm.as_str()),
             Some("0x0")
         );
     }
@@ -1327,9 +1329,16 @@ mod tests {
         let lines = jsonl.lines().collect::<Vec<_>>();
         assert!(lines[0].contains("\"t\":\"meta\""));
         assert!(lines[0].contains("\"source_size\":16"));
-        assert!(lines.iter().any(|line| line.contains("\"t\":\"b\"") && line.contains("\"src\":\"0x1000\"") && line.contains("\"sym\":\"block0\"")));
-        assert!(lines.iter().any(|line| line.contains("\"t\":\"i\"") && line.contains("\"id\":\"0x1\"") && line.contains("\"src\":\"0x2000\"")));
-        assert!(lines.iter().any(|line| line.contains("\"t\":\"t\"") && line.contains("\"src\":\"0x1000\"") && line.contains("\"kind\":\"brk\"") && line.contains("\"imm\":\"0x1234\"")));
+        assert!(lines.iter().any(|line| line.contains("\"t\":\"b\"")
+            && line.contains("\"src\":\"0x1000\"")
+            && line.contains("\"sym\":\"block0\"")));
+        assert!(lines.iter().any(|line| line.contains("\"t\":\"i\"")
+            && line.contains("\"id\":\"0x1\"")
+            && line.contains("\"src\":\"0x2000\"")));
+        assert!(lines.iter().any(|line| line.contains("\"t\":\"t\"")
+            && line.contains("\"src\":\"0x1000\"")
+            && line.contains("\"kind\":\"brk\"")
+            && line.contains("\"imm\":\"0x1234\"")));
     }
 
     #[test]
@@ -1448,7 +1457,10 @@ mod tests {
         let bridge = *rebased
             .get("aeon_bridge_branch_target")
             .expect("branch bridge hook should be rebased");
-        assert!(bridge > memory_read, "helpers should have distinct nonzero offsets");
+        assert!(
+            bridge > memory_read,
+            "helpers should have distinct nonzero offsets"
+        );
 
         let _ = fs::remove_file(path);
     }

@@ -37,7 +37,10 @@ fn main() -> Result<(), String> {
 
     println!("wrote {}", config.output_obj.display());
     println!("compact map {}", config.output_compact_map.display());
-    println!("compact map jsonl {}", config.output_compact_map_jsonl.display());
+    println!(
+        "compact map jsonl {}",
+        config.output_compact_map_jsonl.display()
+    );
 
     if config.skip_link {
         println!(
@@ -133,8 +136,10 @@ impl Config {
                         Some(PathBuf::from(next_arg(&mut args, "--output-compact-map")?))
                 }
                 "--output-compact-map-jsonl" => {
-                    output_compact_map_jsonl =
-                        Some(PathBuf::from(next_arg(&mut args, "--output-compact-map-jsonl")?))
+                    output_compact_map_jsonl = Some(PathBuf::from(next_arg(
+                        &mut args,
+                        "--output-compact-map-jsonl",
+                    )?))
                 }
                 "--base" => base = parse_u64(&next_arg(&mut args, "--base")?)?,
                 "--dest" => dest = parse_u64(&next_arg(&mut args, "--dest")?)?,

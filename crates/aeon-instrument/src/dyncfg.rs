@@ -209,7 +209,9 @@ impl DynCfg {
             let insn = match bad64::decode(word, pc) {
                 Ok(i) => i,
                 Err(_) => {
-                    cfg_trace_line(&format!("cfg decode_err addr=0x{addr:x} pc=0x{pc:x} word=0x{word:08x}"));
+                    cfg_trace_line(&format!(
+                        "cfg decode_err addr=0x{addr:x} pc=0x{pc:x} word=0x{word:08x}"
+                    ));
                     let msg = format!("invalid encoding 0x{:08x} at 0x{:x}", word, pc);
                     self.failed.insert(addr, msg);
                     return Err(JitError::UnsupportedStmt("invalid ARM64 encoding"));
@@ -262,7 +264,10 @@ impl DynCfg {
 
         // Compile the block via aeon-jit
         let code_ptr = self.compiler.compile_block(addr, &stmts)?;
-        cfg_trace_line(&format!("cfg compile_ok addr=0x{addr:x} code=0x{:x}", code_ptr as usize));
+        cfg_trace_line(&format!(
+            "cfg compile_ok addr=0x{addr:x} code=0x{:x}",
+            code_ptr as usize
+        ));
         let block_id = self
             .compiler
             .block_id(addr)
