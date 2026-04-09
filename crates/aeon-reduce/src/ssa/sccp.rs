@@ -310,7 +310,7 @@ fn evaluate_stmt(func: &SsaFunction, block_id: BlockId, stmt_idx: usize, state: 
                 state.cfg_worklist.push_back((block_id, succ));
             }
         }
-        SsaStmt::Ret | SsaStmt::Trap => {
+        SsaStmt::Ret | SsaStmt::Trap { .. } => {
             // No successors.
         }
         _ => {
@@ -366,7 +366,7 @@ pub fn run(func: &mut SsaFunction, use_def: &mut UseDefMap) -> bool {
                         SsaStmt::Branch { .. }
                             | SsaStmt::CondBranch { .. }
                             | SsaStmt::Ret
-                            | SsaStmt::Trap
+                            | SsaStmt::Trap { .. }
                     )
                 });
                 if !has_terminator {

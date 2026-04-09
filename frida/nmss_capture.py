@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
 """
-NMSS Capture Server — HTTP API wrapping frida CLI + xerda.
+NMSS Capture Server — HTTP API wrapping frida CLI + Xerda.
 
 Endpoints:
     GET  /status                  — session state
     GET  /call?c=<hex16>          — call getCertValue, return token
+    GET  /translated/load         — load translated JIT ELF + map into the live Frida session
+    GET  /translated/arm          — arm translated JIT dispatch for execute faults in the trapped JIT window
+    GET  /translated/status       — translated JIT dispatch status
+    GET  /translated/clear        — disable translated JIT dispatch
+    GET  /dynamic/load            — load resident dynamic Aeon runtime into the live Frida session
+    GET  /dynamic/arm             — arm dynamic exact-PC JIT dispatch for execute faults in the trapped JIT window
+    GET  /dynamic/status          — dynamic JIT dispatch status
+    GET  /dynamic/clear           — disable dynamic JIT dispatch
     GET  /capture?c=<hex16>       — call + capture JIT hash state to disk
     GET  /trace?c=<hex16>         — capture JIT hash state + run Aeon JIT trace
     POST /eval                    — evaluate arbitrary JS in the REPL
@@ -14,16 +22,25 @@ Endpoints:
 
 Usage:
     python3 frida/nmss_capture.py [--port 8877] [--attach] [--relay-js path.js ...]
+
+Device prerequisite:
+    Run `/data/local/tmp/xerda-server` on the device. This bridge forwards
+    host `localhost:27043` to that exact on-device binary on device port `27042`.
 """
 
 import subprocess, os, sys, time, json, threading, re, argparse, logging, shlex
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
-XERDA_PORT = 27042
+XERDA_HOST_PORT = 27043
+XERDA_DEVICE_PORT = 27042
+XERDA_SERVER_PATH = "/data/local/tmp/xerda-server"
 PACKAGE = "com.netmarble.thered"
 ADB = ["adb", "-s", "localhost:5555"]
 DEVICE_DIR = "/data/local/tmp/aeon_capture"
+TRANSLATED_DEVICE_ELF = "/data/local/tmp/jit_exec_alias_0x9b5fe000.translated.elf"
+TRANSLATED_DEVICE_MAP = "/data/local/tmp/jit_exec_alias_0x9b5fe000.translated.map.json.compact.blockmap.jsonl"
+DYNAMIC_DEVICE_LIB = "/data/user/0/com.netmarble.thered/files/libaeon_instrument.so"
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 OUTPUT_DIR = os.path.join(REPO_ROOT, "capture", "jit_hash")
 TRACE_PATH = os.path.join(OUTPUT_DIR, "trace.bin")
@@ -419,14 +436,18 @@ class FridaCLI:
         self.loaded_scripts = []
 
     def start(self, spawn=True, pid=None):
-        subprocess.run(ADB + ["forward", f"tcp:{XERDA_PORT}", f"tcp:{XERDA_PORT}"], capture_output=True, timeout=5)
+        subprocess.run(
+            ADB + ["forward", f"tcp:{XERDA_HOST_PORT}", f"tcp:{XERDA_DEVICE_PORT}"],
+            capture_output=True,
+            timeout=5,
+        )
         agent = "/tmp/aeon_capture_agent.js"
         with open(agent, "w") as f:
             f.write(AGENT_JS)
         if spawn:
-            cmd = ["frida", "-H", f"localhost:{XERDA_PORT}", "-f", PACKAGE, "-l", agent]
+            cmd = ["frida", "-H", f"localhost:{XERDA_HOST_PORT}", "-f", PACKAGE, "-l", agent]
         else:
-            cmd = ["frida", "-H", f"localhost:{XERDA_PORT}", "-p", str(pid), "-l", agent]
+            cmd = ["frida", "-H", f"localhost:{XERDA_HOST_PORT}", "-p", str(pid), "-l", agent]
         log.info(f"Starting: {' '.join(cmd)}")
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, text=True, bufsize=1)
@@ -456,36 +477,47 @@ class FridaCLI:
         with self._lock:
             with self._rlines_lock:
                 self._lines.clear()
+            tag = f"__AEON_RPC_RESULT__{time.time_ns()}__"
+            wrapped = (
+                "(function(){"
+                "try {"
+                f"var __aeon_r = eval({json.dumps(expr)});"
+                "if (typeof __aeon_r === 'string') {"
+                f"console.log('{tag}' + __aeon_r);"
+                "} else if (__aeon_r === undefined) {"
+                f"console.log('{tag}null');"
+                "} else {"
+                f"console.log('{tag}' + JSON.stringify(__aeon_r));"
+                "}"
+                "} catch (e) {"
+                f"console.log('{tag}ERR:' + (e && e.stack ? e.stack : String(e)));"
+                "}"
+                "})()"
+            )
             try:
-                self.proc.stdin.write(expr + "\n")
+                self.proc.stdin.write(wrapped + "\n")
                 self.proc.stdin.flush()
             except:
                 self.alive = False
                 return None
             deadline = time.time() + timeout
-            seen_echo = False
             while time.time() < deadline:
                 time.sleep(0.15)
                 with self._rlines_lock:
                     snapshot = list(self._lines)
                 for line in snapshot:
-                    if expr.strip()[:30] in line:
-                        seen_echo = True
+                    stripped = line.strip()
+                    if stripped.startswith("'" + tag) and stripped.endswith("'"):
+                        payload = stripped[1:-1].split(tag, 1)[1]
+                    elif stripped.startswith('"' + tag) and stripped.endswith('"'):
+                        payload = stripped[1:-1].split(tag, 1)[1]
+                    elif stripped.startswith(tag):
+                        payload = stripped.split(tag, 1)[1]
+                    else:
                         continue
-                    if '[CAPTURE]' in line:
-                        continue
-                    if seen_echo and line.startswith('"'):
-                        val = line.strip('"')
-                        if '[CAPTURE]' in val:
-                            continue
-                        return val
-                    if seen_echo and line.startswith("'"):
-                        sval = line.strip("'")
-                        if '[CAPTURE]' in sval:
-                            continue
-                        return sval
-                    if seen_echo and (line.startswith('{') or line.startswith('[')):
-                        return line
+                    if payload.startswith("ERR:"):
+                        return payload
+                    return payload
             return None
 
     def kill(self):
@@ -906,6 +938,75 @@ class Handler(BaseHTTPRequestHandler):
                 "trace": trace,
             })
 
+        elif parsed.path == "/translated/load":
+            elf_path = (params.get("elf") or [TRANSLATED_DEVICE_ELF])[0]
+            map_path = (params.get("map") or [TRANSLATED_DEVICE_MAP])[0]
+            expr = f"rpc.exports.jitGateTranslatedLoad({json.dumps(elf_path)}, {json.dumps(map_path)})"
+            result = bridge.eval_rpc(expr, timeout=120) if bridge.alive else None
+            self._json(200, {
+                "elf": elf_path,
+                "map": map_path,
+                "result": result,
+            })
+
+        elif parsed.path == "/translated/arm":
+            elf_path = (params.get("elf") or [None])[0]
+            map_path = (params.get("map") or [None])[0]
+            min_pc = (params.get("min_pc") or params.get("minPc") or [None])[0]
+            max_steps = parse_int_param(params, "max_steps", 4096, minimum=1, maximum=1_000_000)
+            elf_arg = json.dumps(elf_path) if elf_path else "undefined"
+            map_arg = json.dumps(map_path) if map_path else "undefined"
+            min_pc_arg = json.dumps(min_pc) if min_pc else "undefined"
+            expr = f"rpc.exports.jitGateTranslatedArm({elf_arg}, {map_arg}, {min_pc_arg}, {max_steps})"
+            result = bridge.eval_rpc(expr, timeout=120) if bridge.alive else None
+            self._json(200, {
+                "elf": elf_path,
+                "map": map_path,
+                "min_pc": min_pc,
+                "max_steps": max_steps,
+                "result": result,
+            })
+
+        elif parsed.path == "/translated/status":
+            result = bridge.eval_rpc("rpc.exports.jitGateTranslatedStatus()", timeout=10) if bridge.alive else None
+            self._json(200, {"result": result})
+
+        elif parsed.path == "/translated/clear":
+            result = bridge.eval_rpc("rpc.exports.jitGateTranslatedClear()", timeout=10) if bridge.alive else None
+            self._json(200, {"result": result})
+
+        elif parsed.path == "/dynamic/load":
+            lib_path = (params.get("lib") or [DYNAMIC_DEVICE_LIB])[0]
+            expr = f"rpc.exports.jitGateDynamicLoad({json.dumps(lib_path)})"
+            result = bridge.eval_rpc(expr, timeout=120) if bridge.alive else None
+            self._json(200, {
+                "lib": lib_path,
+                "result": result,
+            })
+
+        elif parsed.path == "/dynamic/arm":
+            lib_path = (params.get("lib") or [None])[0]
+            min_pc = (params.get("min_pc") or params.get("minPc") or [None])[0]
+            max_steps = parse_int_param(params, "max_steps", 4096, minimum=1, maximum=1_000_000)
+            lib_arg = json.dumps(lib_path) if lib_path else "undefined"
+            min_pc_arg = json.dumps(min_pc) if min_pc else "undefined"
+            expr = f"rpc.exports.jitGateDynamicArm({lib_arg}, {min_pc_arg}, {max_steps})"
+            result = bridge.eval_rpc(expr, timeout=120) if bridge.alive else None
+            self._json(200, {
+                "lib": lib_path,
+                "min_pc": min_pc,
+                "max_steps": max_steps,
+                "result": result,
+            })
+
+        elif parsed.path == "/dynamic/status":
+            result = bridge.eval_rpc("rpc.exports.jitGateDynamicStatus()", timeout=10) if bridge.alive else None
+            self._json(200, {"result": result})
+
+        elif parsed.path == "/dynamic/clear":
+            result = bridge.eval_rpc("rpc.exports.jitGateDynamicClear()", timeout=10) if bridge.alive else None
+            self._json(200, {"result": result})
+
         elif parsed.path == "/pull":
             files = pull_capture()
             self._json(200, {"files": files, "dir": OUTPUT_DIR})
@@ -926,6 +1027,14 @@ class Handler(BaseHTTPRequestHandler):
                 "GET /status": "session state",
                 "GET /call?c=<hex16>": "call getCertValue",
                 "GET /call?c=<hex16>&fixed_trace=1[&threads=tid,tid][&timeout=300]": "call getCertValue and arm in-process fixed-thread trace",
+                f"GET /translated/load[?elf={TRANSLATED_DEVICE_ELF}&map={TRANSLATED_DEVICE_MAP}]": "load translated JIT ELF + map into Frida session",
+                f"GET /translated/arm[?elf={TRANSLATED_DEVICE_ELF}&map={TRANSLATED_DEVICE_MAP}&min_pc=0x...&max_steps=4096]": "arm translated execute-fault diversion into translated JIT blocks",
+                "GET /translated/status": "translated JIT dispatch status",
+                "GET /translated/clear": "disable translated JIT dispatch",
+                f"GET /dynamic/load[?lib={DYNAMIC_DEVICE_LIB}]": "load resident dynamic Aeon runtime into Frida session",
+                f"GET /dynamic/arm[?lib={DYNAMIC_DEVICE_LIB}&min_pc=0x...&max_steps=4096]": "arm exact-PC dynamic execute-fault diversion",
+                "GET /dynamic/status": "dynamic JIT dispatch status",
+                "GET /dynamic/clear": "disable dynamic JIT dispatch",
                 "GET /capture?c=<hex16>": "call + capture JIT hash state",
                 "GET /trace?c=<hex16>": "capture JIT hash state + run Aeon JIT trace",
                 "GET /fixed-trace/arm[?threads=tid,tid]": "arm in-process fixed-thread trace for the next cert call",
@@ -1013,10 +1122,21 @@ def main():
                 log.warning(f"Relay failed: {entry.get('resolved', entry.get('path'))}: {entry.get('error')}")
 
     server = HTTPServer(("0.0.0.0", args.port), Handler)
+    log.info(
+        f"Expected device server: {XERDA_SERVER_PATH} listening on tcp:{XERDA_DEVICE_PORT}; host forward on tcp:{XERDA_HOST_PORT}"
+    )
     log.info(f"Capture server on :{args.port}")
     log.info(f"  GET /status        — check readiness")
     log.info(f"  GET /call?c=<hex>  — call getCertValue")
     log.info(f"  GET /call?c=<hex>&fixed_trace=1 — arm fixed-thread trace for this call")
+    log.info(f"  GET /translated/load[?elf=...&map=...] — load translated JIT ELF + map")
+    log.info(f"  GET /translated/arm[?elf=...&map=...&min_pc=0x...&max_steps=4096] — arm translated dispatch")
+    log.info(f"  GET /translated/status — translated dispatch status")
+    log.info(f"  GET /translated/clear — disable translated dispatch")
+    log.info(f"  GET /dynamic/load[?lib={DYNAMIC_DEVICE_LIB}] — load resident dynamic Aeon runtime")
+    log.info(f"  GET /dynamic/arm[?lib={DYNAMIC_DEVICE_LIB}&min_pc=0x...&max_steps=4096] — arm dynamic exact-PC dispatch")
+    log.info(f"  GET /dynamic/status — dynamic dispatch status")
+    log.info(f"  GET /dynamic/clear — disable dynamic dispatch")
     log.info(f"  GET /capture?c=<hex> — capture JIT hash + pull")
     log.info(f"  GET /trace?c=<hex> — capture JIT hash + Aeon JIT trace")
     log.info(f"  GET /fixed-trace/arm[?threads=tid,tid] — arm in-process fixed-thread trace")

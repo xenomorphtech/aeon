@@ -36,6 +36,12 @@ pub enum Condition {
     NV,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum TrapKind {
+    Brk,
+    Udf,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum BranchCond {
     Flag(Condition),
@@ -188,7 +194,10 @@ pub enum Stmt {
         expr: Expr,
     },
     Barrier(String),
-    Trap,
+    Trap {
+        kind: TrapKind,
+        imm: u16,
+    },
     Intrinsic {
         name: String,
         operands: Vec<Expr>,

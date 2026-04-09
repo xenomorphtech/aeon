@@ -211,7 +211,7 @@ impl Executor {
                 if let Some(cell_id) = self.resolve_memory_cell(addr, *size) {
                     let stored = mask_value(self.eval_expr(value), *size);
                     self.touched.insert(cell_id.clone());
-                    self.memory.insert(cell_id, stored);
+                    write_memory_overlay(&mut self.memory, &cell_id, &stored);
                 }
             }
             Stmt::SetFlags { expr } => self.apply_flags(expr),
@@ -225,7 +225,7 @@ impl Executor {
             | Stmt::CondBranch { .. }
             | Stmt::Call { .. }
             | Stmt::Ret
-            | Stmt::Trap => {}
+            | Stmt::Trap { .. } => {}
             Stmt::Barrier(kind) => {
                 if !is_supported_barrier(kind) {
                     panic_on_unsupported_stmt(stmt);
@@ -244,6 +244,12 @@ impl Executor {
                     return Value::Unknown;
                 };
                 self.touched.insert(cell_id.clone());
+                if let Some(value) = self.memory.get(&cell_id).cloned() {
+                    return value;
+                }
+                if let Some(bytes) = overlay_bytes_for_cell(&self.memory, &cell_id) {
+                    return decode_loaded_value(&bytes);
+                }
                 self.memory.entry(cell_id).or_insert(Value::Unknown).clone()
             }
             Expr::Add(lhs, rhs) => self.eval_binary_u64(lhs, rhs, u64::wrapping_add),
@@ -304,7 +310,7 @@ impl Executor {
                 self.eval_unary_u64(src, |value| apply_mask(value, *from_bits))
             }
             Expr::Extract { src, lsb, width } => {
-                self.eval_unary_u64(src, |value| apply_mask(value >> *lsb as u32, *width))
+                extract_value_bits(self.eval_expr(src), *lsb, *width)
             }
             Expr::Insert {
                 dst,
@@ -361,6 +367,20 @@ impl Executor {
                     .map(|expr| self.eval_expr(expr))
                     .and_then(|value| value.as_u64());
                 eval_movk_bits(dst, src)
+            }
+            Expr::Intrinsic { name, operands } if intrinsic_base_name(name) == "smulh" => {
+                eval_mul_high(
+                    operands.first().map(|expr| self.eval_expr(expr)),
+                    operands.get(1).map(|expr| self.eval_expr(expr)),
+                    true,
+                )
+            }
+            Expr::Intrinsic { name, operands } if intrinsic_base_name(name) == "umulh" => {
+                eval_mul_high(
+                    operands.first().map(|expr| self.eval_expr(expr)),
+                    operands.get(1).map(|expr| self.eval_expr(expr)),
+                    false,
+                )
             }
             Expr::Intrinsic { .. } => panic_on_unsupported_expr(expr),
             Expr::Clz(inner) => self.eval_unary_with_width(inner, leading_zeros_for_width),
@@ -525,6 +545,8 @@ impl Executor {
         match intrinsic_base_name(name) {
             "movi" => self.execute_vector_move_intrinsic(name, operands, false),
             "mvni" => self.execute_vector_move_intrinsic(name, operands, true),
+            "dup" => self.execute_dup_intrinsic(name, operands),
+            "add" => self.execute_vector_add_intrinsic(name, operands),
             "cmeq" => self.execute_cmeq_intrinsic(name, operands),
             "bif" => self.execute_bif_intrinsic(name, operands),
             "umov" => self.execute_umov_intrinsic(name, operands),
@@ -542,21 +564,33 @@ impl Executor {
     }
 
     fn execute_vector_move_intrinsic(&mut self, name: &str, operands: &[Expr], invert: bool) {
-        let Some(arrangement) = parse_vector_arrangement(name) else {
-            panic!("aeon emulation is missing SIMD arrangement for `{name}`");
-        };
-        let Some(dst) = operands.first().and_then(vector_reg_from_expr) else {
-            panic!("aeon emulation expected a SIMD destination for `{name}`");
-        };
         let imm = operands
             .get(1)
             .map(|expr| self.eval_expr(expr))
             .and_then(|value| value.as_u64());
+        let Some(dst) = operands.first().and_then(expr_reg_operand) else {
+            panic!("aeon emulation expected a SIMD destination for `{name}`");
+        };
+        if matches!(dst, Reg::V(_) | Reg::Q(_)) {
+            let Some(arrangement) = parse_vector_arrangement(name) else {
+                panic!("aeon emulation is missing SIMD arrangement for `{name}`");
+            };
+            let value = imm
+                .map(|imm| arranged_immediate_vector(imm, arrangement, invert))
+                .map(Value::U128)
+                .unwrap_or(Value::Unknown);
+            write_arranged_vector_register(&mut self.registers, &dst, arrangement, value);
+            return;
+        }
+        let size = scalar_simd_size(&dst)
+            .unwrap_or_else(|| panic!("aeon emulation expected a SIMD destination for `{name}`"));
         let value = imm
-            .map(|imm| arranged_immediate_vector(imm, arrangement, invert))
-            .map(Value::U128)
+            .map(|imm| {
+                let bits = if invert { !imm } else { imm };
+                scalar_or_unknown_value(Value::U64(bits), size)
+            })
             .unwrap_or(Value::Unknown);
-        write_arranged_vector_register(&mut self.registers, &dst, arrangement, value);
+        self.write_reg(dst, value);
     }
 
     fn execute_cmeq_intrinsic(&mut self, name: &str, operands: &[Expr]) {
@@ -582,6 +616,50 @@ impl Executor {
             .flatten();
         let value = match (lhs, rhs) {
             (Some(lhs), Some(rhs)) => Value::U128(vector_cmeq(lhs, rhs, arrangement)),
+            _ => Value::Unknown,
+        };
+        write_arranged_vector_register(&mut self.registers, &dst, arrangement, value);
+    }
+
+    fn execute_dup_intrinsic(&mut self, name: &str, operands: &[Expr]) {
+        let Some(arrangement) = parse_vector_arrangement(name) else {
+            panic!("aeon emulation is missing SIMD arrangement for `{name}`");
+        };
+        let Some(dst) = operands.first().and_then(vector_reg_from_expr) else {
+            panic!("aeon emulation expected a SIMD destination for `{name}`");
+        };
+        let value = operands
+            .get(1)
+            .map(|expr| self.eval_expr(expr))
+            .and_then(|value| vector_dup(value, arrangement))
+            .map(Value::U128)
+            .unwrap_or(Value::Unknown);
+        write_arranged_vector_register(&mut self.registers, &dst, arrangement, value);
+    }
+
+    fn execute_vector_add_intrinsic(&mut self, name: &str, operands: &[Expr]) {
+        let Some(arrangement) = parse_vector_arrangement(name) else {
+            panic!("aeon emulation is missing SIMD arrangement for `{name}`");
+        };
+        let Some(dst) = operands.first().and_then(vector_reg_from_expr) else {
+            panic!("aeon emulation expected a SIMD destination for `{name}`");
+        };
+        let lhs = operands
+            .get(1)
+            .map(|expr| {
+                let value = self.eval_expr(expr);
+                vector_operand_bytes(expr, value, arrangement)
+            })
+            .flatten();
+        let rhs = operands
+            .get(2)
+            .map(|expr| {
+                let value = self.eval_expr(expr);
+                vector_operand_bytes(expr, value, arrangement)
+            })
+            .flatten();
+        let value = match (lhs, rhs) {
+            (Some(lhs), Some(rhs)) => Value::U128(vector_add(lhs, rhs, arrangement)),
             _ => Value::Unknown,
         };
         write_arranged_vector_register(&mut self.registers, &dst, arrangement, value);
@@ -746,7 +824,7 @@ impl<'a> BlockExecutor<'a> {
                     }
                     return true;
                 }
-                self.memory.insert(cell_id.clone(), stored.clone());
+                write_memory_overlay(&mut self.memory, &cell_id, &stored);
                 self.writes.push(MemoryWriteObservation {
                     id: cell_id,
                     value: stored,
@@ -802,7 +880,7 @@ impl<'a> BlockExecutor<'a> {
                 }
                 false
             }
-            Stmt::Call { .. } | Stmt::Ret | Stmt::Trap => {
+            Stmt::Call { .. } | Stmt::Ret | Stmt::Trap { .. } => {
                 self.stop = BlockStop::UnsupportedControlFlow;
                 false
             }
@@ -889,7 +967,7 @@ impl<'a> BlockExecutor<'a> {
                 self.eval_unary_u64(src, |value| apply_mask(value, *from_bits))
             }
             Expr::Extract { src, lsb, width } => {
-                self.eval_unary_u64(src, |value| apply_mask(value >> *lsb as u32, *width))
+                extract_value_bits(self.eval_expr(src), *lsb, *width)
             }
             Expr::Insert {
                 dst,
@@ -946,6 +1024,20 @@ impl<'a> BlockExecutor<'a> {
                     .map(|expr| self.eval_expr(expr))
                     .and_then(|value| value.as_u64());
                 eval_movk_bits(dst, src)
+            }
+            Expr::Intrinsic { name, operands } if intrinsic_base_name(name) == "smulh" => {
+                eval_mul_high(
+                    operands.first().map(|expr| self.eval_expr(expr)),
+                    operands.get(1).map(|expr| self.eval_expr(expr)),
+                    true,
+                )
+            }
+            Expr::Intrinsic { name, operands } if intrinsic_base_name(name) == "umulh" => {
+                eval_mul_high(
+                    operands.first().map(|expr| self.eval_expr(expr)),
+                    operands.get(1).map(|expr| self.eval_expr(expr)),
+                    false,
+                )
             }
             Expr::Intrinsic { .. } => panic_on_unsupported_expr(expr),
             Expr::Clz(inner) => self.eval_unary_with_width(inner, leading_zeros_for_width),
@@ -1195,6 +1287,8 @@ impl<'a> BlockExecutor<'a> {
         match intrinsic_base_name(name) {
             "movi" => self.execute_vector_move_intrinsic(name, operands, false),
             "mvni" => self.execute_vector_move_intrinsic(name, operands, true),
+            "dup" => self.execute_dup_intrinsic(name, operands),
+            "add" => self.execute_vector_add_intrinsic(name, operands),
             "cmeq" => self.execute_cmeq_intrinsic(name, operands),
             "bif" => self.execute_bif_intrinsic(name, operands),
             "umov" => self.execute_umov_intrinsic(name, operands),
@@ -1213,21 +1307,33 @@ impl<'a> BlockExecutor<'a> {
     }
 
     fn execute_vector_move_intrinsic(&mut self, name: &str, operands: &[Expr], invert: bool) {
-        let Some(arrangement) = parse_vector_arrangement(name) else {
-            panic!("aeon emulation is missing SIMD arrangement for `{name}`");
-        };
-        let Some(dst) = operands.first().and_then(vector_reg_from_expr) else {
-            panic!("aeon emulation expected a SIMD destination for `{name}`");
-        };
         let imm = operands
             .get(1)
             .map(|expr| self.eval_expr(expr))
             .and_then(|value| value.as_u64());
+        let Some(dst) = operands.first().and_then(expr_reg_operand) else {
+            panic!("aeon emulation expected a SIMD destination for `{name}`");
+        };
+        if matches!(dst, Reg::V(_) | Reg::Q(_)) {
+            let Some(arrangement) = parse_vector_arrangement(name) else {
+                panic!("aeon emulation is missing SIMD arrangement for `{name}`");
+            };
+            let value = imm
+                .map(|imm| arranged_immediate_vector(imm, arrangement, invert))
+                .map(Value::U128)
+                .unwrap_or(Value::Unknown);
+            write_arranged_vector_register(&mut self.registers, &dst, arrangement, value);
+            return;
+        }
+        let size = scalar_simd_size(&dst)
+            .unwrap_or_else(|| panic!("aeon emulation expected a SIMD destination for `{name}`"));
         let value = imm
-            .map(|imm| arranged_immediate_vector(imm, arrangement, invert))
-            .map(Value::U128)
+            .map(|imm| {
+                let bits = if invert { !imm } else { imm };
+                scalar_or_unknown_value(Value::U64(bits), size)
+            })
             .unwrap_or(Value::Unknown);
-        write_arranged_vector_register(&mut self.registers, &dst, arrangement, value);
+        self.write_reg(dst, value);
     }
 
     fn execute_cmeq_intrinsic(&mut self, name: &str, operands: &[Expr]) {
@@ -1253,6 +1359,50 @@ impl<'a> BlockExecutor<'a> {
             .flatten();
         let value = match (lhs, rhs) {
             (Some(lhs), Some(rhs)) => Value::U128(vector_cmeq(lhs, rhs, arrangement)),
+            _ => Value::Unknown,
+        };
+        write_arranged_vector_register(&mut self.registers, &dst, arrangement, value);
+    }
+
+    fn execute_dup_intrinsic(&mut self, name: &str, operands: &[Expr]) {
+        let Some(arrangement) = parse_vector_arrangement(name) else {
+            panic!("aeon emulation is missing SIMD arrangement for `{name}`");
+        };
+        let Some(dst) = operands.first().and_then(vector_reg_from_expr) else {
+            panic!("aeon emulation expected a SIMD destination for `{name}`");
+        };
+        let value = operands
+            .get(1)
+            .map(|expr| self.eval_expr(expr))
+            .and_then(|value| vector_dup(value, arrangement))
+            .map(Value::U128)
+            .unwrap_or(Value::Unknown);
+        write_arranged_vector_register(&mut self.registers, &dst, arrangement, value);
+    }
+
+    fn execute_vector_add_intrinsic(&mut self, name: &str, operands: &[Expr]) {
+        let Some(arrangement) = parse_vector_arrangement(name) else {
+            panic!("aeon emulation is missing SIMD arrangement for `{name}`");
+        };
+        let Some(dst) = operands.first().and_then(vector_reg_from_expr) else {
+            panic!("aeon emulation expected a SIMD destination for `{name}`");
+        };
+        let lhs = operands
+            .get(1)
+            .map(|expr| {
+                let value = self.eval_expr(expr);
+                vector_operand_bytes(expr, value, arrangement)
+            })
+            .flatten();
+        let rhs = operands
+            .get(2)
+            .map(|expr| {
+                let value = self.eval_expr(expr);
+                vector_operand_bytes(expr, value, arrangement)
+            })
+            .flatten();
+        let value = match (lhs, rhs) {
+            (Some(lhs), Some(rhs)) => Value::U128(vector_add(lhs, rhs, arrangement)),
             _ => Value::Unknown,
         };
         write_arranged_vector_register(&mut self.registers, &dst, arrangement, value);
@@ -1498,10 +1648,35 @@ fn read_simd_register_value(registers: &BTreeMap<Reg, Value>, reg: &Reg) -> Opti
 }
 
 fn read_simd_vector_bytes(registers: &BTreeMap<Reg, Value>, index: u8) -> Option<[u8; 16]> {
-    registers
+    if let Some(bytes) = registers
         .get(&Reg::V(index))
         .or_else(|| registers.get(&Reg::Q(index)))
         .and_then(vector_bytes_from_value)
+    {
+        return Some(bytes);
+    }
+
+    let mut bytes = [0u8; 16];
+    let low = registers
+        .get(&Reg::D(index))
+        .and_then(|value| low_bytes_from_value(value, 8))
+        .or_else(|| {
+            registers
+                .get(&Reg::S(index))
+                .and_then(|value| low_bytes_from_value(value, 4))
+        })
+        .or_else(|| {
+            registers
+                .get(&Reg::H(index))
+                .and_then(|value| low_bytes_from_value(value, 2))
+        })
+        .or_else(|| {
+            registers
+                .get(&Reg::VByte(index))
+                .and_then(|value| low_bytes_from_value(value, 1))
+        })?;
+    bytes[..low.len()].copy_from_slice(&low);
+    Some(bytes)
 }
 
 fn read_simd_scalar_bytes(
@@ -1632,6 +1807,41 @@ fn scalar_value_from_bytes(bytes: &[u8]) -> Value {
     Value::U64(u64::from_le_bytes(buf))
 }
 
+fn extract_value_bits(value: Value, lsb: u8, width: u8) -> Value {
+    match value {
+        Value::U64(bits) => {
+            if lsb >= 64 {
+                Value::U64(0)
+            } else {
+                Value::U64(apply_mask(bits >> lsb as u32, width))
+            }
+        }
+        Value::U128(bits) => {
+            if lsb >= 128 {
+                return if width > 64 {
+                    Value::U128(0)
+                } else {
+                    Value::U64(0)
+                };
+            }
+            let shifted = bits >> lsb as u32;
+            if width <= 64 {
+                Value::U64((shifted as u64) & width_mask(width))
+            } else {
+                Value::U128(shifted & width_mask_u128(width))
+            }
+        }
+        Value::F64(bits) => {
+            if lsb >= 64 {
+                Value::U64(0)
+            } else {
+                Value::U64(apply_mask(bits.to_bits() >> lsb as u32, width))
+            }
+        }
+        Value::Unknown => Value::Unknown,
+    }
+}
+
 fn low_u64_value(value: Value) -> Value {
     match value {
         Value::U64(bits) => Value::U64(bits),
@@ -1710,6 +1920,52 @@ fn vector_cmeq(lhs: [u8; 16], rhs: [u8; 16], arrangement: VectorArrangement) -> 
             0x00
         };
         result[start..end].fill(fill);
+    }
+    u128::from_le_bytes(result)
+}
+
+fn vector_dup(value: Value, arrangement: VectorArrangement) -> Option<u128> {
+    let lane_bytes = usize::from(arrangement.lane_bits / 8);
+    let lane = low_bytes_from_value(&value, lane_bytes)?;
+    let mut result = [0u8; 16];
+    for lane_index in 0..usize::from(arrangement.lanes) {
+        let start = lane_index * lane_bytes;
+        result[start..start + lane_bytes].copy_from_slice(&lane);
+    }
+    Some(u128::from_le_bytes(result))
+}
+
+fn vector_add(lhs: [u8; 16], rhs: [u8; 16], arrangement: VectorArrangement) -> u128 {
+    let lane_bytes = usize::from(arrangement.lane_bits / 8);
+    let mut result = [0u8; 16];
+    for lane in 0..usize::from(arrangement.lanes) {
+        let start = lane * lane_bytes;
+        let end = start + lane_bytes;
+        match lane_bytes {
+            1 => {
+                result[start] = lhs[start].wrapping_add(rhs[start]);
+            }
+            2 => {
+                let lhs_lane = u16::from_le_bytes([lhs[start], lhs[start + 1]]);
+                let rhs_lane = u16::from_le_bytes([rhs[start], rhs[start + 1]]);
+                result[start..end].copy_from_slice(&lhs_lane.wrapping_add(rhs_lane).to_le_bytes());
+            }
+            4 => {
+                let lhs_lane =
+                    u32::from_le_bytes(lhs[start..end].try_into().expect("u32 lane lhs"));
+                let rhs_lane =
+                    u32::from_le_bytes(rhs[start..end].try_into().expect("u32 lane rhs"));
+                result[start..end].copy_from_slice(&lhs_lane.wrapping_add(rhs_lane).to_le_bytes());
+            }
+            8 => {
+                let lhs_lane =
+                    u64::from_le_bytes(lhs[start..end].try_into().expect("u64 lane lhs"));
+                let rhs_lane =
+                    u64::from_le_bytes(rhs[start..end].try_into().expect("u64 lane rhs"));
+                result[start..end].copy_from_slice(&lhs_lane.wrapping_add(rhs_lane).to_le_bytes());
+            }
+            _ => unreachable!("unsupported SIMD lane size"),
+        }
     }
     u128::from_le_bytes(result)
 }
@@ -1798,6 +2054,67 @@ fn overlay_bytes_for_cell(
     Some(bytes)
 }
 
+fn write_memory_overlay(
+    memory: &mut BTreeMap<MemoryCellId, Value>,
+    cell_id: &MemoryCellId,
+    value: &Value,
+) {
+    clear_overlapping_memory_cells(memory, cell_id);
+    memory.insert(cell_id.clone(), value.clone());
+
+    for (index, byte_value) in stored_byte_values(value, cell_id.size)
+        .into_iter()
+        .enumerate()
+    {
+        let Some(location) = byte_location(&cell_id.location, index as u8) else {
+            continue;
+        };
+        memory.insert(MemoryCellId { location, size: 1 }, byte_value);
+    }
+}
+
+fn clear_overlapping_memory_cells(
+    memory: &mut BTreeMap<MemoryCellId, Value>,
+    cell_id: &MemoryCellId,
+) {
+    memory.retain(|existing, _| !memory_cells_overlap(existing, cell_id));
+}
+
+fn memory_cells_overlap(lhs: &MemoryCellId, rhs: &MemoryCellId) -> bool {
+    match (&lhs.location, &rhs.location) {
+        (MemoryLocation::Absolute(lhs_addr), MemoryLocation::Absolute(rhs_addr)) => {
+            byte_ranges_overlap_u64(*lhs_addr, lhs.size, *rhs_addr, rhs.size)
+        }
+        (MemoryLocation::StackSlot(lhs_offset), MemoryLocation::StackSlot(rhs_offset)) => {
+            byte_ranges_overlap_i64(*lhs_offset, lhs.size, *rhs_offset, rhs.size)
+        }
+        _ => false,
+    }
+}
+
+fn byte_ranges_overlap_u64(lhs_start: u64, lhs_size: u8, rhs_start: u64, rhs_size: u8) -> bool {
+    let lhs_end = lhs_start as u128 + lhs_size as u128;
+    let rhs_end = rhs_start as u128 + rhs_size as u128;
+    (lhs_start as u128) < rhs_end && (rhs_start as u128) < lhs_end
+}
+
+fn byte_ranges_overlap_i64(lhs_start: i64, lhs_size: u8, rhs_start: i64, rhs_size: u8) -> bool {
+    let lhs_end = lhs_start as i128 + lhs_size as i128;
+    let rhs_end = rhs_start as i128 + rhs_size as i128;
+    (lhs_start as i128) < rhs_end && (rhs_start as i128) < lhs_end
+}
+
+fn stored_byte_values(value: &Value, size: u8) -> Vec<Value> {
+    let size = size as usize;
+    let concrete = vector_bytes_from_value(value).map(|bytes| bytes[..size].to_vec());
+    (0..size)
+        .map(|index| match concrete.as_ref() {
+            Some(bytes) => Value::U64(bytes[index] as u64),
+            None => Value::Unknown,
+        })
+        .collect()
+}
+
 fn byte_location(location: &MemoryLocation, index: u8) -> Option<MemoryLocation> {
     match location {
         MemoryLocation::Absolute(addr) => {
@@ -1827,6 +2144,23 @@ fn eval_movk_bits(dst: Option<u64>, src: Option<u64>) -> Value {
     let imm16 = (src >> shift) & 0xffff;
     let mask = 0xffffu64 << shift;
     Value::U64((dst & !mask) | ((imm16 << shift) & mask))
+}
+
+fn eval_mul_high(lhs: Option<Value>, rhs: Option<Value>, signed: bool) -> Value {
+    let (Some(lhs), Some(rhs)) = (
+        lhs.and_then(|value| value.as_u64()),
+        rhs.and_then(|value| value.as_u64()),
+    ) else {
+        return Value::Unknown;
+    };
+
+    if signed {
+        let product = (lhs as i64 as i128) * (rhs as i64 as i128);
+        Value::U64((product >> 64) as u64)
+    } else {
+        let product = (lhs as u128) * (rhs as u128);
+        Value::U64((product >> 64) as u64)
+    }
 }
 
 fn truncate_to_w(value: Value) -> Value {
@@ -1859,6 +2193,14 @@ fn width_mask(bits: u8) -> u64 {
         0 => 0,
         1..=63 => ((1u128 << bits) - 1) as u64,
         _ => u64::MAX,
+    }
+}
+
+fn width_mask_u128(bits: u8) -> u128 {
+    match bits {
+        0 => 0,
+        1..=127 => (1u128 << bits) - 1,
+        _ => u128::MAX,
     }
 }
 
@@ -2388,6 +2730,60 @@ mod tests {
     }
 
     #[test]
+    fn execute_snippet_reads_narrower_loads_from_wider_overlay_store() {
+        let result = execute_snippet(
+            &[
+                Stmt::Store {
+                    addr: Expr::Imm(0x2000),
+                    value: Expr::Imm(0x1122_3344_5566_7788),
+                    size: 8,
+                },
+                Stmt::Assign {
+                    dst: Reg::X(0),
+                    src: e_load(Expr::Imm(0x2000), 4),
+                },
+            ],
+            BTreeMap::new(),
+            8,
+        );
+
+        assert_eq!(
+            result.final_registers.get(&Reg::X(0)),
+            Some(&Value::U64(0x5566_7788))
+        );
+    }
+
+    #[test]
+    fn execute_block_prefers_wider_overlay_store_over_stale_backing_bytes() {
+        let backing = TestBackingStore {
+            cells: BTreeMap::from([((0x2000, 8), vec![1, 0, 0, 0, 1, 0, 0, 0])]),
+        };
+
+        let result = execute_block(
+            &[
+                Stmt::Store {
+                    addr: Expr::Imm(0x2000),
+                    value: Expr::Imm(0),
+                    size: 16,
+                },
+                Stmt::Assign {
+                    dst: Reg::X(0),
+                    src: e_load(Expr::Imm(0x2000), 8),
+                },
+            ],
+            BTreeMap::new(),
+            BTreeMap::new(),
+            &backing,
+            MissingMemoryPolicy::Stop,
+            8,
+        );
+
+        assert_eq!(result.final_registers.get(&Reg::X(0)), Some(&Value::U64(0)));
+        assert_eq!(result.stop, BlockStop::Completed);
+        assert_eq!(result.reads[0].source, Some(MemoryValueSource::Overlay));
+    }
+
+    #[test]
     fn execute_block_resolves_w_register_addresses_from_x_aliases() {
         let full_addr = 0x1_0000_3000u64;
         let backing = TestBackingStore {
@@ -2437,6 +2833,44 @@ mod tests {
         assert_eq!(
             result.final_registers.get(&Reg::X(0)),
             Some(&Value::U64(0x8899_aabb_1234_ccdd))
+        );
+        assert_eq!(result.stop, BlockStop::Completed);
+    }
+
+    #[test]
+    fn execute_block_evaluates_mul_high_intrinsics() {
+        let backing = TestBackingStore {
+            cells: BTreeMap::new(),
+        };
+
+        let result = execute_block(
+            &[
+                Stmt::Assign {
+                    dst: Reg::X(0),
+                    src: Expr::Intrinsic {
+                        name: "umulh".to_string(),
+                        operands: vec![Expr::Imm(u64::MAX), Expr::Imm(2)],
+                    },
+                },
+                Stmt::Assign {
+                    dst: Reg::X(1),
+                    src: Expr::Intrinsic {
+                        name: "smulh".to_string(),
+                        operands: vec![Expr::Imm(u64::MAX), Expr::Imm(2)],
+                    },
+                },
+            ],
+            BTreeMap::new(),
+            BTreeMap::new(),
+            &backing,
+            MissingMemoryPolicy::Stop,
+            8,
+        );
+
+        assert_eq!(result.final_registers.get(&Reg::X(0)), Some(&Value::U64(1)));
+        assert_eq!(
+            result.final_registers.get(&Reg::X(1)),
+            Some(&Value::U64(u64::MAX))
         );
         assert_eq!(result.stop, BlockStop::Completed);
     }
@@ -2726,6 +3160,118 @@ mod tests {
         assert_eq!(
             result.final_registers.get(&Reg::X(26)),
             Some(&Value::U64(0x2211))
+        );
+    }
+
+    #[test]
+    fn execute_block_extracts_umov_from_scalar_d_alias_without_v_register() {
+        let backing = TestBackingStore {
+            cells: BTreeMap::new(),
+        };
+
+        let result = execute_block(
+            &[Stmt::Assign {
+                dst: Reg::W(26),
+                src: Expr::Extract {
+                    src: Box::new(Expr::Reg(Reg::V(0))),
+                    lsb: 0,
+                    width: 16,
+                },
+            }],
+            BTreeMap::from([(Reg::D(0), Value::U64(0xddcc_bbaa_4433_2211))]),
+            BTreeMap::new(),
+            &backing,
+            MissingMemoryPolicy::Stop,
+            4,
+        );
+
+        assert_eq!(
+            result.final_registers.get(&Reg::W(26)),
+            Some(&Value::U64(0x2211))
+        );
+        assert_eq!(
+            result.final_registers.get(&Reg::X(26)),
+            Some(&Value::U64(0x2211))
+        );
+    }
+
+    #[test]
+    fn execute_block_duplicates_scalar_into_vector_lanes() {
+        let backing = TestBackingStore {
+            cells: BTreeMap::new(),
+        };
+
+        let result = execute_block(
+            &[Stmt::Intrinsic {
+                name: "dup.2d".to_string(),
+                operands: vec![Expr::Reg(Reg::V(1)), Expr::Reg(Reg::X(11))],
+            }],
+            BTreeMap::from([(Reg::X(11), Value::U64(0x1122_3344_5566_7788))]),
+            BTreeMap::new(),
+            &backing,
+            MissingMemoryPolicy::Stop,
+            4,
+        );
+
+        assert_eq!(
+            result.final_registers.get(&Reg::V(1)),
+            Some(&Value::U128(0x1122_3344_5566_7788_1122_3344_5566_7788u128))
+        );
+    }
+
+    #[test]
+    fn execute_block_adds_vector_lanes_with_arrangement() {
+        let backing = TestBackingStore {
+            cells: BTreeMap::new(),
+        };
+        let lhs = u128::from_le_bytes([1, 0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0]);
+        let rhs = u128::from_le_bytes([2, 0, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0]);
+
+        let result = execute_block(
+            &[Stmt::Intrinsic {
+                name: "add.2d".to_string(),
+                operands: vec![
+                    Expr::Reg(Reg::V(0)),
+                    Expr::Reg(Reg::V(1)),
+                    Expr::Reg(Reg::V(2)),
+                ],
+            }],
+            BTreeMap::from([(Reg::V(1), Value::U128(lhs)), (Reg::V(2), Value::U128(rhs))]),
+            BTreeMap::new(),
+            &backing,
+            MissingMemoryPolicy::Stop,
+            4,
+        );
+
+        assert_eq!(
+            result.final_registers.get(&Reg::V(0)),
+            Some(&Value::U128(u128::from_le_bytes([
+                3, 0, 0, 0, 0, 0, 0, 0, 30, 0, 0, 0, 0, 0, 0, 0,
+            ])))
+        );
+    }
+
+    #[test]
+    fn execute_block_writes_scalar_simd_movi_without_arrangement() {
+        let backing = TestBackingStore {
+            cells: BTreeMap::new(),
+        };
+
+        let result = execute_block(
+            &[Stmt::Intrinsic {
+                name: "movi".to_string(),
+                operands: vec![Expr::Reg(Reg::D(0)), Expr::Imm(0x0000_0000_ffff_ffff)],
+            }],
+            BTreeMap::new(),
+            BTreeMap::new(),
+            &backing,
+            MissingMemoryPolicy::Stop,
+            4,
+        );
+
+        assert_eq!(
+            read_register_value(&result.final_registers, &Reg::D(0)),
+            Value::U64(0x0000_0000_ffff_ffff)
         );
     }
 

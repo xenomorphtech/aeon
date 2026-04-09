@@ -152,7 +152,7 @@ fn stmt_contains_intrinsic(stmt: &Stmt) -> bool {
         Stmt::Pair(lhs, rhs) => stmt_contains_intrinsic(lhs) || stmt_contains_intrinsic(rhs),
         Stmt::SetFlags { expr } => expr_contains_intrinsic(expr),
         Stmt::Intrinsic { .. } => true,
-        Stmt::Ret | Stmt::Nop | Stmt::Barrier(_) | Stmt::Trap => false,
+        Stmt::Ret | Stmt::Nop | Stmt::Barrier(_) | Stmt::Trap { .. } => false,
     }
 }
 

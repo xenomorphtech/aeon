@@ -187,7 +187,10 @@ pub fn convert_stmt(stmt: &Stmt) -> SsaStmt {
             }
         }
         Stmt::Barrier(s) => SsaStmt::Barrier(s.clone()),
-        Stmt::Trap => SsaStmt::Trap,
+        Stmt::Trap { kind, imm } => SsaStmt::Trap {
+            kind: *kind,
+            imm: *imm,
+        },
         Stmt::Intrinsic { name, operands } => SsaStmt::Intrinsic {
             name: name.clone(),
             operands: operands.iter().map(convert_expr).collect(),

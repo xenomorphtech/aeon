@@ -22,9 +22,32 @@ use aeonil::{Expr, Reg, Stmt};
 
 use crate::context::MemoryProvider;
 
+fn cfg_trace_path() -> &'static str {
+    #[cfg(target_os = "android")]
+    {
+        "/data/user/0/com.netmarble.thered/files/aeon_dyn_runtime.log"
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        "/tmp/aeon_dyn_runtime.log"
+    }
+}
+
+fn cfg_trace_line(message: &str) {
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(cfg_trace_path())
+    {
+        let _ = writeln!(file, "{message}");
+    }
+}
+
 /// A compiled block entry with metadata.
 pub struct CompiledBlock {
     pub addr: u64,
+    pub block_id: u64,
     pub entry: JitEntry,
     pub stmts: Vec<Stmt>,
     pub size_bytes: usize,
@@ -59,7 +82,7 @@ fn is_terminator(stmt: &Stmt) -> bool {
         | Stmt::CondBranch { .. }
         | Stmt::Call { .. }
         | Stmt::Ret
-        | Stmt::Trap => true,
+        | Stmt::Trap { .. } => true,
         Stmt::Pair(a, b) => is_terminator(a) || is_terminator(b),
         _ => false,
     }
@@ -77,7 +100,7 @@ fn classify_terminator(stmt: &Stmt) -> Option<BlockTerminator> {
             _ => Some(BlockTerminator::DynamicCall),
         },
         Stmt::Ret => Some(BlockTerminator::Return),
-        Stmt::Trap => Some(BlockTerminator::Trap),
+        Stmt::Trap { .. } => Some(BlockTerminator::Trap),
         Stmt::Pair(a, b) => classify_terminator(b).or_else(|| classify_terminator(a)),
         _ => None,
     }
@@ -90,15 +113,21 @@ fn classify_terminator(stmt: &Stmt) -> Option<BlockTerminator> {
 ///   This mimics what BL does (sets LR, then jumps). The engine will naturally
 ///   follow the call chain by compiling the callee's blocks.
 ///
-/// - `Ret` → `Branch { target: Reg(X30) }`
-///   Instead of halting (returning 0), returns the LR value so the engine
-///   continues at the caller's return address. When LR=0 (top-level), this
-///   returns 0 which signals halt.
 fn transform_calls_and_rets(stmts: Vec<Stmt>, return_addr: u64) -> Vec<Stmt> {
     let mut out = Vec::with_capacity(stmts.len() + 1);
     for stmt in stmts {
         match stmt {
             Stmt::Call { target } => {
+                let target = match target {
+                    Expr::Reg(Reg::X(30)) => {
+                        out.push(Stmt::Assign {
+                            dst: Reg::X(17),
+                            src: Expr::Reg(Reg::X(30)),
+                        });
+                        Expr::Reg(Reg::X(17))
+                    }
+                    other => other,
+                };
                 // Set LR = return address (instruction after the BL)
                 out.push(Stmt::Assign {
                     dst: Reg::X(30),
@@ -106,12 +135,6 @@ fn transform_calls_and_rets(stmts: Vec<Stmt>, return_addr: u64) -> Vec<Stmt> {
                 });
                 // Branch to callee — JIT returns target addr to engine
                 out.push(Stmt::Branch { target });
-            }
-            Stmt::Ret => {
-                // Return via LR — JIT returns X30 value to engine
-                out.push(Stmt::Branch {
-                    target: Expr::Reg(Reg::X(30)),
-                });
             }
             Stmt::Pair(a, b) => {
                 // Recursively transform pairs
@@ -146,11 +169,14 @@ impl DynCfg {
         addr: u64,
         memory: &dyn MemoryProvider,
     ) -> Result<&CompiledBlock, JitError> {
+        cfg_trace_line(&format!("cfg get_or_compile start addr=0x{addr:x}"));
         if self.blocks.contains_key(&addr) {
+            cfg_trace_line(&format!("cfg cache_hit addr=0x{addr:x}"));
             return Ok(&self.blocks[&addr]);
         }
 
         if let Some(_err) = self.failed.get(&addr) {
+            cfg_trace_line(&format!("cfg failed_hit addr=0x{addr:x}"));
             return Err(JitError::UnsupportedStmt("previously failed address"));
         }
 
@@ -168,6 +194,7 @@ impl DynCfg {
             let bytes = match memory.read(pc, 4) {
                 Some(b) => b,
                 None => {
+                    cfg_trace_line(&format!("cfg read_miss addr=0x{addr:x} pc=0x{pc:x}"));
                     let msg = format!("unmapped memory at 0x{:x}", pc);
                     self.failed.insert(addr, msg);
                     return Err(JitError::UnsupportedStmt("unmapped memory"));
@@ -175,20 +202,28 @@ impl DynCfg {
             };
 
             let word = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+            cfg_trace_line(&format!("cfg read pc=0x{pc:x} word=0x{word:08x}"));
             let next_pc = Some(pc + 4);
 
             // Decode ARM64 instruction
             let insn = match bad64::decode(word, pc) {
                 Ok(i) => i,
                 Err(_) => {
+                    cfg_trace_line(&format!("cfg decode_err addr=0x{addr:x} pc=0x{pc:x} word=0x{word:08x}"));
                     let msg = format!("invalid encoding 0x{:08x} at 0x{:x}", word, pc);
                     self.failed.insert(addr, msg);
                     return Err(JitError::UnsupportedStmt("invalid ARM64 encoding"));
                 }
             };
+            cfg_trace_line(&format!("cfg decode_ok pc=0x{pc:x}"));
 
             // Lift to AeonIL
             let result = aeon::lifter::lift(&insn, pc, next_pc);
+            cfg_trace_line(&format!(
+                "cfg lift_ok pc=0x{pc:x} term={} edges={}",
+                is_terminator(&result.stmt),
+                result.edges.len()
+            ));
 
             let is_term = is_terminator(&result.stmt);
             if is_term {
@@ -220,13 +255,23 @@ impl DynCfg {
         // instead of trying to call ARM64 addresses as x86_64 code.
         let return_addr = addr + total_bytes as u64;
         let stmts = transform_calls_and_rets(stmts, return_addr);
+        cfg_trace_line(&format!(
+            "cfg compile_begin addr=0x{addr:x} size=0x{total_bytes:x} stmts={}",
+            stmts.len()
+        ));
 
         // Compile the block via aeon-jit
         let code_ptr = self.compiler.compile_block(addr, &stmts)?;
+        cfg_trace_line(&format!("cfg compile_ok addr=0x{addr:x} code=0x{:x}", code_ptr as usize));
+        let block_id = self
+            .compiler
+            .block_id(addr)
+            .ok_or(JitError::UnsupportedStmt("missing block id after compile"))?;
         let entry: JitEntry = unsafe { std::mem::transmute(code_ptr) };
 
         let block = CompiledBlock {
             addr,
+            block_id,
             entry,
             stmts,
             size_bytes: total_bytes,
@@ -256,6 +301,11 @@ impl DynCfg {
     /// Check if a block has been compiled.
     pub fn has_block(&self, addr: u64) -> bool {
         self.blocks.contains_key(&addr)
+    }
+
+    /// Get a compiled block by source address.
+    pub fn get_block(&self, addr: u64) -> Option<&CompiledBlock> {
+        self.blocks.get(&addr)
     }
 
     /// Invalidate a block (e.g., if memory changed).

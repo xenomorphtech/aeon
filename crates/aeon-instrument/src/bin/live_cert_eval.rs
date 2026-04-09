@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Cursor, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileExt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -50,10 +50,27 @@ const LIBC_VSNPRINTF_OFFSET: u64 = 0xac02c;
 const LIBC_SPRINTF_OFFSET: u64 = 0xac13c;
 const LIBC_VSPRINTF_OFFSET: u64 = 0xac24c;
 const LIBC_VASPRINTF_OFFSET: u64 = 0x9b27c;
+const LIBC_ACCESS_OFFSET: u64 = 0x4fb58;
+const LIBC_OPEN_OFFSET: u64 = 0x5ac5c;
+const LIBC_OPENAT_OFFSET: u64 = 0x5af14;
+const LIBC_CLOSE_OFFSET: u64 = 0x53f18;
+const LIBC_READ_OFFSET: u64 = 0x9d230;
+const LIBC_LSEEK_OFFSET: u64 = 0x9d8f0;
+const LIBC_FOPEN_OFFSET: u64 = 0xa93a4;
+const LIBC_FCLOSE_OFFSET: u64 = 0xa9b08;
+const LIBC_FSEEK_OFFSET: u64 = 0xaa324;
+const LIBC_FTELL_OFFSET: u64 = 0xaa3dc;
+const LIBC_FREAD_OFFSET: u64 = 0xacd40;
+const LIBC_FREAD_UNLOCKED_OFFSET: u64 = 0xacdcc;
 const LIBC_SCUDO_HYBRID_MUTEX_LOCK_SLOW_START: u64 = 0x404ec;
 const LIBC_SCUDO_HYBRID_MUTEX_LOCK_SLOW_END: u64 = 0x4057c;
 const LIBC_SCUDO_HYBRID_MUTEX_UNLOCK_START: u64 = 0x4057c;
 const LIBC_SCUDO_HYBRID_MUTEX_UNLOCK_END: u64 = 0x405b8;
+const LIBANDROID_AASSET_MANAGER_OPEN_OFFSET: u64 = 0x180e0;
+const LIBANDROID_AASSET_READ_OFFSET: u64 = 0x18480;
+const LIBANDROID_AASSET_CLOSE_OFFSET: u64 = 0x184b0;
+const LIBANDROID_AASSET_GET_LENGTH_OFFSET: u64 = 0x184f0;
+const LIBANDROID_AASSET_GET_LENGTH64_OFFSET: u64 = 0x18500;
 const VDSO_CLOCK_GETTIME_OFFSET: u64 = 0x2e0;
 const VDSO_GETTIMEOFDAY_OFFSET: u64 = 0x618;
 const VDSO_CLOCK_GETRES_OFFSET: u64 = 0x810;
@@ -61,6 +78,10 @@ const VDSO_RT_SIGRETURN_OFFSET: u64 = 0x888;
 const MAX_STUB_BYTES: u64 = 1 << 20;
 const REMOTE_PAGE_SIZE: u64 = 4096;
 const MAX_TRACE_STRING_BYTES: u64 = 512;
+const SYNTHETIC_FILE_STREAM_BASE: u64 = 0x7fff_0000_0000;
+const SYNTHETIC_FILE_STREAM_STRIDE: u64 = 0x100;
+const SYNTHETIC_ASSET_HANDLE_BASE: u64 = 0x7ffe_0000_0000;
+const SYNTHETIC_ASSET_HANDLE_STRIDE: u64 = 0x100;
 
 fn main() {
     let cli = match Cli::parse() {
@@ -114,13 +135,25 @@ fn main() {
         }
     };
 
-    if cli.adb_serial.is_some() && state_json.is_none() {
-        eprintln!("--adb-serial currently requires --state-json for trap-time registers");
+    if (cli.adb_serial.is_some() || cli.maps_file.is_some()) && state_json.is_none() {
+        eprintln!(
+            "--adb-serial/--maps-file currently require --state-json for trap-time registers"
+        );
+        usage();
+        process::exit(1);
+    }
+    if (cli.maps_file.is_some() || cli.offline_cache) && cli.adb_serial.is_none() {
+        eprintln!("--maps-file/--offline-cache require --adb-serial for cache namespace selection");
+        usage();
+        process::exit(1);
+    }
+    if cli.offline_cache && cli.maps_file.is_none() {
+        eprintln!("--offline-cache requires --maps-file");
         usage();
         process::exit(1);
     }
 
-    let page_cache_dir = if cli.adb_serial.is_some() {
+    let page_cache_dir = if cli.adb_serial.is_some() || cli.maps_file.is_some() {
         Some(
             cli.page_cache_dir
                 .clone()
@@ -130,9 +163,17 @@ fn main() {
         None
     };
 
-    let proc_memory = match cli.adb_serial.as_deref() {
-        Some(serial) => ProcMemory::open_adb(serial, pid, page_cache_dir.clone()),
-        None => ProcMemory::open(pid),
+    let proc_memory = match (cli.adb_serial.as_deref(), cli.maps_file.as_deref()) {
+        (Some(serial), Some(maps_file)) => ProcMemory::open_cached(
+            serial,
+            pid,
+            maps_file,
+            page_cache_dir.clone(),
+            cli.offline_cache,
+        ),
+        (Some(serial), None) => ProcMemory::open_adb(serial, pid, page_cache_dir.clone()),
+        (None, Some(_)) => unreachable!("validated above"),
+        (None, None) => ProcMemory::open(pid),
     };
     let proc_memory = match proc_memory {
         Ok(memory) => memory,
@@ -142,7 +183,7 @@ fn main() {
         }
     };
 
-    let live_regs = if cli.adb_serial.is_some() {
+    let live_regs = if cli.adb_serial.is_some() || cli.maps_file.is_some() {
         None
     } else {
         Some(match read_live_regs(tid) {
@@ -188,6 +229,11 @@ fn main() {
             process::exit(1);
         }
     };
+    let file_roots = if cli.file_roots.is_empty() {
+        default_guest_file_roots()
+    } else {
+        cli.file_roots.clone()
+    };
 
     let setup = LiveReplaySetup {
         pid,
@@ -198,6 +244,9 @@ fn main() {
             .unwrap_or_else(|| std::env::temp_dir().join("aeon_live_cert_eval.json")),
         page_cache_dir,
         sprintf_trace_out: cli.sprintf_trace_out,
+        file_roots,
+        path_maps: cli.path_maps,
+        adb_serial: cli.adb_serial,
         start_pc,
         entry_lr: read_u64_reg(&registers, Reg::X(30))
             .or_else(|| state_json.as_ref().and_then(|state| state.lr)),
@@ -279,6 +328,12 @@ fn main() {
     if let Some(path) = &report.sprintf_trace_path {
         println!("sprintf trace: {}", path.display());
     }
+    let fopen_calls = report
+        .fopen_trace
+        .iter()
+        .filter(|record| record.phase == "entry")
+        .count();
+    println!("fopen calls:   {}", fopen_calls);
     if let Some(path) = &report.page_cache_dir {
         println!("page cache:    {}", path.display());
     }
@@ -288,20 +343,30 @@ fn main() {
 fn usage() {
     eprintln!("usage:");
     eprintln!(
-        "  cargo run -p aeon-instrument --bin live_cert_eval -- [--state-json path] [--adb-serial SERIAL] [--page-cache-dir path] [--pid <pid>] [--challenge <hex>] [--tid <tid>] [--pc <addr>] [--reg <name> <value>] [--max-blocks N] [--max-block-visits N] [--trace-range start end] [--missing-memory stop|symbolic] [--summary-only] [--stop-on-token] [--stop-on-non-concrete] [--verbose-trace] [--report-out path] [--sprintf-trace-out path]"
+        "  cargo run -p aeon-instrument --bin live_cert_eval -- [--state-json path] [--adb-serial SERIAL] [--maps-file path] [--offline-cache] [--page-cache-dir path] [--file-root path] [--path-map <guest-prefix> <host-path>] [--pid <pid>] [--challenge <hex>] [--tid <tid>] [--pc <addr>] [--reg <name> <value>] [--max-blocks N] [--max-block-visits N] [--trace-range start end] [--missing-memory stop|symbolic] [--summary-only] [--stop-on-token] [--stop-on-non-concrete] [--verbose-trace] [--report-out path] [--sprintf-trace-out path]"
     );
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GuestPathMap {
+    guest_prefix: String,
+    host_prefix: PathBuf,
 }
 
 #[derive(Debug, Clone)]
 struct Cli {
     state_json: Option<PathBuf>,
     adb_serial: Option<String>,
+    maps_file: Option<PathBuf>,
+    offline_cache: bool,
     page_cache_dir: Option<PathBuf>,
+    file_roots: Vec<PathBuf>,
+    path_maps: Vec<GuestPathMap>,
     pid: Option<i32>,
     tid: Option<i32>,
     challenge: Option<String>,
     pc_override: Option<u64>,
-    reg_overrides: Vec<(Reg, u64)>,
+    reg_overrides: Vec<(Reg, Value)>,
     max_blocks: u64,
     max_block_visits: u64,
     trace_range: Option<(u64, u64)>,
@@ -323,7 +388,11 @@ impl Cli {
 
         let mut state_json = None;
         let mut adb_serial = None;
+        let mut maps_file = None;
+        let mut offline_cache = false;
         let mut page_cache_dir = None;
+        let mut file_roots = Vec::new();
+        let mut path_maps = Vec::new();
         let mut pid = None;
         let mut tid = None;
         let mut challenge = None;
@@ -358,12 +427,46 @@ impl Cli {
                     );
                     idx += 2;
                 }
+                "--maps-file" => {
+                    maps_file = Some(PathBuf::from(
+                        args.get(idx + 1)
+                            .ok_or_else(|| "--maps-file requires a path".to_string())?,
+                    ));
+                    idx += 2;
+                }
+                "--offline-cache" => {
+                    offline_cache = true;
+                    idx += 1;
+                }
                 "--page-cache-dir" => {
                     page_cache_dir =
                         Some(PathBuf::from(args.get(idx + 1).ok_or_else(|| {
                             "--page-cache-dir requires a path".to_string()
                         })?));
                     idx += 2;
+                }
+                "--file-root" => {
+                    file_roots.push(PathBuf::from(
+                        args.get(idx + 1)
+                            .ok_or_else(|| "--file-root requires a path".to_string())?,
+                    ));
+                    idx += 2;
+                }
+                "--path-map" => {
+                    let guest_prefix = args
+                        .get(idx + 1)
+                        .ok_or_else(|| {
+                            "--path-map requires a guest prefix and host path".to_string()
+                        })?
+                        .clone();
+                    let host_prefix = PathBuf::from(args.get(idx + 2).ok_or_else(|| {
+                        "--path-map requires a guest prefix and host path".to_string()
+                    })?);
+                    path_maps.push(GuestPathMap {
+                        guest_prefix,
+                        host_prefix,
+                    });
+                    idx += 3;
                 }
                 "--pid" => {
                     let value = args
@@ -409,7 +512,13 @@ impl Cli {
                     let value = args
                         .get(idx + 2)
                         .ok_or_else(|| "--reg requires a register name and value".to_string())?;
-                    reg_overrides.push((parse_reg(name)?, parse_u64(value)?));
+                    let reg = parse_reg(name)?;
+                    let val = match &reg {
+                        Reg::Q(_) | Reg::V(_) => Value::U128(parse_hex_u128(value)?),
+                        Reg::D(_) => Value::U64(parse_u64(value)?),
+                        _ => Value::U64(parse_u64(value)?),
+                    };
+                    reg_overrides.push((reg, val));
                     idx += 3;
                 }
                 "--max-blocks" => {
@@ -487,7 +596,11 @@ impl Cli {
         Ok(Self {
             state_json,
             adb_serial,
+            maps_file,
+            offline_cache,
             page_cache_dir,
+            file_roots,
+            path_maps,
             pid,
             tid,
             challenge,
@@ -514,7 +627,7 @@ struct InputState {
     challenge: Option<String>,
     pc: Option<u64>,
     lr: Option<u64>,
-    reg_overrides: Vec<(Reg, u64)>,
+    reg_overrides: Vec<(Reg, Value)>,
     sysreg_overrides: BTreeMap<String, u64>,
 }
 
@@ -545,6 +658,7 @@ struct RemoteProcMemory {
     pid: i32,
     page_cache: RefCell<BTreeMap<u64, Vec<u8>>>,
     disk_cache_dir: Option<PathBuf>,
+    allow_remote_fetch: bool,
 }
 
 impl ProcMemory {
@@ -573,6 +687,31 @@ impl ProcMemory {
                 pid,
                 page_cache: RefCell::new(BTreeMap::new()),
                 disk_cache_dir: page_cache_dir,
+                allow_remote_fetch: true,
+            }),
+            regions,
+        })
+    }
+
+    fn open_cached(
+        serial: impl Into<String>,
+        pid: i32,
+        maps_path: &Path,
+        page_cache_dir: Option<PathBuf>,
+        offline_cache: bool,
+    ) -> Result<Self, String> {
+        let serial = serial.into();
+        let maps = fs::read_to_string(maps_path)
+            .map_err(|err| format!("read {}: {err}", maps_path.display()))?;
+        let regions =
+            parse_proc_maps_text(&maps, &format!("cache:{}:{}", serial, maps_path.display()))?;
+        Ok(Self {
+            source: ProcMemorySource::Remote(RemoteProcMemory {
+                serial,
+                pid,
+                page_cache: RefCell::new(BTreeMap::new()),
+                disk_cache_dir: page_cache_dir,
+                allow_remote_fetch: !offline_cache,
             }),
             regions,
         })
@@ -696,6 +835,12 @@ impl ProcMemory {
                 .borrow_mut()
                 .insert(page_addr, cached.clone());
             return Some(cached);
+        }
+        if !remote.allow_remote_fetch {
+            if remote_debug_enabled() {
+                eprintln!("[remote] offline cache miss for page=0x{page_addr:x}");
+            }
+            return None;
         }
         if remote_debug_enabled() {
             eprintln!(
@@ -1140,19 +1285,47 @@ fn load_state_json(path: &Path) -> Result<InputState, String> {
         .transpose()?;
     let lr = object.get("lr").map(parse_json_u64).transpose()?;
 
-    let mut reg_overrides = Vec::new();
+    let mut reg_overrides: Vec<(Reg, Value)> = Vec::new();
     if let Some(registers) = object.get("registers") {
         let registers = registers
             .as_object()
             .ok_or_else(|| format!("{}: 'registers' must be a json object", path.display()))?;
         for (name, value) in registers {
-            let reg = parse_json_reg(name)?;
-            reg_overrides.push((reg, parse_json_u64(value)?));
+            let lower = name.trim().to_ascii_lowercase();
+            if lower == "simd" {
+                // handled below
+                continue;
+            }
+            if lower == "nzcv" {
+                if let Ok(v) = parse_json_u64(value) {
+                    reg_overrides.push((Reg::Flags, Value::U64(v)));
+                }
+                continue;
+            }
+            let reg = match parse_json_reg(name) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            reg_overrides.push((reg, Value::U64(parse_json_u64(value)?)));
+        }
+        // Parse SIMD sub-object: {"q0": "hex128", ...}
+        if let Some(simd) = registers.get("simd").and_then(|v| v.as_object()) {
+            for (name, value) in simd {
+                let reg = match parse_json_reg(name) {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+                if let Some(hex) = value.as_str() {
+                    if let Ok(v) = parse_simd_hex_u128_le(hex) {
+                        reg_overrides.push((reg, Value::U128(v)));
+                    }
+                }
+            }
         }
     }
     if !reg_overrides.iter().any(|(reg, _)| *reg == Reg::X(30)) {
         if let Some(lr) = lr {
-            reg_overrides.push((Reg::X(30), lr));
+            reg_overrides.push((Reg::X(30), Value::U64(lr)));
         }
     }
 
@@ -1358,6 +1531,15 @@ fn default_remote_page_cache_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../capture/manual/page_cache")
 }
 
+fn default_guest_file_roots() -> Vec<PathBuf> {
+    let bins = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bins");
+    if bins.is_dir() {
+        vec![bins]
+    } else {
+        Vec::new()
+    }
+}
+
 #[derive(Debug)]
 struct LiveReplaySetup {
     pid: i32,
@@ -1366,6 +1548,9 @@ struct LiveReplaySetup {
     report_out: PathBuf,
     page_cache_dir: Option<PathBuf>,
     sprintf_trace_out: Option<PathBuf>,
+    file_roots: Vec<PathBuf>,
+    path_maps: Vec<GuestPathMap>,
+    adb_serial: Option<String>,
     start_pc: u64,
     entry_lr: Option<u64>,
     trace_range: Option<(u64, u64)>,
@@ -1429,6 +1614,7 @@ struct ReplayReport {
     report_path: PathBuf,
     page_cache_dir: Option<PathBuf>,
     sprintf_trace_path: Option<PathBuf>,
+    fopen_trace: Vec<FopenTraceRecord>,
     return_art_string: Option<ArtStringReport>,
     start_pc: String,
     trace_range: Option<[String; 2]>,
@@ -1487,6 +1673,65 @@ struct SprintfTraceRecord {
     format_ptr: Option<String>,
     format_preview: Option<String>,
     output_preview: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct FopenTraceState {
+    records: Vec<FopenTraceRecord>,
+    pending: Vec<PendingFopenTrace>,
+    next_id: u64,
+}
+
+#[derive(Debug, Clone)]
+struct PendingFopenTrace {
+    id: u64,
+    function: &'static str,
+    entry_pc: u64,
+    return_pc: u64,
+    path_ptr: Option<u64>,
+    mode_ptr: Option<u64>,
+    path_preview: Option<String>,
+    mode_preview: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FopenTraceRecord {
+    phase: &'static str,
+    id: u64,
+    function: &'static str,
+    entry_pc: String,
+    return_pc: String,
+    current_pc: Option<String>,
+    path_ptr: Option<String>,
+    mode_ptr: Option<String>,
+    path_preview: Option<String>,
+    mode_preview: Option<String>,
+    result_ptr: Option<String>,
+}
+
+#[derive(Debug)]
+struct HostFileBridge {
+    roots: Vec<PathBuf>,
+    path_maps: Vec<GuestPathMap>,
+    adb_serial: Option<String>,
+    next_fd: i32,
+    next_stream_slot: u64,
+    next_asset_slot: u64,
+    files: BTreeMap<i32, HostFileEntry>,
+    streams: BTreeMap<u64, i32>,
+    assets: BTreeMap<u64, i32>,
+}
+
+#[derive(Debug)]
+struct HostFileEntry {
+    host_path: PathBuf,
+    source: HostFileSource,
+}
+
+#[derive(Debug)]
+enum HostFileSource {
+    Host(File),
+    Buffer(Cursor<Vec<u8>>),
 }
 
 impl SprintfTraceSink {
@@ -1599,6 +1844,426 @@ impl SprintfTraceSink {
         self.file
             .flush()
             .map_err(|err| format!("flush sprintf trace {}: {err}", self.path.display()))
+    }
+}
+
+impl FopenTraceState {
+    fn log_entry(&mut self, mut pending: PendingFopenTrace) {
+        if pending.id == 0 {
+            pending.id = self.next_id.max(1);
+            self.next_id = pending.id + 1;
+        }
+        self.records.push(FopenTraceRecord {
+            phase: "entry",
+            id: pending.id,
+            function: pending.function,
+            entry_pc: format_hex(pending.entry_pc),
+            return_pc: format_hex(pending.return_pc),
+            current_pc: Some(format_hex(pending.entry_pc)),
+            path_ptr: pending.path_ptr.map(format_hex),
+            mode_ptr: pending.mode_ptr.map(format_hex),
+            path_preview: pending.path_preview.clone(),
+            mode_preview: pending.mode_preview.clone(),
+            result_ptr: None,
+        });
+        self.pending.push(pending);
+    }
+
+    fn finish_ready(&mut self, pc: u64, registers: &BTreeMap<Reg, Value>) {
+        while self
+            .pending
+            .last()
+            .map(|pending| pending.return_pc == pc)
+            .unwrap_or(false)
+        {
+            let pending = self.pending.pop().expect("pending fopen trace");
+            self.records.push(FopenTraceRecord {
+                phase: "return",
+                id: pending.id,
+                function: pending.function,
+                entry_pc: format_hex(pending.entry_pc),
+                return_pc: format_hex(pending.return_pc),
+                current_pc: Some(format_hex(pc)),
+                path_ptr: pending.path_ptr.map(format_hex),
+                mode_ptr: pending.mode_ptr.map(format_hex),
+                path_preview: pending.path_preview,
+                mode_preview: pending.mode_preview,
+                result_ptr: read_u64_reg(registers, Reg::X(0)).map(format_hex),
+            });
+        }
+    }
+
+    fn flush_pending(&mut self) {
+        while let Some(pending) = self.pending.pop() {
+            self.records.push(FopenTraceRecord {
+                phase: "unterminated",
+                id: pending.id,
+                function: pending.function,
+                entry_pc: format_hex(pending.entry_pc),
+                return_pc: format_hex(pending.return_pc),
+                current_pc: None,
+                path_ptr: pending.path_ptr.map(format_hex),
+                mode_ptr: pending.mode_ptr.map(format_hex),
+                path_preview: pending.path_preview,
+                mode_preview: pending.mode_preview,
+                result_ptr: None,
+            });
+        }
+    }
+}
+
+impl Default for HostFileBridge {
+    fn default() -> Self {
+        Self {
+            roots: Vec::new(),
+            path_maps: Vec::new(),
+            adb_serial: None,
+            next_fd: 3,
+            next_stream_slot: 1,
+            next_asset_slot: 1,
+            files: BTreeMap::new(),
+            streams: BTreeMap::new(),
+            assets: BTreeMap::new(),
+        }
+    }
+}
+
+impl HostFileBridge {
+    fn new(roots: Vec<PathBuf>, path_maps: Vec<GuestPathMap>, adb_serial: Option<String>) -> Self {
+        Self {
+            roots,
+            path_maps,
+            adb_serial,
+            ..Self::default()
+        }
+    }
+
+    fn fopen(
+        &mut self,
+        guest_path: &str,
+        mode: &str,
+        memory_overlay: &mut BTreeMap<MemoryCellId, Value>,
+    ) -> u64 {
+        if !fopen_mode_supported(mode) {
+            return 0;
+        }
+        let Some(fd) = self.open_fd(guest_path, None) else {
+            return 0;
+        };
+        self.alloc_stream(fd, memory_overlay)
+    }
+
+    fn fread(
+        &mut self,
+        stream: u64,
+        dest: u64,
+        elem_size: u64,
+        count: u64,
+        memory_overlay: &mut BTreeMap<MemoryCellId, Value>,
+    ) -> Result<u64, String> {
+        if elem_size == 0 || count == 0 {
+            return Ok(0);
+        }
+        let total = elem_size
+            .checked_mul(count)
+            .ok_or_else(|| "fread size overflow".to_string())?;
+        if total > MAX_STUB_BYTES {
+            return Err(format!("fread refused oversized length {}", total));
+        }
+        let Some(fd) = self.streams.get(&stream).copied() else {
+            return Ok(0);
+        };
+        let read_len = self.read_fd_inner(fd, total as usize, dest, memory_overlay)?;
+        Ok((read_len as u64) / elem_size)
+    }
+
+    fn fclose(&mut self, stream: u64) -> u64 {
+        let Some(fd) = self.streams.remove(&stream) else {
+            return u64::MAX;
+        };
+        self.files.remove(&fd);
+        0
+    }
+
+    fn fseek(&mut self, stream: u64, offset: i64, whence: u32) -> u64 {
+        let Some(fd) = self.streams.get(&stream).copied() else {
+            return u64::MAX;
+        };
+        self.seek_fd_result(fd, offset, whence)
+            .map_or(u64::MAX, |_| 0)
+    }
+
+    fn ftell(&mut self, stream: u64) -> u64 {
+        let Some(fd) = self.streams.get(&stream).copied() else {
+            return u64::MAX;
+        };
+        self.tell_fd(fd).unwrap_or(u64::MAX)
+    }
+
+    fn access(&self, guest_path: &str, mode: u32) -> u64 {
+        let Some(host_path) = self.resolve_host_path(guest_path, None) else {
+            return u64::MAX;
+        };
+        if access_mode_supported(mode) && file_readable(&host_path) {
+            0
+        } else {
+            u64::MAX
+        }
+    }
+
+    fn open(&mut self, guest_path: &str, flags: u32, dirfd: Option<i32>) -> u64 {
+        if !open_flags_supported(flags) {
+            return u64::MAX;
+        }
+        self.open_fd(guest_path, dirfd)
+            .map(|fd| fd as u64)
+            .unwrap_or(u64::MAX)
+    }
+
+    fn asset_open(
+        &mut self,
+        asset_name: &str,
+        memory_overlay: &mut BTreeMap<MemoryCellId, Value>,
+    ) -> u64 {
+        let Some(fd) = self.open_named_asset_fd(asset_name) else {
+            return 0;
+        };
+        let handle = SYNTHETIC_ASSET_HANDLE_BASE.wrapping_add(
+            self.next_asset_slot
+                .saturating_mul(SYNTHETIC_ASSET_HANDLE_STRIDE),
+        );
+        self.next_asset_slot += 1;
+        self.assets.insert(handle, fd);
+        stub_write_bytes(memory_overlay, handle, &[0u8; 0x20]);
+        stub_write_bytes(memory_overlay, handle, &(fd as u64).to_le_bytes());
+        handle
+    }
+
+    fn asset_length(&mut self, handle: u64) -> u64 {
+        let Some(fd) = self.assets.get(&handle).copied() else {
+            return 0;
+        };
+        self.file_len(fd).unwrap_or(0)
+    }
+
+    fn asset_read(
+        &mut self,
+        handle: u64,
+        dest: u64,
+        count: u64,
+        memory_overlay: &mut BTreeMap<MemoryCellId, Value>,
+    ) -> Result<u64, String> {
+        if count > MAX_STUB_BYTES {
+            return Err(format!("AAsset_read refused oversized length {}", count));
+        }
+        let Some(fd) = self.assets.get(&handle).copied() else {
+            return Ok(0);
+        };
+        let read_len = self.read_fd_inner(fd, count as usize, dest, memory_overlay)?;
+        Ok(read_len as u64)
+    }
+
+    fn asset_close(&mut self, handle: u64) -> u64 {
+        let Some(fd) = self.assets.remove(&handle) else {
+            return 0;
+        };
+        self.files.remove(&fd);
+        0
+    }
+
+    fn read(
+        &mut self,
+        fd: i32,
+        dest: u64,
+        count: u64,
+        memory_overlay: &mut BTreeMap<MemoryCellId, Value>,
+    ) -> Result<u64, String> {
+        if count > MAX_STUB_BYTES {
+            return Err(format!("read refused oversized length {}", count));
+        }
+        let Some(_) = self.files.get(&fd) else {
+            return Ok(u64::MAX);
+        };
+        let read_len = self.read_fd_inner(fd, count as usize, dest, memory_overlay)?;
+        Ok(read_len as u64)
+    }
+
+    fn close(&mut self, fd: i32) -> u64 {
+        if self.files.remove(&fd).is_some() {
+            self.streams.retain(|_, mapped_fd| *mapped_fd != fd);
+            0
+        } else {
+            u64::MAX
+        }
+    }
+
+    fn lseek(&mut self, fd: i32, offset: i64, whence: u32) -> u64 {
+        self.seek_fd_result(fd, offset, whence).unwrap_or(u64::MAX)
+    }
+
+    fn alloc_virtual_fd(&mut self, label: impl Into<PathBuf>, data: Vec<u8>) -> i32 {
+        self.alloc_fd_with_source(label.into(), HostFileSource::Buffer(Cursor::new(data)))
+    }
+
+    fn alloc_fd_with_source(&mut self, host_path: PathBuf, source: HostFileSource) -> i32 {
+        let fd = self.next_fd;
+        self.next_fd += 1;
+        self.files.insert(fd, HostFileEntry { host_path, source });
+        fd
+    }
+
+    fn alloc_stream(&mut self, fd: i32, memory_overlay: &mut BTreeMap<MemoryCellId, Value>) -> u64 {
+        let stream = SYNTHETIC_FILE_STREAM_BASE.wrapping_add(
+            self.next_stream_slot
+                .saturating_mul(SYNTHETIC_FILE_STREAM_STRIDE),
+        );
+        self.next_stream_slot += 1;
+        self.streams.insert(stream, fd);
+        stub_write_bytes(memory_overlay, stream, &[0u8; 0x20]);
+        stub_write_bytes(memory_overlay, stream, &(fd as u64).to_le_bytes());
+        stream
+    }
+
+    fn read_fd_inner(
+        &mut self,
+        fd: i32,
+        count: usize,
+        dest: u64,
+        memory_overlay: &mut BTreeMap<MemoryCellId, Value>,
+    ) -> Result<usize, String> {
+        let Some(entry) = self.files.get_mut(&fd) else {
+            return Ok(usize::MAX);
+        };
+        let mut buf = vec![0u8; count];
+        let read_len = match &mut entry.source {
+            HostFileSource::Host(file) => file
+                .read(&mut buf)
+                .map_err(|err| format!("read {}: {err}", entry.host_path.display()))?,
+            HostFileSource::Buffer(cursor) => cursor
+                .read(&mut buf)
+                .map_err(|err| format!("read {}: {err}", entry.host_path.display()))?,
+        };
+        stub_write_bytes(memory_overlay, dest, &buf[..read_len]);
+        Ok(read_len)
+    }
+
+    fn seek_fd_result(&mut self, fd: i32, offset: i64, whence: u32) -> Option<u64> {
+        let entry = self.files.get_mut(&fd)?;
+        let seek_from = match whence as i32 {
+            libc::SEEK_SET => SeekFrom::Start(offset.max(0) as u64),
+            libc::SEEK_CUR => SeekFrom::Current(offset),
+            libc::SEEK_END => SeekFrom::End(offset),
+            _ => return None,
+        };
+        match &mut entry.source {
+            HostFileSource::Host(file) => file.seek(seek_from).ok(),
+            HostFileSource::Buffer(cursor) => cursor.seek(seek_from).ok(),
+        }
+    }
+
+    fn tell_fd(&mut self, fd: i32) -> Option<u64> {
+        let entry = self.files.get_mut(&fd)?;
+        match &mut entry.source {
+            HostFileSource::Host(file) => file.stream_position().ok(),
+            HostFileSource::Buffer(cursor) => cursor.stream_position().ok(),
+        }
+    }
+
+    fn file_len(&mut self, fd: i32) -> Option<u64> {
+        let entry = self.files.get_mut(&fd)?;
+        match &mut entry.source {
+            HostFileSource::Host(file) => file.metadata().ok().map(|meta| meta.len()),
+            HostFileSource::Buffer(cursor) => Some(cursor.get_ref().len() as u64),
+        }
+    }
+
+    fn resolve_host_path(&self, guest_path: &str, dirfd: Option<i32>) -> Option<PathBuf> {
+        if guest_path.is_empty() {
+            return None;
+        }
+
+        let mut candidates = Vec::new();
+        let guest = Path::new(guest_path);
+        if guest.is_absolute() {
+            candidates.push(guest.to_path_buf());
+        } else if let Some(dirfd) = dirfd {
+            if dirfd != libc::AT_FDCWD {
+                if let Some(entry) = self.files.get(&dirfd) {
+                    if let Some(parent) = entry.host_path.parent() {
+                        candidates.push(parent.join(guest));
+                    }
+                }
+            }
+            candidates.push(guest.to_path_buf());
+        } else {
+            candidates.push(guest.to_path_buf());
+        }
+
+        for map in &self.path_maps {
+            if let Some(suffix) = strip_guest_prefix(guest_path, &map.guest_prefix) {
+                candidates.push(join_guest_suffix(&map.host_prefix, suffix));
+            }
+        }
+
+        for root in &self.roots {
+            candidates.push(join_guest_suffix(root, guest_path));
+        }
+
+        candidates
+            .into_iter()
+            .find(|candidate| file_readable(candidate))
+    }
+
+    fn resolve_named_asset_path(&self, asset_name: &str) -> Option<PathBuf> {
+        if let Some(path) = self.resolve_host_path(asset_name, None) {
+            return Some(path);
+        }
+        let base = Path::new(asset_name).file_name()?.to_str()?;
+        for root in &self.roots {
+            let exact = root.join(base);
+            if file_readable(&exact) {
+                return Some(exact);
+            }
+            let suffix = format!("_{base}");
+            let Ok(entries) = fs::read_dir(root) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                if name == base || name.ends_with(&suffix) {
+                    return Some(path);
+                }
+            }
+        }
+        None
+    }
+
+    fn open_named_asset_fd(&mut self, asset_name: &str) -> Option<i32> {
+        let host_path = self.resolve_named_asset_path(asset_name)?;
+        let file = File::open(&host_path).ok()?;
+        Some(self.alloc_fd_with_source(host_path, HostFileSource::Host(file)))
+    }
+
+    fn open_fd(&mut self, guest_path: &str, dirfd: Option<i32>) -> Option<i32> {
+        if let Some(host_path) = self.resolve_host_path(guest_path, dirfd) {
+            let file = File::open(&host_path).ok()?;
+            return Some(self.alloc_fd_with_source(host_path, HostFileSource::Host(file)));
+        }
+        if Path::new(guest_path).is_absolute() {
+            if let Some(serial) = &self.adb_serial {
+                let bytes =
+                    adb_shell_binary(serial, &format!("cat {}", shell_single_quote(guest_path)))
+                        .ok()?;
+                return Some(self.alloc_virtual_fd(PathBuf::from(guest_path), bytes));
+            }
+        }
+        None
     }
 }
 
@@ -1747,6 +2412,9 @@ fn run_replay(
         report_out,
         page_cache_dir,
         sprintf_trace_out,
+        file_roots,
+        path_maps,
+        adb_serial,
         start_pc,
         entry_lr,
         trace_range,
@@ -1763,6 +2431,8 @@ fn run_replay(
     let mut sprintf_trace = sprintf_trace_out
         .map(SprintfTraceSink::create)
         .transpose()?;
+    let mut fopen_trace = FopenTraceState::default();
+    let mut file_bridge = HostFileBridge::new(file_roots, path_maps, adb_serial);
     let mut symbol_resolver = verbose_trace.then(SymbolResolver::default);
     let mut registers = initial_registers;
     let mut memory_overlay = BTreeMap::<MemoryCellId, Value>::new();
@@ -1788,6 +2458,7 @@ fn run_replay(
         if let Some(trace) = sprintf_trace.as_mut() {
             trace.finish_ready(pc, &memory_overlay, &memory)?;
         }
+        fopen_trace.finish_ready(pc, &registers);
 
         if stop_on_non_concrete {
             if let Some(reason) = first_symbolic_input_source_filtered(
@@ -1828,13 +2499,15 @@ fn run_replay(
         }
         *visit_count += 1;
 
-        let stub = match maybe_execute_known_stub(
+        let stub = match maybe_execute_known_stub_with_io(
             pc,
             &mut registers,
             &mut memory_overlay,
             &memory,
             &mut virtual_clock,
             &mut sprintf_trace,
+            &mut fopen_trace,
+            &mut file_bridge,
         ) {
             Ok(stub) => stub,
             Err(err) if stop_on_non_concrete && is_non_concrete_stub_error(&err) => {
@@ -2101,6 +2774,7 @@ fn run_replay(
     if let Some(trace) = sprintf_trace.as_mut() {
         trace.flush_pending()?;
     }
+    fopen_trace.flush_pending();
     let final_registers = register_reports(&registers);
     let return_art_string = read_u64_reg(&registers, Reg::X(0)).and_then(|ptr| {
         decode_art_string_report(&memory_overlay, &memory, ptr)
@@ -2121,6 +2795,7 @@ fn run_replay(
         report_path: report_out,
         page_cache_dir,
         sprintf_trace_path: sprintf_trace.as_ref().map(|trace| trace.path.clone()),
+        fopen_trace: fopen_trace.records,
         return_art_string,
         start_pc: format_hex(start_pc),
         trace_range: trace_range.map(|(start, end)| [format_hex(start), format_hex(end)]),
@@ -2150,6 +2825,7 @@ fn run_replay(
     })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn maybe_execute_known_stub(
     pc: u64,
     registers: &mut BTreeMap<Reg, Value>,
@@ -2157,6 +2833,30 @@ fn maybe_execute_known_stub(
     memory: &ProcMemory,
     virtual_clock: &mut VirtualClock,
     sprintf_trace: &mut Option<SprintfTraceSink>,
+) -> Result<Option<StubOutcome>, String> {
+    let mut fopen_trace = FopenTraceState::default();
+    let mut file_bridge = HostFileBridge::default();
+    maybe_execute_known_stub_with_io(
+        pc,
+        registers,
+        memory_overlay,
+        memory,
+        virtual_clock,
+        sprintf_trace,
+        &mut fopen_trace,
+        &mut file_bridge,
+    )
+}
+
+fn maybe_execute_known_stub_with_io(
+    pc: u64,
+    registers: &mut BTreeMap<Reg, Value>,
+    memory_overlay: &mut BTreeMap<MemoryCellId, Value>,
+    memory: &ProcMemory,
+    virtual_clock: &mut VirtualClock,
+    sprintf_trace: &mut Option<SprintfTraceSink>,
+    fopen_trace: &mut FopenTraceState,
+    file_bridge: &mut HostFileBridge,
 ) -> Result<Option<StubOutcome>, String> {
     let Some((resolved_pc, region)) = memory.find_region(pc) else {
         return Ok(None);
@@ -2173,6 +2873,137 @@ fn maybe_execute_known_stub(
             {
                 trace.log_entry(call)?;
             }
+        }
+        if let Some(call) = capture_fopen_trace(file_offset, pc, registers, memory_overlay, memory)?
+        {
+            fopen_trace.log_entry(call);
+        }
+
+        if file_offset == LIBC_ACCESS_OFFSET {
+            let path_ptr = require_u64_reg(registers, Reg::X(0), "access", pc, "x0")?;
+            let mode = require_u64_reg(registers, Reg::X(1), "access", pc, "x1")? as u32;
+            let next_pc = require_u64_reg(registers, Reg::X(30), "access", pc, "x30")?;
+            let path = read_c_string_best_effort(
+                memory_overlay,
+                memory,
+                path_ptr,
+                MAX_TRACE_STRING_BYTES,
+            )?;
+            write_u64_reg(registers, 0, file_bridge.access(&path, mode));
+            return Ok(Some(StubOutcome { next_pc }));
+        }
+
+        if file_offset == LIBC_OPEN_OFFSET {
+            let path_ptr = require_u64_reg(registers, Reg::X(0), "open", pc, "x0")?;
+            let flags = require_u64_reg(registers, Reg::X(1), "open", pc, "x1")? as u32;
+            let next_pc = require_u64_reg(registers, Reg::X(30), "open", pc, "x30")?;
+            let path = read_c_string_best_effort(
+                memory_overlay,
+                memory,
+                path_ptr,
+                MAX_TRACE_STRING_BYTES,
+            )?;
+            write_u64_reg(registers, 0, file_bridge.open(&path, flags, None));
+            return Ok(Some(StubOutcome { next_pc }));
+        }
+
+        if file_offset == LIBC_OPENAT_OFFSET {
+            let dirfd = require_u64_reg(registers, Reg::X(0), "openat", pc, "x0")? as i32;
+            let path_ptr = require_u64_reg(registers, Reg::X(1), "openat", pc, "x1")?;
+            let flags = require_u64_reg(registers, Reg::X(2), "openat", pc, "x2")? as u32;
+            let next_pc = require_u64_reg(registers, Reg::X(30), "openat", pc, "x30")?;
+            let path = read_c_string_best_effort(
+                memory_overlay,
+                memory,
+                path_ptr,
+                MAX_TRACE_STRING_BYTES,
+            )?;
+            write_u64_reg(registers, 0, file_bridge.open(&path, flags, Some(dirfd)));
+            return Ok(Some(StubOutcome { next_pc }));
+        }
+
+        if file_offset == LIBC_READ_OFFSET {
+            let fd = require_u64_reg(registers, Reg::X(0), "read", pc, "x0")? as i32;
+            let dest = require_u64_reg(registers, Reg::X(1), "read", pc, "x1")?;
+            let count = require_u64_reg(registers, Reg::X(2), "read", pc, "x2")?;
+            let next_pc = require_u64_reg(registers, Reg::X(30), "read", pc, "x30")?;
+            let result = file_bridge.read(fd, dest, count, memory_overlay)?;
+            write_u64_reg(registers, 0, result);
+            return Ok(Some(StubOutcome { next_pc }));
+        }
+
+        if file_offset == LIBC_CLOSE_OFFSET {
+            let fd = require_u64_reg(registers, Reg::X(0), "close", pc, "x0")? as i32;
+            let next_pc = require_u64_reg(registers, Reg::X(30), "close", pc, "x30")?;
+            write_u64_reg(registers, 0, file_bridge.close(fd));
+            return Ok(Some(StubOutcome { next_pc }));
+        }
+
+        if file_offset == LIBC_LSEEK_OFFSET {
+            let fd = require_u64_reg(registers, Reg::X(0), "lseek", pc, "x0")? as i32;
+            let offset = signed_u64(require_u64_reg(registers, Reg::X(1), "lseek", pc, "x1")?);
+            let whence = require_u64_reg(registers, Reg::X(2), "lseek", pc, "x2")? as u32;
+            let next_pc = require_u64_reg(registers, Reg::X(30), "lseek", pc, "x30")?;
+            write_u64_reg(registers, 0, file_bridge.lseek(fd, offset, whence));
+            return Ok(Some(StubOutcome { next_pc }));
+        }
+
+        if file_offset == LIBC_FOPEN_OFFSET {
+            let path_ptr = require_u64_reg(registers, Reg::X(0), "fopen", pc, "x0")?;
+            let mode_ptr = require_u64_reg(registers, Reg::X(1), "fopen", pc, "x1")?;
+            let next_pc = require_u64_reg(registers, Reg::X(30), "fopen", pc, "x30")?;
+            let path = read_c_string_best_effort(
+                memory_overlay,
+                memory,
+                path_ptr,
+                MAX_TRACE_STRING_BYTES,
+            )?;
+            let mode = read_c_string_best_effort(
+                memory_overlay,
+                memory,
+                mode_ptr,
+                MAX_TRACE_STRING_BYTES,
+            )?;
+            write_u64_reg(
+                registers,
+                0,
+                file_bridge.fopen(&path, &mode, memory_overlay),
+            );
+            return Ok(Some(StubOutcome { next_pc }));
+        }
+
+        if matches!(file_offset, LIBC_FREAD_OFFSET | LIBC_FREAD_UNLOCKED_OFFSET) {
+            let dest = require_u64_reg(registers, Reg::X(0), "fread", pc, "x0")?;
+            let elem_size = require_u64_reg(registers, Reg::X(1), "fread", pc, "x1")?;
+            let count = require_u64_reg(registers, Reg::X(2), "fread", pc, "x2")?;
+            let stream = require_u64_reg(registers, Reg::X(3), "fread", pc, "x3")?;
+            let next_pc = require_u64_reg(registers, Reg::X(30), "fread", pc, "x30")?;
+            let result = file_bridge.fread(stream, dest, elem_size, count, memory_overlay)?;
+            write_u64_reg(registers, 0, result);
+            return Ok(Some(StubOutcome { next_pc }));
+        }
+
+        if file_offset == LIBC_FCLOSE_OFFSET {
+            let stream = require_u64_reg(registers, Reg::X(0), "fclose", pc, "x0")?;
+            let next_pc = require_u64_reg(registers, Reg::X(30), "fclose", pc, "x30")?;
+            write_u64_reg(registers, 0, file_bridge.fclose(stream));
+            return Ok(Some(StubOutcome { next_pc }));
+        }
+
+        if file_offset == LIBC_FSEEK_OFFSET {
+            let stream = require_u64_reg(registers, Reg::X(0), "fseek", pc, "x0")?;
+            let offset = signed_u64(require_u64_reg(registers, Reg::X(1), "fseek", pc, "x1")?);
+            let whence = require_u64_reg(registers, Reg::X(2), "fseek", pc, "x2")? as u32;
+            let next_pc = require_u64_reg(registers, Reg::X(30), "fseek", pc, "x30")?;
+            write_u64_reg(registers, 0, file_bridge.fseek(stream, offset, whence));
+            return Ok(Some(StubOutcome { next_pc }));
+        }
+
+        if file_offset == LIBC_FTELL_OFFSET {
+            let stream = require_u64_reg(registers, Reg::X(0), "ftell", pc, "x0")?;
+            let next_pc = require_u64_reg(registers, Reg::X(30), "ftell", pc, "x30")?;
+            write_u64_reg(registers, 0, file_bridge.ftell(stream));
+            return Ok(Some(StubOutcome { next_pc }));
         }
 
         if (LIBC_SCUDO_HYBRID_MUTEX_LOCK_SLOW_START..LIBC_SCUDO_HYBRID_MUTEX_LOCK_SLOW_END)
@@ -2342,6 +3173,49 @@ fn maybe_execute_known_stub(
         }
     }
 
+    if region.path.ends_with("/libandroid.so") {
+        if file_offset == LIBANDROID_AASSET_MANAGER_OPEN_OFFSET {
+            let name_ptr = require_u64_reg(registers, Reg::X(1), "AAssetManager_open", pc, "x1")?;
+            let next_pc = require_u64_reg(registers, Reg::X(30), "AAssetManager_open", pc, "x30")?;
+            let asset_name = read_c_string_best_effort(
+                memory_overlay,
+                memory,
+                name_ptr,
+                MAX_TRACE_STRING_BYTES,
+            )?;
+            let handle = file_bridge.asset_open(&asset_name, memory_overlay);
+            write_u64_reg(registers, 0, handle);
+            return Ok(Some(StubOutcome { next_pc }));
+        }
+
+        if file_offset == LIBANDROID_AASSET_READ_OFFSET {
+            let handle = require_u64_reg(registers, Reg::X(0), "AAsset_read", pc, "x0")?;
+            let dest = require_u64_reg(registers, Reg::X(1), "AAsset_read", pc, "x1")?;
+            let count = require_u64_reg(registers, Reg::X(2), "AAsset_read", pc, "x2")?;
+            let next_pc = require_u64_reg(registers, Reg::X(30), "AAsset_read", pc, "x30")?;
+            let result = file_bridge.asset_read(handle, dest, count, memory_overlay)?;
+            write_u64_reg(registers, 0, result);
+            return Ok(Some(StubOutcome { next_pc }));
+        }
+
+        if file_offset == LIBANDROID_AASSET_CLOSE_OFFSET {
+            let handle = require_u64_reg(registers, Reg::X(0), "AAsset_close", pc, "x0")?;
+            let next_pc = require_u64_reg(registers, Reg::X(30), "AAsset_close", pc, "x30")?;
+            write_u64_reg(registers, 0, file_bridge.asset_close(handle));
+            return Ok(Some(StubOutcome { next_pc }));
+        }
+
+        if matches!(
+            file_offset,
+            LIBANDROID_AASSET_GET_LENGTH_OFFSET | LIBANDROID_AASSET_GET_LENGTH64_OFFSET
+        ) {
+            let handle = require_u64_reg(registers, Reg::X(0), "AAsset_getLength", pc, "x0")?;
+            let next_pc = require_u64_reg(registers, Reg::X(30), "AAsset_getLength", pc, "x30")?;
+            write_u64_reg(registers, 0, file_bridge.asset_length(handle));
+            return Ok(Some(StubOutcome { next_pc }));
+        }
+    }
+
     if region.path == "[vdso]" {
         if (VDSO_CLOCK_GETTIME_OFFSET..VDSO_GETTIMEOFDAY_OFFSET).contains(&file_offset) {
             let clock_id =
@@ -2409,6 +3283,40 @@ fn capture_sprintf_trace(
         dest_limit,
         format_ptr,
         format_preview,
+    }))
+}
+
+fn capture_fopen_trace(
+    file_offset: u64,
+    pc: u64,
+    registers: &BTreeMap<Reg, Value>,
+    memory_overlay: &BTreeMap<MemoryCellId, Value>,
+    memory: &ProcMemory,
+) -> Result<Option<PendingFopenTrace>, String> {
+    if file_offset != LIBC_FOPEN_OFFSET {
+        return Ok(None);
+    }
+    let Some(return_pc) = read_u64_reg(registers, Reg::X(30)) else {
+        return Ok(None);
+    };
+    let path_ptr = read_u64_reg(registers, Reg::X(0));
+    let mode_ptr = read_u64_reg(registers, Reg::X(1));
+    let path_preview = path_ptr
+        .map(|ptr| read_c_string_best_effort(memory_overlay, memory, ptr, MAX_TRACE_STRING_BYTES))
+        .transpose()?;
+    let mode_preview = mode_ptr
+        .map(|ptr| read_c_string_best_effort(memory_overlay, memory, ptr, MAX_TRACE_STRING_BYTES))
+        .transpose()?;
+
+    Ok(Some(PendingFopenTrace {
+        id: 0,
+        function: "fopen",
+        entry_pc: pc,
+        return_pc,
+        path_ptr,
+        mode_ptr,
+        path_preview,
+        mode_preview,
     }))
 }
 
@@ -2486,6 +3394,66 @@ fn read_c_string_best_effort(
         bytes.push(byte);
     }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn shell_single_quote(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('\'');
+    for ch in value.chars() {
+        if ch == '\'' {
+            out.push_str("'\"'\"'");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+fn strip_guest_prefix<'a>(guest_path: &'a str, guest_prefix: &str) -> Option<&'a str> {
+    let suffix = guest_path.strip_prefix(guest_prefix)?;
+    if suffix.is_empty() || suffix.starts_with('/') {
+        Some(suffix)
+    } else {
+        None
+    }
+}
+
+fn join_guest_suffix(root: &Path, guest_suffix: &str) -> PathBuf {
+    let suffix = guest_suffix.trim_start_matches('/');
+    if suffix.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(suffix)
+    }
+}
+
+fn file_readable(path: &Path) -> bool {
+    path.is_file() && File::open(path).is_ok()
+}
+
+fn access_mode_supported(mode: u32) -> bool {
+    let supported = libc::F_OK as u32 | libc::R_OK as u32;
+    mode & !supported == 0
+}
+
+fn open_flags_supported(flags: u32) -> bool {
+    let write_bits =
+        libc::O_WRONLY as u32 | libc::O_RDWR as u32 | libc::O_CREAT as u32 | libc::O_TRUNC as u32;
+    flags & write_bits == 0
+}
+
+fn fopen_mode_supported(mode: &str) -> bool {
+    let mode = mode.trim();
+    if mode.is_empty() {
+        return false;
+    }
+    let first = mode.as_bytes()[0];
+    first == b'r' && !mode.contains('w') && !mode.contains('a')
+}
+
+fn signed_u64(bits: u64) -> i64 {
+    i64::from_ne_bytes(bits.to_ne_bytes())
 }
 
 fn stub_clock_gettime(
@@ -3184,7 +4152,7 @@ fn is_terminator(stmt: &Stmt) -> bool {
         | Stmt::CondBranch { .. }
         | Stmt::Call { .. }
         | Stmt::Ret
-        | Stmt::Trap => true,
+        | Stmt::Trap { .. } => true,
         Stmt::Pair(lhs, rhs) => is_terminator(lhs) || is_terminator(rhs),
         _ => false,
     }
@@ -3202,7 +4170,7 @@ fn classify_terminator(stmt: &Stmt) -> Option<BlockTerminator> {
             _ => Some(BlockTerminator::DynamicCall),
         },
         Stmt::Ret => Some(BlockTerminator::Return),
-        Stmt::Trap => Some(BlockTerminator::Trap),
+        Stmt::Trap { .. } => Some(BlockTerminator::Trap),
         Stmt::Pair(lhs, rhs) => classify_terminator(rhs).or_else(|| classify_terminator(lhs)),
         _ => None,
     }
@@ -4150,6 +5118,39 @@ fn parse_json_u64(value: &serde_json::Value) -> Result<u64, String> {
     Err(format!("unsupported numeric json value: {value}"))
 }
 
+fn parse_hex_u128(value: &str) -> Result<u128, String> {
+    let value = value.trim();
+    let hex = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .unwrap_or(value);
+    if hex.is_empty() {
+        return Err("empty hex string for u128".to_string());
+    }
+    u128::from_str_radix(hex, 16).map_err(|e| format!("invalid u128 hex '{value}': {e}"))
+}
+
+fn parse_simd_hex_u128_le(value: &str) -> Result<u128, String> {
+    let value = value.trim();
+    let hex = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .unwrap_or(value);
+    if hex.len() != 32 {
+        return Err(format!(
+            "invalid SIMD hex '{value}': expected exactly 16 bytes / 32 hex chars"
+        ));
+    }
+    let mut bytes = [0u8; 16];
+    for (index, slot) in bytes.iter_mut().enumerate() {
+        let start = index * 2;
+        let chunk = &hex[start..start + 2];
+        *slot = u8::from_str_radix(chunk, 16)
+            .map_err(|e| format!("invalid SIMD byte hex '{value}': {e}"))?;
+    }
+    Ok(u128::from_le_bytes(bytes))
+}
+
 fn parse_json_i32(value: &serde_json::Value) -> Result<i32, String> {
     let value = parse_json_u64(value)?;
     i32::try_from(value).map_err(|_| format!("json integer out of range for i32: {value}"))
@@ -4195,6 +5196,38 @@ fn parse_reg(value: &str) -> Result<Reg, String> {
             return Ok(Reg::W(index));
         }
     }
+    if let Some(index) = value.strip_prefix('q') {
+        let index = index
+            .parse::<u8>()
+            .map_err(|err| format!("invalid register '{value}': {err}"))?;
+        if index <= 31 {
+            return Ok(Reg::Q(index));
+        }
+    }
+    if let Some(index) = value.strip_prefix('v') {
+        let index = index
+            .parse::<u8>()
+            .map_err(|err| format!("invalid register '{value}': {err}"))?;
+        if index <= 31 {
+            return Ok(Reg::V(index));
+        }
+    }
+    if let Some(index) = value.strip_prefix('d') {
+        let index = index
+            .parse::<u8>()
+            .map_err(|err| format!("invalid register '{value}': {err}"))?;
+        if index <= 31 {
+            return Ok(Reg::D(index));
+        }
+    }
+    if let Some(index) = value.strip_prefix('s') {
+        let index = index
+            .parse::<u8>()
+            .map_err(|err| format!("invalid register '{value}': {err}"))?;
+        if index <= 31 {
+            return Ok(Reg::S(index));
+        }
+    }
     Err(format!("unsupported register '{value}'"))
 }
 
@@ -4205,9 +5238,9 @@ fn parse_json_reg(value: &str) -> Result<Reg, String> {
     }
 }
 
-fn apply_reg_overrides(registers: &mut BTreeMap<Reg, Value>, overrides: &[(Reg, u64)]) {
+fn apply_reg_overrides(registers: &mut BTreeMap<Reg, Value>, overrides: &[(Reg, Value)]) {
     for (reg, value) in overrides {
-        registers.insert(reg.clone(), Value::U64(*value));
+        registers.insert(reg.clone(), value.clone());
     }
 }
 
@@ -4554,6 +5587,9 @@ mod tests {
             report_out: std::env::temp_dir().join("aeon_test_entry_lr.json"),
             page_cache_dir: None,
             sprintf_trace_out: None,
+            file_roots: Vec::new(),
+            path_maps: Vec::new(),
+            adb_serial: None,
             start_pc: LIBC_MEMSET_OFFSET,
             entry_lr: Some(0x2000),
             trace_range: None,
@@ -4606,6 +5642,9 @@ mod tests {
             report_out: std::env::temp_dir().join("aeon_test_stop_non_concrete_block.json"),
             page_cache_dir: None,
             sprintf_trace_out: None,
+            file_roots: Vec::new(),
+            path_maps: Vec::new(),
+            adb_serial: None,
             start_pc: 0x1000,
             entry_lr: None,
             trace_range: Some((0x1000, 0x2000)),
@@ -4638,6 +5677,9 @@ mod tests {
             report_out: std::env::temp_dir().join("aeon_test_stop_non_concrete_stub.json"),
             page_cache_dir: None,
             sprintf_trace_out: None,
+            file_roots: Vec::new(),
+            path_maps: Vec::new(),
+            adb_serial: None,
             start_pc: LIBC_MEMSET_OFFSET,
             entry_lr: None,
             trace_range: None,
@@ -4859,6 +5901,56 @@ mod tests {
     }
 
     #[test]
+    fn load_state_json_parses_nested_simd_registers() {
+        let dir = test_temp_dir("state_json_simd");
+        let path = dir.join("freeze.json");
+        let json = serde_json::json!({
+            "pid": 13660,
+            "thread_id": 13746,
+            "pc": "0x9bea10a0",
+            "lr": "0x9be848b4",
+            "challenge": "AABBCCDDEEFF0011",
+            "registers": {
+                "pc": "0x9bea10a0",
+                "sp": "0x7bde2e46b0",
+                "x0": "0x70ab9b58",
+                "x30": "0x9be848b4",
+                "nzcv": "0",
+                "simd": {
+                    "q0": "01000000000000000000000000000000",
+                    "q1": "404b2ede7b000000d04a2ede7b000000"
+                }
+            }
+        });
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&json).expect("serialize state json"),
+        )
+        .expect("write state json");
+
+        let state = load_state_json(&path).expect("load state json with simd");
+
+        assert_eq!(state.pid, Some(13660));
+        assert_eq!(state.tid, Some(13746));
+        assert_eq!(state.pc, Some(0x9bea10a0));
+        assert_eq!(state.lr, Some(0x9be848b4));
+        assert_eq!(state.challenge.as_deref(), Some("AABBCCDDEEFF0011"));
+        assert!(state
+            .reg_overrides
+            .contains(&(Reg::SP, Value::U64(0x7bde2e46b0))));
+        assert!(state
+            .reg_overrides
+            .contains(&(Reg::X(0), Value::U64(0x70ab9b58))));
+        assert!(state.reg_overrides.contains(&(Reg::Flags, Value::U64(0))));
+        assert!(state
+            .reg_overrides
+            .contains(&(Reg::Q(0), Value::U128(0x00000000000000000000000000000001))));
+        assert!(state
+            .reg_overrides
+            .contains(&(Reg::Q(1), Value::U128(0x0000007bde2e4ad00000007bde2e4b40))));
+    }
+
+    #[test]
     fn decode_art_string_report_rejects_invalid_lengths() {
         let memory = test_proc_memory();
         let mut overlay = BTreeMap::new();
@@ -4903,6 +5995,7 @@ mod tests {
             pid: 42,
             page_cache: RefCell::new(BTreeMap::new()),
             disk_cache_dir: None,
+            allow_remote_fetch: true,
         };
         let region_a = ProcRegion {
             base: 0x7000_0000,
@@ -4935,12 +6028,14 @@ mod tests {
             pid: 42,
             page_cache: RefCell::new(BTreeMap::new()),
             disk_cache_dir: None,
+            allow_remote_fetch: true,
         };
         let remote_b = RemoteProcMemory {
             serial: "emulator-5554".to_string(),
             pid: 43,
             page_cache: RefCell::new(BTreeMap::new()),
             disk_cache_dir: None,
+            allow_remote_fetch: true,
         };
         let memfd = ProcRegion {
             base: 0x7000_0000,
@@ -4976,6 +6071,7 @@ mod tests {
             pid: 42,
             page_cache: RefCell::new(BTreeMap::new()),
             disk_cache_dir: Some(dir.clone()),
+            allow_remote_fetch: true,
         };
         let region = ProcRegion {
             base: 0x7200_0000,
@@ -4991,6 +6087,43 @@ mod tests {
             .expect("read cached page");
 
         assert_eq!(cached, bytes);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn open_cached_uses_saved_maps_and_disk_cache_without_remote_fetch() {
+        let dir = test_temp_dir("offline_page_cache");
+        let maps_path = dir.join("proc.maps");
+        fs::write(
+            &maps_path,
+            "70000000-70001000 r--p 00004000 00:00 0 /system/lib64/libart.so\n",
+        )
+        .expect("write maps file");
+        let cache_root = dir.join("cache");
+        let memory = ProcMemory::open_cached(
+            "emulator-5554",
+            42,
+            &maps_path,
+            Some(cache_root.clone()),
+            true,
+        )
+        .expect("open cached proc memory");
+        let region = memory
+            .find_region_exact(0x7000_0000)
+            .expect("cached region");
+        let remote = match &memory.source {
+            ProcMemorySource::Remote(remote) => remote,
+            ProcMemorySource::Local(_) => panic!("expected cached remote source"),
+        };
+        let mut page = vec![0u8; REMOTE_PAGE_SIZE as usize];
+        page[..4].copy_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+
+        write_disk_cached_page(remote, region, 0x7000_0000, page.len(), &page);
+        let bytes = memory
+            .read_remote(0x7000_0000, 4)
+            .expect("read cached bytes");
+
+        assert_eq!(bytes, vec![0x11, 0x22, 0x33, 0x44]);
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -5014,5 +6147,358 @@ mod tests {
         assert_eq!(trace.format_ptr, Some(0x6000));
         assert_eq!(trace.return_pc, 0x7000);
         assert_eq!(trace.format_preview.as_deref(), Some("token=%s"));
+    }
+
+    #[test]
+    fn capture_fopen_trace_reads_path_and_mode_preview() {
+        let memory = test_proc_memory_with_path("/apex/com.android.runtime/lib64/bionic/libc.so");
+        let registers = regs(&[
+            (Reg::X(0), 0x5100),
+            (Reg::X(1), 0x5200),
+            (Reg::X(30), 0x5300),
+        ]);
+        let mut overlay = overlay_bytes(0x5100, b"/data/app/test/assets.bin\0");
+        overlay.extend(overlay_bytes(0x5200, b"rb\0"));
+
+        let trace = capture_fopen_trace(LIBC_FOPEN_OFFSET, 0x1234, &registers, &overlay, &memory)
+            .expect("capture fopen trace")
+            .expect("fopen trace");
+
+        assert_eq!(trace.function, "fopen");
+        assert_eq!(trace.path_ptr, Some(0x5100));
+        assert_eq!(trace.mode_ptr, Some(0x5200));
+        assert_eq!(trace.return_pc, 0x5300);
+        assert_eq!(
+            trace.path_preview.as_deref(),
+            Some("/data/app/test/assets.bin")
+        );
+        assert_eq!(trace.mode_preview.as_deref(), Some("rb"));
+    }
+
+    #[test]
+    fn fopen_fread_fseek_ftell_and_fclose_stubs_bridge_host_files() {
+        let dir = test_temp_dir("fopen_bridge");
+        let asset_root = dir.join("mirrored");
+        fs::create_dir_all(&asset_root).expect("create asset root");
+        let host_file = asset_root.join("payload.bin");
+        fs::write(&host_file, b"ABCDEFGH").expect("write host file");
+
+        let memory = test_proc_memory_with_path("/apex/com.android.runtime/lib64/bionic/libc.so");
+        let mut clock = test_clock();
+        let mut sprintf_trace = None;
+        let mut fopen_trace = FopenTraceState::default();
+        let mut file_bridge = HostFileBridge::new(
+            Vec::new(),
+            vec![GuestPathMap {
+                guest_prefix: "/data/app/com.netmarble.thered".to_string(),
+                host_prefix: asset_root.clone(),
+            }],
+            None,
+        );
+        let mut overlay = overlay_bytes(0x5000, b"/data/app/com.netmarble.thered/payload.bin\0");
+        overlay.extend(overlay_bytes(0x5100, b"rb\0"));
+        let mut fopen_regs = regs(&[
+            (Reg::X(0), 0x5000),
+            (Reg::X(1), 0x5100),
+            (Reg::X(30), 0x5200),
+        ]);
+
+        let open = maybe_execute_known_stub_with_io(
+            LIBC_FOPEN_OFFSET,
+            &mut fopen_regs,
+            &mut overlay,
+            &memory,
+            &mut clock,
+            &mut sprintf_trace,
+            &mut fopen_trace,
+            &mut file_bridge,
+        )
+        .expect("fopen stub")
+        .expect("fopen outcome");
+        assert_eq!(open.next_pc, 0x5200);
+        let stream = read_u64_reg(&fopen_regs, Reg::X(0)).expect("stream result");
+        assert_ne!(stream, 0);
+        fopen_trace.finish_ready(0x5200, &fopen_regs);
+        assert_eq!(fopen_trace.records.len(), 2);
+        assert_eq!(fopen_trace.records[0].phase, "entry");
+        assert_eq!(fopen_trace.records[1].phase, "return");
+
+        let mut fread_regs = regs(&[
+            (Reg::X(0), 0x5300),
+            (Reg::X(1), 2),
+            (Reg::X(2), 2),
+            (Reg::X(3), stream),
+            (Reg::X(30), 0x5400),
+        ]);
+        let fread = maybe_execute_known_stub_with_io(
+            LIBC_FREAD_OFFSET,
+            &mut fread_regs,
+            &mut overlay,
+            &memory,
+            &mut clock,
+            &mut sprintf_trace,
+            &mut fopen_trace,
+            &mut file_bridge,
+        )
+        .expect("fread stub")
+        .expect("fread outcome");
+        assert_eq!(fread.next_pc, 0x5400);
+        assert_eq!(read_u64_reg(&fread_regs, Reg::X(0)), Some(2));
+        assert_eq!(
+            stub_read_bytes(&overlay, &memory, 0x5300, 4, "test", 0).unwrap(),
+            b"ABCD"
+        );
+
+        let mut ftell_regs = regs(&[(Reg::X(0), stream), (Reg::X(30), 0x5500)]);
+        let ftell = maybe_execute_known_stub_with_io(
+            LIBC_FTELL_OFFSET,
+            &mut ftell_regs,
+            &mut overlay,
+            &memory,
+            &mut clock,
+            &mut sprintf_trace,
+            &mut fopen_trace,
+            &mut file_bridge,
+        )
+        .expect("ftell stub")
+        .expect("ftell outcome");
+        assert_eq!(ftell.next_pc, 0x5500);
+        assert_eq!(read_u64_reg(&ftell_regs, Reg::X(0)), Some(4));
+
+        let mut fseek_regs = regs(&[
+            (Reg::X(0), stream),
+            (Reg::X(1), 1),
+            (Reg::X(2), libc::SEEK_SET as u64),
+            (Reg::X(30), 0x5600),
+        ]);
+        let fseek = maybe_execute_known_stub_with_io(
+            LIBC_FSEEK_OFFSET,
+            &mut fseek_regs,
+            &mut overlay,
+            &memory,
+            &mut clock,
+            &mut sprintf_trace,
+            &mut fopen_trace,
+            &mut file_bridge,
+        )
+        .expect("fseek stub")
+        .expect("fseek outcome");
+        assert_eq!(fseek.next_pc, 0x5600);
+        assert_eq!(read_u64_reg(&fseek_regs, Reg::X(0)), Some(0));
+
+        let mut fclose_regs = regs(&[(Reg::X(0), stream), (Reg::X(30), 0x5700)]);
+        let fclose = maybe_execute_known_stub_with_io(
+            LIBC_FCLOSE_OFFSET,
+            &mut fclose_regs,
+            &mut overlay,
+            &memory,
+            &mut clock,
+            &mut sprintf_trace,
+            &mut fopen_trace,
+            &mut file_bridge,
+        )
+        .expect("fclose stub")
+        .expect("fclose outcome");
+        assert_eq!(fclose.next_pc, 0x5700);
+        assert_eq!(read_u64_reg(&fclose_regs, Reg::X(0)), Some(0));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn open_read_lseek_and_close_stubs_bridge_host_files() {
+        let dir = test_temp_dir("open_bridge");
+        let root = dir.join("root");
+        let guest_rel = Path::new("system/etc/hash-seed.bin");
+        let host_file = root.join(guest_rel);
+        fs::create_dir_all(host_file.parent().expect("host file parent"))
+            .expect("create file root");
+        fs::write(&host_file, b"0123456789").expect("write bridge file");
+
+        let memory = test_proc_memory_with_path("/system/lib64/libc.so");
+        let mut clock = test_clock();
+        let mut sprintf_trace = None;
+        let mut fopen_trace = FopenTraceState::default();
+        let mut file_bridge = HostFileBridge::new(vec![root.clone()], Vec::new(), None);
+        let mut overlay = overlay_bytes(0x6000, b"/system/etc/hash-seed.bin\0");
+        let mut open_regs = regs(&[
+            (Reg::X(0), 0x6000),
+            (Reg::X(1), libc::O_RDONLY as u64),
+            (Reg::X(30), 0x6100),
+        ]);
+
+        let open = maybe_execute_known_stub_with_io(
+            LIBC_OPEN_OFFSET,
+            &mut open_regs,
+            &mut overlay,
+            &memory,
+            &mut clock,
+            &mut sprintf_trace,
+            &mut fopen_trace,
+            &mut file_bridge,
+        )
+        .expect("open stub")
+        .expect("open outcome");
+        assert_eq!(open.next_pc, 0x6100);
+        let fd = read_u64_reg(&open_regs, Reg::X(0)).expect("open fd") as i32;
+        assert!(fd >= 3);
+
+        let mut read_regs = regs(&[
+            (Reg::X(0), fd as u64),
+            (Reg::X(1), 0x6200),
+            (Reg::X(2), 5),
+            (Reg::X(30), 0x6300),
+        ]);
+        let read = maybe_execute_known_stub_with_io(
+            LIBC_READ_OFFSET,
+            &mut read_regs,
+            &mut overlay,
+            &memory,
+            &mut clock,
+            &mut sprintf_trace,
+            &mut fopen_trace,
+            &mut file_bridge,
+        )
+        .expect("read stub")
+        .expect("read outcome");
+        assert_eq!(read.next_pc, 0x6300);
+        assert_eq!(read_u64_reg(&read_regs, Reg::X(0)), Some(5));
+        assert_eq!(
+            stub_read_bytes(&overlay, &memory, 0x6200, 5, "test", 0).unwrap(),
+            b"01234"
+        );
+
+        let mut lseek_regs = regs(&[
+            (Reg::X(0), fd as u64),
+            (Reg::X(1), 2),
+            (Reg::X(2), libc::SEEK_SET as u64),
+            (Reg::X(30), 0x6400),
+        ]);
+        let lseek = maybe_execute_known_stub_with_io(
+            LIBC_LSEEK_OFFSET,
+            &mut lseek_regs,
+            &mut overlay,
+            &memory,
+            &mut clock,
+            &mut sprintf_trace,
+            &mut fopen_trace,
+            &mut file_bridge,
+        )
+        .expect("lseek stub")
+        .expect("lseek outcome");
+        assert_eq!(lseek.next_pc, 0x6400);
+        assert_eq!(read_u64_reg(&lseek_regs, Reg::X(0)), Some(2));
+
+        let mut close_regs = regs(&[(Reg::X(0), fd as u64), (Reg::X(30), 0x6500)]);
+        let close = maybe_execute_known_stub_with_io(
+            LIBC_CLOSE_OFFSET,
+            &mut close_regs,
+            &mut overlay,
+            &memory,
+            &mut clock,
+            &mut sprintf_trace,
+            &mut fopen_trace,
+            &mut file_bridge,
+        )
+        .expect("close stub")
+        .expect("close outcome");
+        assert_eq!(close.next_pc, 0x6500);
+        assert_eq!(read_u64_reg(&close_regs, Reg::X(0)), Some(0));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn aasset_stubs_resolve_suffix_named_nmss_assets() {
+        let dir = test_temp_dir("aasset_bridge");
+        let bins = dir.join("bins");
+        fs::create_dir_all(&bins).expect("create bins dir");
+        let host_file = bins.join("0a8a78ae_nmsscr.nmss");
+        fs::write(&host_file, b"NMSSDATA").expect("write nmss asset");
+
+        let memory = test_proc_memory_with_path("/system/lib64/libandroid.so");
+        let mut clock = test_clock();
+        let mut sprintf_trace = None;
+        let mut fopen_trace = FopenTraceState::default();
+        let mut file_bridge = HostFileBridge::new(vec![bins.clone()], Vec::new(), None);
+        let mut overlay = overlay_bytes(0x7000, b"nmsscr.nmss\0");
+
+        let mut open_regs = regs(&[
+            (Reg::X(0), 0),
+            (Reg::X(1), 0x7000),
+            (Reg::X(2), 0),
+            (Reg::X(30), 0x7100),
+        ]);
+        let open = maybe_execute_known_stub_with_io(
+            LIBANDROID_AASSET_MANAGER_OPEN_OFFSET,
+            &mut open_regs,
+            &mut overlay,
+            &memory,
+            &mut clock,
+            &mut sprintf_trace,
+            &mut fopen_trace,
+            &mut file_bridge,
+        )
+        .expect("AAssetManager_open stub")
+        .expect("AAssetManager_open outcome");
+        assert_eq!(open.next_pc, 0x7100);
+        let handle = read_u64_reg(&open_regs, Reg::X(0)).expect("asset handle");
+        assert_ne!(handle, 0);
+
+        let mut len_regs = regs(&[(Reg::X(0), handle), (Reg::X(30), 0x7200)]);
+        let get_len = maybe_execute_known_stub_with_io(
+            LIBANDROID_AASSET_GET_LENGTH_OFFSET,
+            &mut len_regs,
+            &mut overlay,
+            &memory,
+            &mut clock,
+            &mut sprintf_trace,
+            &mut fopen_trace,
+            &mut file_bridge,
+        )
+        .expect("AAsset_getLength stub")
+        .expect("AAsset_getLength outcome");
+        assert_eq!(get_len.next_pc, 0x7200);
+        assert_eq!(read_u64_reg(&len_regs, Reg::X(0)), Some(8));
+
+        let mut read_regs = regs(&[
+            (Reg::X(0), handle),
+            (Reg::X(1), 0x7300),
+            (Reg::X(2), 4),
+            (Reg::X(30), 0x7400),
+        ]);
+        let read = maybe_execute_known_stub_with_io(
+            LIBANDROID_AASSET_READ_OFFSET,
+            &mut read_regs,
+            &mut overlay,
+            &memory,
+            &mut clock,
+            &mut sprintf_trace,
+            &mut fopen_trace,
+            &mut file_bridge,
+        )
+        .expect("AAsset_read stub")
+        .expect("AAsset_read outcome");
+        assert_eq!(read.next_pc, 0x7400);
+        assert_eq!(read_u64_reg(&read_regs, Reg::X(0)), Some(4));
+        assert_eq!(
+            stub_read_bytes(&overlay, &memory, 0x7300, 4, "test", 0).unwrap(),
+            b"NMSS"
+        );
+
+        let mut close_regs = regs(&[(Reg::X(0), handle), (Reg::X(30), 0x7500)]);
+        let close = maybe_execute_known_stub_with_io(
+            LIBANDROID_AASSET_CLOSE_OFFSET,
+            &mut close_regs,
+            &mut overlay,
+            &memory,
+            &mut clock,
+            &mut sprintf_trace,
+            &mut fopen_trace,
+            &mut file_bridge,
+        )
+        .expect("AAsset_close stub")
+        .expect("AAsset_close outcome");
+        assert_eq!(close.next_pc, 0x7500);
+        assert_eq!(read_u64_reg(&close_regs, Reg::X(0)), Some(0));
+        let _ = fs::remove_dir_all(dir);
     }
 }

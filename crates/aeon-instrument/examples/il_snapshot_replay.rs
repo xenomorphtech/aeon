@@ -1003,6 +1003,16 @@ fn transform_calls_and_rets(stmts: Vec<Stmt>, return_addr: u64) -> Vec<Stmt> {
     for stmt in stmts {
         match stmt {
             Stmt::Call { target } => {
+                let target = match target {
+                    Expr::Reg(Reg::X(30)) => {
+                        out.push(Stmt::Assign {
+                            dst: Reg::X(17),
+                            src: Expr::Reg(Reg::X(30)),
+                        });
+                        Expr::Reg(Reg::X(17))
+                    }
+                    other => other,
+                };
                 out.push(Stmt::Assign {
                     dst: Reg::X(30),
                     src: Expr::Imm(return_addr),
@@ -1030,7 +1040,7 @@ fn is_terminator(stmt: &Stmt) -> bool {
         | Stmt::CondBranch { .. }
         | Stmt::Call { .. }
         | Stmt::Ret
-        | Stmt::Trap => true,
+        | Stmt::Trap { .. } => true,
         Stmt::Pair(lhs, rhs) => is_terminator(lhs) || is_terminator(rhs),
         _ => false,
     }
@@ -1048,7 +1058,7 @@ fn classify_terminator(stmt: &Stmt) -> Option<BlockTerminator> {
             _ => Some(BlockTerminator::DynamicCall),
         },
         Stmt::Ret => Some(BlockTerminator::Return),
-        Stmt::Trap => Some(BlockTerminator::Trap),
+        Stmt::Trap { .. } => Some(BlockTerminator::Trap),
         Stmt::Pair(lhs, rhs) => classify_terminator(rhs).or_else(|| classify_terminator(lhs)),
         _ => None,
     }

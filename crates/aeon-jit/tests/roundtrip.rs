@@ -517,7 +517,7 @@ fn decode_call_site(value: u64) -> Option<usize> {
 
 fn is_terminator(stmt: &Stmt) -> bool {
     match stmt {
-        Stmt::Branch { .. } | Stmt::CondBranch { .. } | Stmt::Ret | Stmt::Trap => true,
+        Stmt::Branch { .. } | Stmt::CondBranch { .. } | Stmt::Ret | Stmt::Trap { .. } => true,
         Stmt::Pair(left, right) => is_terminator(left) || is_terminator(right),
         _ => false,
     }

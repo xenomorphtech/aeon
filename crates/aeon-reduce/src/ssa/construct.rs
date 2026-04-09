@@ -510,8 +510,11 @@ impl SsaBuilder {
                     .push(SsaStmt::Barrier(s.clone()));
             }
 
-            Stmt::Trap => {
-                self.blocks[block as usize].stmts.push(SsaStmt::Trap);
+            Stmt::Trap { kind, imm } => {
+                self.blocks[block as usize].stmts.push(SsaStmt::Trap {
+                    kind: *kind,
+                    imm: *imm,
+                });
             }
 
             Stmt::Intrinsic { name, operands } => {

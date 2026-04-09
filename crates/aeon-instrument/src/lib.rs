@@ -17,7 +17,10 @@
 
 pub mod context;
 pub mod dyncfg;
+pub mod dynffi;
+pub mod dynruntime;
 pub mod engine;
 pub mod snapshot;
 pub mod symbolic;
 pub mod trace;
+pub mod translate;

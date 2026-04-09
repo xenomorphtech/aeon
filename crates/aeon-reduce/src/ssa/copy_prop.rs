@@ -299,7 +299,7 @@ fn replace_var_in_stmt(stmt: &mut SsaStmt, from: &SsaVar, to: &SsaVar) {
             replace_var_in_stmt(a, from, to);
             replace_var_in_stmt(b, from, to);
         }
-        SsaStmt::Ret | SsaStmt::Nop | SsaStmt::Barrier(_) | SsaStmt::Trap => {}
+        SsaStmt::Ret | SsaStmt::Nop | SsaStmt::Barrier(_) | SsaStmt::Trap { .. } => {}
     }
 }
 
