@@ -3,8 +3,8 @@ use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::immediates::{Ieee32, Ieee64};
 use cranelift_codegen::ir::types::{self, F64X2, I16X8, I32X4, I64X2, I8X16};
 use cranelift_codegen::ir::{
-    AbiParam, Endianness, FuncRef, InstBuilder, MemFlags, Signature, StackSlotData,
-    StackSlotKind, Type, UserFuncName, Value,
+    AbiParam, Endianness, FuncRef, InstBuilder, MemFlags, Signature, StackSlotData, StackSlotKind,
+    Type, UserFuncName, Value,
 };
 use cranelift_codegen::isa::lookup;
 use cranelift_codegen::settings::{self, Configurable};
@@ -13,11 +13,11 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module, ModuleError};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use half::f16;
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::mem::offset_of;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use target_lexicon::Triple;
@@ -756,10 +756,7 @@ impl ObjectCompiler {
             builder.append_block_params_for_function_params(entry);
             builder.seal_block(entry);
             let params = builder.block_params(entry).to_vec();
-            let stack_slots = Self::spill_helper_values(
-                &mut builder,
-                &[(params[0], types::I64)],
-            );
+            let stack_slots = Self::spill_helper_values(&mut builder, &[(params[0], types::I64)]);
             let ret = builder.ins().stack_load(types::I64, stack_slots[0], 0);
             Self::burn_helper_value(&mut builder, ret, types::I64);
             let ret = builder.ins().stack_load(types::I64, stack_slots[0], 0);
@@ -859,13 +856,11 @@ impl ObjectCompiler {
         values
             .iter()
             .map(|(value, ty)| {
-                let slot = builder
-                    .func
-                    .create_sized_stack_slot(StackSlotData::new(
-                        StackSlotKind::ExplicitSlot,
-                        ty.bytes().max(8),
-                        3,
-                    ));
+                let slot = builder.func.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    ty.bytes().max(8),
+                    3,
+                ));
                 builder.ins().stack_store(*value, slot, 0);
                 slot
             })

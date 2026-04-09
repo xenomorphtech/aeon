@@ -116,13 +116,21 @@ impl FunctionArtifacts {
     pub fn estimated_bytes(&self) -> usize {
         size_of::<Self>()
             + estimate_decoded_function_bytes(&self.decoded)
-            + self.reduced_cfg.as_ref().map(estimate_cfg_bytes).unwrap_or(0)
+            + self
+                .reduced_cfg
+                .as_ref()
+                .map(estimate_cfg_bytes)
+                .unwrap_or(0)
             + self
                 .stack_frame
                 .as_ref()
                 .map(estimate_stack_frame_cache_bytes)
                 .unwrap_or(0)
-            + self.ssa.as_ref().map(estimate_ssa_function_bytes).unwrap_or(0)
+            + self
+                .ssa
+                .as_ref()
+                .map(estimate_ssa_function_bytes)
+                .unwrap_or(0)
             + self
                 .optimized_ssa
                 .as_ref()
@@ -181,7 +189,11 @@ fn estimate_stack_frame_cache_bytes(frame: &Option<PrologueInfo>) -> usize {
 fn estimate_ssa_function_bytes(ssa: &SsaFunction) -> usize {
     size_of::<SsaFunction>()
         + ssa.blocks.capacity() * size_of::<SsaBlock>()
-        + ssa.blocks.iter().map(estimate_ssa_block_bytes).sum::<usize>()
+        + ssa
+            .blocks
+            .iter()
+            .map(estimate_ssa_block_bytes)
+            .sum::<usize>()
 }
 
 fn estimate_ssa_block_bytes(block: &SsaBlock) -> usize {
