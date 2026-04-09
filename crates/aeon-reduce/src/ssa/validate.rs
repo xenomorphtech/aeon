@@ -452,7 +452,7 @@ fn visit_uses_in_stmt(stmt: &SsaStmt, visit: &mut impl FnMut(SsaVar)) {
             visit_uses_in_stmt(a, visit);
             visit_uses_in_stmt(b, visit);
         }
-        SsaStmt::Ret | SsaStmt::Nop | SsaStmt::Barrier(_) | SsaStmt::Trap => {}
+        SsaStmt::Ret | SsaStmt::Nop | SsaStmt::Barrier(_) | SsaStmt::Trap { .. } => {}
     }
 }
 

@@ -614,7 +614,7 @@ fn collect_uses_in_stmt(
             collect_uses_in_stmt(a, site, uses, uses_seen);
             collect_uses_in_stmt(b, site, uses, uses_seen);
         }
-        SsaStmt::Ret | SsaStmt::Nop | SsaStmt::Barrier(_) | SsaStmt::Trap => {}
+        SsaStmt::Ret | SsaStmt::Nop | SsaStmt::Barrier(_) | SsaStmt::Trap { .. } => {}
     }
 }
 
@@ -706,7 +706,7 @@ fn collect_stmt_structure_facts(
                 next_slot_id,
             );
         }
-        SsaStmt::Ret | SsaStmt::Nop | SsaStmt::Barrier(_) | SsaStmt::Trap => {}
+        SsaStmt::Ret | SsaStmt::Nop | SsaStmt::Barrier(_) | SsaStmt::Trap { .. } => {}
     }
 }
 
@@ -1344,7 +1344,7 @@ fn stmt_contains_and_mask(stmt: &SsaStmt, mask: u64) -> bool {
             .iter()
             .any(|operand| expr_contains_and_mask(operand, mask)),
         SsaStmt::Pair(a, b) => stmt_contains_and_mask(a, mask) || stmt_contains_and_mask(b, mask),
-        SsaStmt::Ret | SsaStmt::Nop | SsaStmt::Barrier(_) | SsaStmt::Trap => false,
+        SsaStmt::Ret | SsaStmt::Nop | SsaStmt::Barrier(_) | SsaStmt::Trap { .. } => false,
     }
 }
 

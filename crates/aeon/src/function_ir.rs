@@ -6,7 +6,7 @@ use aeon_reduce::ssa::cfg::{build_cfg, Cfg};
 use aeon_reduce::ssa::construct::{build_ssa, SsaFunction};
 use aeon_reduce::ssa::pipeline::{optimize_ssa, reduce_and_build_ssa};
 use aeon_reduce::ssa::types::{BlockId, RegLocation, SsaBranchCond, SsaExpr, SsaStmt, SsaVar};
-use aeonil::{BranchCond, Condition, Expr, Reg, Stmt};
+use aeonil::{BranchCond, Condition, Expr, Reg, Stmt, TrapKind};
 use serde::Serialize;
 
 use crate::elf::{FunctionInfo, LoadedBinary};
@@ -502,7 +502,10 @@ pub enum StmtView {
     Barrier {
         kind: String,
     },
-    Trap,
+    Trap {
+        kind: String,
+        imm: String,
+    },
     Intrinsic {
         name: String,
         operands: Vec<ExprView>,
@@ -747,7 +750,10 @@ pub enum SsaStmtView {
     Barrier {
         kind: String,
     },
-    Trap,
+    Trap {
+        kind: String,
+        imm: String,
+    },
     Intrinsic {
         name: String,
         operands: Vec<SsaExprView>,
@@ -1143,7 +1149,10 @@ impl StmtView {
                 expr: ExprView::from_expr(expr),
             },
             Stmt::Barrier(kind) => Self::Barrier { kind: kind.clone() },
-            Stmt::Trap => Self::Trap,
+            Stmt::Trap { kind, imm } => Self::Trap {
+                kind: trap_kind_name(*kind).to_string(),
+                imm: hex(u64::from(*imm)),
+            },
             Stmt::Intrinsic { name, operands } => Self::Intrinsic {
                 name: name.clone(),
                 operands: operands.iter().map(ExprView::from_expr).collect(),
@@ -1427,7 +1436,10 @@ impl SsaStmtView {
                 expr: SsaExprView::from_expr(expr),
             },
             SsaStmt::Barrier(kind) => Self::Barrier { kind: kind.clone() },
-            SsaStmt::Trap => Self::Trap,
+            SsaStmt::Trap { kind, imm } => Self::Trap {
+                kind: trap_kind_name(*kind).to_string(),
+                imm: hex(u64::from(*imm)),
+            },
             SsaStmt::Intrinsic { name, operands } => Self::Intrinsic {
                 name: name.clone(),
                 operands: operands.iter().map(SsaExprView::from_expr).collect(),
@@ -1523,7 +1535,7 @@ fn collect_stmt_stack_slots(
                 collect_expr_stack_slots(operand, block_id, stats);
             }
         }
-        Stmt::Ret | Stmt::Nop | Stmt::Barrier(_) | Stmt::Trap => {}
+        Stmt::Ret | Stmt::Nop | Stmt::Barrier(_) | Stmt::Trap { .. } => {}
     }
 }
 
@@ -1661,7 +1673,7 @@ fn accumulate_ssa_metrics(
             accumulate_ssa_metrics(first, assign_count, phi_count, stack_slots);
             accumulate_ssa_metrics(second, assign_count, phi_count, stack_slots);
         }
-        SsaStmt::Ret | SsaStmt::Nop | SsaStmt::Barrier(_) | SsaStmt::Trap => {}
+        SsaStmt::Ret | SsaStmt::Nop | SsaStmt::Barrier(_) | SsaStmt::Trap { .. } => {}
     }
 }
 
@@ -2029,6 +2041,13 @@ fn reg_name(reg: &Reg) -> &'static str {
         Reg::VByte(30) => "b30",
         Reg::VByte(31) => "b31",
         _ => "reg",
+    }
+}
+
+fn trap_kind_name(kind: TrapKind) -> &'static str {
+    match kind {
+        TrapKind::Brk => "brk",
+        TrapKind::Udf => "udf",
     }
 }
 

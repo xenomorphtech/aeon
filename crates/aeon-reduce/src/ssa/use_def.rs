@@ -184,7 +184,7 @@ fn collect_uses_in_stmt(
             collect_uses_in_stmt(a, loc, uses);
             collect_uses_in_stmt(b, loc, uses);
         }
-        SsaStmt::Ret | SsaStmt::Nop | SsaStmt::Barrier(_) | SsaStmt::Trap => {}
+        SsaStmt::Ret | SsaStmt::Nop | SsaStmt::Barrier(_) | SsaStmt::Trap { .. } => {}
     }
 }
 

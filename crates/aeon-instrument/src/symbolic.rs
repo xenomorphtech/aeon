@@ -31,16 +31,9 @@ pub enum Invariant {
         value: u64,
     },
     /// Memory at `addr` always reads as `value` (size bytes).
-    MemoryConstant {
-        addr: u64,
-        size: u8,
-        value: u64,
-    },
+    MemoryConstant { addr: u64, size: u8, value: u64 },
     /// Branch at `block_addr` always goes to `target`.
-    BranchAlwaysTaken {
-        block_addr: u64,
-        target: u64,
-    },
+    BranchAlwaysTaken { block_addr: u64, target: u64 },
     /// Register `reg` at block entry is always `base + stride * visit_index`
     /// (linear induction variable).
     InductionVariable {
@@ -275,7 +268,16 @@ mod tests {
         let reg_consts: Vec<_> = result
             .invariants
             .iter()
-            .filter(|inv| matches!(inv, Invariant::RegisterConstant { reg: 5, value: 42, .. }))
+            .filter(|inv| {
+                matches!(
+                    inv,
+                    Invariant::RegisterConstant {
+                        reg: 5,
+                        value: 42,
+                        ..
+                    }
+                )
+            })
             .collect();
         assert!(!reg_consts.is_empty(), "should find x5=42 as constant");
         assert!(result.constant_registers > 0);
@@ -306,9 +308,20 @@ mod tests {
         let reg_consts: Vec<_> = result
             .invariants
             .iter()
-            .filter(|inv| matches!(inv, Invariant::RegisterConstant { block_addr: 0x1000, .. }))
+            .filter(|inv| {
+                matches!(
+                    inv,
+                    Invariant::RegisterConstant {
+                        block_addr: 0x1000,
+                        ..
+                    }
+                )
+            })
             .collect();
-        assert!(reg_consts.is_empty(), "single visit should not produce register constants");
+        assert!(
+            reg_consts.is_empty(),
+            "single visit should not produce register constants"
+        );
     }
 
     // ── MemoryConstant ────────────────────────────────────────────
@@ -333,7 +346,16 @@ mod tests {
         let mem_consts: Vec<_> = result
             .invariants
             .iter()
-            .filter(|inv| matches!(inv, Invariant::MemoryConstant { addr: 0x1000, value: 0xFF, .. }))
+            .filter(|inv| {
+                matches!(
+                    inv,
+                    Invariant::MemoryConstant {
+                        addr: 0x1000,
+                        value: 0xFF,
+                        ..
+                    }
+                )
+            })
             .collect();
         assert_eq!(mem_consts.len(), 1, "should find memory constant at 0x1000");
         assert_eq!(result.constant_memory, 1);
@@ -360,7 +382,10 @@ mod tests {
             .iter()
             .filter(|inv| matches!(inv, Invariant::MemoryConstant { addr: 0x1000, .. }))
             .collect();
-        assert!(mem_consts.is_empty(), "different values should not be constant");
+        assert!(
+            mem_consts.is_empty(),
+            "different values should not be constant"
+        );
     }
 
     #[test]
@@ -391,10 +416,13 @@ mod tests {
             .invariants
             .iter()
             .filter(|inv| {
-                matches!(inv, Invariant::BranchAlwaysTaken {
-                    block_addr: 0x4000,
-                    target: 0x5000,
-                })
+                matches!(
+                    inv,
+                    Invariant::BranchAlwaysTaken {
+                        block_addr: 0x4000,
+                        target: 0x5000,
+                    }
+                )
             })
             .collect();
         assert_eq!(branches.len(), 1);
@@ -410,9 +438,20 @@ mod tests {
         let branches: Vec<_> = result
             .invariants
             .iter()
-            .filter(|inv| matches!(inv, Invariant::BranchAlwaysTaken { block_addr: 0x4000, .. }))
+            .filter(|inv| {
+                matches!(
+                    inv,
+                    Invariant::BranchAlwaysTaken {
+                        block_addr: 0x4000,
+                        ..
+                    }
+                )
+            })
             .collect();
-        assert!(branches.is_empty(), "varying exit should not be always-taken");
+        assert!(
+            branches.is_empty(),
+            "varying exit should not be always-taken"
+        );
     }
 
     // ── InductionVariable ─────────────────────────────────────────
@@ -440,7 +479,11 @@ mod tests {
                 )
             })
             .collect();
-        assert_eq!(indvars.len(), 1, "should detect x3 as induction variable with stride 4");
+        assert_eq!(
+            indvars.len(),
+            1,
+            "should detect x3 as induction variable with stride 4"
+        );
         assert_eq!(result.induction_variables, 1);
     }
 
@@ -483,7 +526,10 @@ mod tests {
             .iter()
             .filter(|inv| matches!(inv, Invariant::InductionVariable { reg: 3, .. }))
             .collect();
-        assert!(indvars.is_empty(), "constant should not be induction variable");
+        assert!(
+            indvars.is_empty(),
+            "constant should not be induction variable"
+        );
     }
 
     #[test]
@@ -552,7 +598,10 @@ mod tests {
             ],
         ));
         let result = SymbolicFolder::fold(&trace);
-        assert_eq!(result.dataflow_edges, 0, "same-block write-read should not be an edge");
+        assert_eq!(
+            result.dataflow_edges, 0,
+            "same-block write-read should not be an edge"
+        );
     }
 
     #[test]
@@ -608,7 +657,10 @@ mod tests {
         assert!(result.induction_variables > 0, "should find x1 induction");
 
         // Branch always to 0x2000
-        assert!(result.resolved_branches > 0, "should find always-taken branch");
+        assert!(
+            result.resolved_branches > 0,
+            "should find always-taken branch"
+        );
 
         // Memory 0x5000 always 0xBEEF
         assert!(result.constant_memory > 0, "should find memory constant");

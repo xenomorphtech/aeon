@@ -5,10 +5,13 @@ edition = "2021"
 
 [dependencies]
 aeonil = { path = "../aeonil" }
-cranelift-codegen = "0.130.0"
+cranelift-codegen = { version = "0.130.0", features = ["arm64"] }
 cranelift-frontend = "0.130.0"
 cranelift-module = "0.130.0"
 cranelift-jit = "0.130.0"
+cranelift-object = "0.130.0"
+half = "2"
+target-lexicon = "0.13.5"
 
 [dev-dependencies]
 aeon = { path = "../aeon" }

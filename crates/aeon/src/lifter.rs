@@ -42,19 +42,20 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
             Stmt::Assign { dst, src }
         }
         Op::MOVI => {
-            let dst = reg_op(operands, 0);
-            let src = expr_op(operands, 1);
             ft(&mut edges, next_pc);
-            Stmt::Assign { dst, src }
+            lift_vector_immediate_intrinsic(&disasm, operands, "movi")
         }
         Op::MVNI => {
-            let dst = reg_op(operands, 0);
-            let src = expr_op(operands, 1);
             ft(&mut edges, next_pc);
-            Stmt::Assign {
-                dst,
-                src: e_not(src),
-            }
+            lift_vector_immediate_intrinsic(&disasm, operands, "mvni")
+        }
+        Op::UMOV => {
+            ft(&mut edges, next_pc);
+            lift_lane_move(&disasm, operands, false)
+        }
+        Op::SMOV => {
+            ft(&mut edges, next_pc);
+            lift_lane_move(&disasm, operands, true)
         }
         Op::ADRP => {
             let dst = reg_op(operands, 0);
@@ -215,7 +216,13 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         // ── Arithmetic ─────────────────────────────────────────────
         Op::ADD => {
             ft(&mut edges, next_pc);
-            lift_binary(operands, e_add)
+            if first_vector_arrangement(&disasm).is_some()
+                && matches!(reg_op(operands, 0), Reg::V(_) | Reg::Q(_))
+            {
+                lift_intrinsic_all_with_arrangement(&disasm, operands, "add")
+            } else {
+                lift_binary(operands, e_add)
+            }
         }
         Op::ADDS => {
             ft(&mut edges, next_pc);
@@ -480,8 +487,7 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         // ── Bitfield ───────────────────────────────────────────────
         Op::BFI | Op::BFXIL | Op::SBFIZ | Op::SBFX | Op::UBFX | Op::UBFIZ => {
             ft(&mut edges, next_pc);
-            let name = format!("{:?}", insn.op()).to_lowercase();
-            lift_intrinsic_all(operands, &name)
+            lift_bitfield(insn.op(), operands)
         }
         Op::EXTR => {
             ft(&mut edges, next_pc);
@@ -833,11 +839,19 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         }
         Op::SCVTF => {
             ft(&mut edges, next_pc);
-            lift_unary(operands, e_int_to_float)
+            if first_vector_arrangement(&disasm).is_some() {
+                lift_unary_intrinsic_with_arrangement(&disasm, operands, "scvtf")
+            } else {
+                lift_unary(operands, e_int_to_float)
+            }
         }
         Op::UCVTF => {
             ft(&mut edges, next_pc);
-            lift_unary(operands, e_int_to_float)
+            if first_vector_arrangement(&disasm).is_some() {
+                lift_unary_intrinsic_with_arrangement(&disasm, operands, "ucvtf")
+            } else {
+                lift_unary(operands, e_int_to_float)
+            }
         }
         Op::FCVTZS
         | Op::FCVTZU
@@ -850,7 +864,12 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         | Op::FCVTNS
         | Op::FCVTNU => {
             ft(&mut edges, next_pc);
-            lift_unary(operands, e_float_to_int)
+            if first_vector_arrangement(&disasm).is_some() {
+                let name = format!("{:?}", insn.op()).to_lowercase();
+                lift_unary_intrinsic_with_arrangement(&disasm, operands, &name)
+            } else {
+                lift_unary(operands, e_float_to_int)
+            }
         }
 
         // FP rounding
@@ -864,13 +883,17 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         Op::FRECPE | Op::FRECPS | Op::FRSQRTE | Op::FRSQRTS => {
             ft(&mut edges, next_pc);
             let name = format!("{:?}", insn.op()).to_lowercase();
-            lift_intrinsic_all(operands, &name)
+            lift_intrinsic_all_with_arrangement(&disasm, operands, &name)
+        }
+
+        Op::UMULL2 | Op::SMULL2 | Op::UMLAL2 | Op::UMLSL2 => {
+            ft(&mut edges, next_pc);
+            let name = format!("{:?}", insn.op()).to_lowercase();
+            lift_widening_lane_mul_intrinsic(&disasm, operands, &name)
         }
 
         // ── SIMD / NEON (as intrinsics with proper operand extraction) ─
         Op::DUP
-        | Op::UMOV
-        | Op::SMOV
         | Op::INS
         | Op::EXT
         | Op::ZIP1
@@ -901,6 +924,7 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         | Op::UMAXP
         | Op::UMINP
         | Op::SHL
+        | Op::SRI
         | Op::USHR
         | Op::SSHR
         | Op::SLI
@@ -956,8 +980,6 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         | Op::FABD
         | Op::FMLA
         | Op::FMLS
-        | Op::MLA
-        | Op::MLS
         | Op::SABD
         | Op::UABD
         | Op::UABDL
@@ -975,7 +997,6 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         | Op::USUBL
         | Op::USUBL2
         | Op::UMLAL
-        | Op::UMLAL2
         | Op::SMLAL
         | Op::SMLAL2
         | Op::PMULL
@@ -983,12 +1004,10 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         | Op::FMAXNMP
         | Op::FMINNMP
         | Op::FMINP
-        | Op::FMULX
+        | Op::SQSHLU
         | Op::SQSHRUN
         | Op::SQSHRUN2
         | Op::SQRSHRUN
-        | Op::SQRDMLAH
-        | Op::SQRDMLSH
         | Op::UQRSHL
         | Op::SQRSHL
         | Op::SRSHL
@@ -1017,16 +1036,22 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         | Op::UQSUB
         | Op::UQADD
         | Op::SQADD
-        | Op::FCMLA
         | Op::FCADD
         | Op::SQRSHRN2
         | Op::UQRSHRN
+        | Op::UQRSHRN2
         | Op::USQADD
         | Op::FMAXV
         | Op::FMINV => {
             ft(&mut edges, next_pc);
             let name = format!("{:?}", insn.op()).to_lowercase();
-            lift_intrinsic_all(operands, &name)
+            lift_intrinsic_all_with_arrangement(&disasm, operands, &name)
+        }
+
+        Op::MLA | Op::MLS | Op::SQRDMLAH | Op::SQRDMLSH | Op::FCMLA | Op::FMULX => {
+            ft(&mut edges, next_pc);
+            let name = format!("{:?}", insn.op()).to_lowercase();
+            lift_intrinsic_with_lane_operand(&disasm, operands, &name, 2)
         }
 
         // SIMD loads/stores
@@ -1044,7 +1069,7 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         | Op::ST4 => {
             ft(&mut edges, next_pc);
             let name = format!("{:?}", insn.op()).to_lowercase();
-            lift_intrinsic_all(operands, &name)
+            lift_intrinsic_all_with_arrangement(&disasm, operands, &name)
         }
 
         // ── Atomics ────────────────────────────────────────────────
@@ -1065,14 +1090,18 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         | Op::CAS
         | Op::CASA
         | Op::CASAL
-        | Op::CASL
-        | Op::LDAXP
-        | Op::LDXP
-        | Op::STLXP
-        | Op::STXP => {
+        | Op::CASL => {
             ft(&mut edges, next_pc);
             let name = format!("{:?}", insn.op()).to_lowercase();
             lift_intrinsic_all(operands, &name)
+        }
+        Op::LDAXP | Op::LDXP => {
+            ft(&mut edges, next_pc);
+            lift_load_pair_exclusive(operands)
+        }
+        Op::STLXP | Op::STXP => {
+            ft(&mut edges, next_pc);
+            lift_store_pair_exclusive(operands)
         }
 
         // ── Crypto ─────────────────────────────────────────────────
@@ -1106,15 +1135,18 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         // ── System / NOP / Hints ───────────────────────────────────
         Op::NOP | Op::YIELD | Op::HINT => {
             ft(&mut edges, next_pc);
-            Stmt::Nop
+            let name = format!("{:?}", insn.op()).to_lowercase();
+            lift_intrinsic_all(operands, &name)
         }
         Op::PACIASP | Op::AUTIASP | Op::BTI | Op::XPACLRI => {
             ft(&mut edges, next_pc);
-            Stmt::Nop
+            let name = format!("{:?}", insn.op()).to_lowercase();
+            lift_intrinsic_all(operands, &name)
         }
         Op::PRFM | Op::PRFUM => {
             ft(&mut edges, next_pc);
-            Stmt::Nop
+            let name = format!("{:?}", insn.op()).to_lowercase();
+            lift_intrinsic_all(operands, &name)
         }
         Op::DMB | Op::DSB | Op::ISB => {
             ft(&mut edges, next_pc);
@@ -1122,9 +1154,17 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         }
         Op::CLREX => {
             ft(&mut edges, next_pc);
-            Stmt::Nop
+            let name = format!("{:?}", insn.op()).to_lowercase();
+            lift_intrinsic_all(operands, &name)
         }
-        Op::BRK | Op::UDF => Stmt::Trap,
+        Op::BRK => Stmt::Trap {
+            kind: TrapKind::Brk,
+            imm: imm_val(operands, 0) as u16,
+        },
+        Op::UDF => Stmt::Trap {
+            kind: TrapKind::Udf,
+            imm: imm_val(operands, 0) as u16,
+        },
         Op::SVC | Op::HVC | Op::SMC => {
             ft(&mut edges, next_pc);
             lift_intrinsic_all(operands, &format!("{:?}", insn.op()).to_lowercase())
@@ -1218,12 +1258,157 @@ fn lift_unary_intrinsic(operands: &[Operand], name: &str) -> Stmt {
     }
 }
 
+fn lift_unary_intrinsic_with_arrangement(disasm: &str, operands: &[Operand], name: &str) -> Stmt {
+    let dst = reg_op(operands, 0);
+    let a = expr_op(operands, 1);
+    Stmt::Assign {
+        dst,
+        src: e_intrinsic(&intrinsic_name_with_arrangement(disasm, name), vec![a]),
+    }
+}
+
 fn lift_intrinsic_all(operands: &[Operand], name: &str) -> Stmt {
     let ops: Vec<Expr> = operands.iter().map(|o| expr_from_operand(o)).collect();
     Stmt::Intrinsic {
         name: name.to_string(),
         operands: ops,
     }
+}
+
+fn lift_intrinsic_all_with_arrangement(disasm: &str, operands: &[Operand], name: &str) -> Stmt {
+    lift_intrinsic_all(operands, &intrinsic_name_with_arrangement(disasm, name))
+}
+
+fn lift_vector_immediate_intrinsic(disasm: &str, operands: &[Operand], name: &str) -> Stmt {
+    let mut ops = Vec::with_capacity(operands.len());
+    if let Some(dst) = operands.first().and_then(operand_to_reg) {
+        ops.push(Expr::Reg(dst));
+    }
+    ops.extend(operands.iter().skip(1).map(expr_from_operand));
+    Stmt::Intrinsic {
+        name: intrinsic_name_with_arrangement(disasm, name),
+        operands: ops,
+    }
+}
+
+fn lift_intrinsic_with_lane_operand(
+    disasm: &str,
+    operands: &[Operand],
+    name: &str,
+    lane_operand_index: usize,
+) -> Stmt {
+    let mut ops = Vec::with_capacity(operands.len());
+    for (index, operand) in operands.iter().enumerate() {
+        let expr = if index == lane_operand_index {
+            parse_lane_operand(disasm, index)
+                .map(|(reg, lsb, width)| e_extract(Expr::Reg(reg), lsb, width))
+                .unwrap_or_else(|| expr_from_operand(operand))
+        } else {
+            expr_from_operand(operand)
+        };
+        ops.push(expr);
+    }
+    Stmt::Intrinsic {
+        name: intrinsic_name_with_arrangement(disasm, name),
+        operands: ops,
+    }
+}
+
+fn lift_widening_lane_mul_intrinsic(disasm: &str, operands: &[Operand], name: &str) -> Stmt {
+    let mut ops = Vec::with_capacity(3);
+    ops.push(Expr::Reg(reg_op(operands, 0)));
+    ops.push(expr_op(operands, 1));
+    let scalar = parse_lane_operand(disasm, 2)
+        .map(|(reg, lsb, width)| e_extract(Expr::Reg(reg), lsb, width))
+        .unwrap_or_else(|| expr_op(operands, 2));
+    ops.push(scalar);
+    Stmt::Intrinsic {
+        name: intrinsic_name_with_arrangement(disasm, name),
+        operands: ops,
+    }
+}
+
+fn lift_lane_move(disasm: &str, operands: &[Operand], signed: bool) -> Stmt {
+    let dst = reg_op(operands, 0);
+    let Some((src_reg, lsb, width)) = parse_lane_operand(disasm, 1) else {
+        let name = if signed { "smov" } else { "umov" };
+        return lift_intrinsic_all(operands, name);
+    };
+
+    let extracted = e_extract(Expr::Reg(src_reg), lsb, width);
+    let src = if signed {
+        e_sign_extend(extracted, width)
+    } else {
+        extracted
+    };
+    Stmt::Assign { dst, src }
+}
+
+fn intrinsic_name_with_arrangement(disasm: &str, name: &str) -> String {
+    match first_vector_arrangement(disasm) {
+        Some(arrangement) => format!("{name}.{arrangement}"),
+        None => name.to_string(),
+    }
+}
+
+fn first_vector_arrangement(disasm: &str) -> Option<String> {
+    let (_, operands) = disasm.split_once(' ')?;
+    let first = operands
+        .split(',')
+        .next()?
+        .trim()
+        .trim_start_matches('{')
+        .trim_end_matches('}');
+    let (_, arrangement) = first.split_once('.')?;
+    if arrangement.chars().next()?.is_ascii_digit() {
+        Some(arrangement.to_string())
+    } else {
+        None
+    }
+}
+
+fn parse_lane_operand(disasm: &str, operand_index: usize) -> Option<(Reg, u8, u8)> {
+    let (_, operands) = disasm.split_once(' ')?;
+    let operand = operands.split(',').nth(operand_index)?.trim();
+    let (base, lane_spec) = operand.split_once('.')?;
+    let reg = reg_from_string(base)?;
+    let (lane_name, lane_index) = lane_spec.split_once('[')?;
+    let lane_index = lane_index.strip_suffix(']')?.parse::<u8>().ok()?;
+    let lane_bits = match lane_name.chars().next()? {
+        'b' => 8,
+        'h' => 16,
+        's' => 32,
+        'd' => 64,
+        _ => return None,
+    };
+    let lsb = lane_index.checked_mul(lane_bits)?;
+    Some((reg, lsb, lane_bits))
+}
+
+fn lift_bitfield(op: Op, operands: &[Operand]) -> Stmt {
+    let dst = reg_op(operands, 0);
+    let src = expr_op(operands, 1);
+    let lsb = imm_val(operands, 2) as u8;
+    let width = imm_val(operands, 3) as u8;
+    let reg_bits = operand_reg_size(operands, 0).max(1) * 8;
+
+    let src_low = e_extract(src.clone(), 0, width);
+    let src_field = e_extract(src, lsb, width);
+
+    let bitfield = match op {
+        Op::UBFIZ => e_shl(src_low, Expr::Imm(lsb as u64)),
+        Op::UBFX => src_field,
+        Op::SBFIZ => e_sign_extend(
+            e_shl(src_low, Expr::Imm(lsb as u64)),
+            (lsb + width).min(reg_bits),
+        ),
+        Op::SBFX => e_sign_extend(src_field, width.min(reg_bits)),
+        Op::BFI => e_insert(Expr::Reg(dst.clone()), src_low, lsb, width),
+        Op::BFXIL => e_insert(Expr::Reg(dst.clone()), src_field, 0, width),
+        _ => unreachable!("unsupported bitfield op: {:?}", op),
+    };
+
+    Stmt::Assign { dst, src: bitfield }
 }
 
 fn lift_load(operands: &[Operand], explicit_size: u8, signed: bool) -> Stmt {
@@ -1234,7 +1419,7 @@ fn lift_load(operands: &[Operand], explicit_size: u8, signed: bool) -> Stmt {
         explicit_size
     };
     let addr = if operands.len() > 1 {
-        mem_to_addr(&operands[1])
+        expr_from_operand(&operands[1])
     } else {
         Expr::Imm(0)
     };
@@ -1294,6 +1479,10 @@ fn lift_load_pair(operands: &[Operand], signed: bool) -> Stmt {
     }
 }
 
+fn lift_load_pair_exclusive(operands: &[Operand]) -> Stmt {
+    lift_load_pair(operands, false)
+}
+
 fn lift_store(operands: &[Operand], explicit_size: u8) -> Stmt {
     let value_expr = expr_op(operands, 0);
     let size = if explicit_size == 0 {
@@ -1328,13 +1517,59 @@ fn lift_store_exclusive(operands: &[Operand], explicit_size: u8) -> Stmt {
             explicit_size
         };
         let addr = mem_to_addr(&operands[2]);
-        Stmt::Store {
-            addr,
-            value: value_expr,
-            size,
+        let stmt = Stmt::Pair(
+            Box::new(Stmt::Store {
+                addr,
+                value: value_expr,
+                size,
+            }),
+            Box::new(Stmt::Assign {
+                dst: reg_op(operands, 0),
+                src: Expr::Imm(0),
+            }),
+        );
+        if let Some(mem) = operands.get(2) {
+            wrap_mem_writeback(mem, stmt)
+        } else {
+            stmt
         }
     } else {
         lift_store(operands, explicit_size)
+    }
+}
+
+fn lift_store_pair_exclusive(operands: &[Operand]) -> Stmt {
+    // STXP Ws, Xt1, Xt2, [Xn]
+    if operands.len() >= 4 {
+        let val1 = expr_op(operands, 1);
+        let val2 = expr_op(operands, 2);
+        let size = operand_reg_size(operands, 1);
+        let addr = mem_to_addr(&operands[3]);
+        let stmt = Stmt::Pair(
+            Box::new(Stmt::Pair(
+                Box::new(Stmt::Store {
+                    addr: addr.clone(),
+                    value: val1,
+                    size,
+                }),
+                Box::new(Stmt::Store {
+                    addr: e_add(addr, Expr::Imm(size as u64)),
+                    value: val2,
+                    size,
+                }),
+            )),
+            Box::new(Stmt::Assign {
+                dst: reg_op(operands, 0),
+                src: Expr::Imm(0),
+            }),
+        );
+        if let Some(mem) = operands.get(3) {
+            wrap_mem_writeback(mem, stmt)
+        } else {
+            stmt
+        }
+    } else {
+        lift_store_pair(operands)
     }
 }
 
@@ -1612,7 +1847,10 @@ fn mem_writeback(mem: &Operand) -> Option<(Reg, Expr)> {
     match mem {
         Operand::MemPreIdx { reg, imm } | Operand::MemPostIdxImm { reg, imm } => {
             let reg = reg_from_bad64(*reg)?;
-            Some((reg.clone(), e_add(Expr::Reg(reg), Expr::Imm(imm_to_u64(imm)))))
+            Some((
+                reg.clone(),
+                e_add(Expr::Reg(reg), Expr::Imm(imm_to_u64(imm))),
+            ))
         }
         Operand::MemPostIdxReg(regs) => {
             let base = reg_from_bad64(regs[0])?;
@@ -1925,6 +2163,158 @@ mod tests {
     }
 
     #[test]
+    fn lifts_ldr_literal_as_absolute_load() {
+        let pc = 0x9b6117ac;
+        let result = lift_word(0x5800_11c0, pc);
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Assign {
+                dst: Reg::X(0),
+                src: e_load(Expr::Imm(0x9b6119e4), 8),
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_vector_movi_with_arrangement() {
+        let pc = 0x4cbe0;
+        let result = lift_word(0x6f07_e7e0, pc);
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Intrinsic {
+                name: "movi.2d".to_string(),
+                operands: vec![Expr::Reg(Reg::V(0)), Expr::Imm(u64::MAX)],
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_cmeq_with_arrangement() {
+        let pc = 0x4cc14;
+        let result = lift_word(0x2ea1_8c01, pc);
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Intrinsic {
+                name: "cmeq.2s".to_string(),
+                operands: vec![
+                    Expr::Reg(Reg::V(1)),
+                    Expr::Reg(Reg::V(0)),
+                    Expr::Reg(Reg::V(1)),
+                ],
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_bif_with_arrangement() {
+        let pc = 0x4cc18;
+        let result = lift_word(0x2ee1_1c02, pc);
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Intrinsic {
+                name: "bif.8b".to_string(),
+                operands: vec![
+                    Expr::Reg(Reg::V(2)),
+                    Expr::Reg(Reg::V(0)),
+                    Expr::Reg(Reg::V(1)),
+                ],
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_umov_lane_extract() {
+        let pc = 0x73b69c;
+        let result = lift_word(0x0e02_3c1a, pc);
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Assign {
+                dst: Reg::W(26),
+                src: e_extract(Expr::Reg(Reg::V(0)), 0, 16),
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_vector_add_with_arrangement() {
+        let pc = 0x73b4bc;
+        let result = lift_word(0x4ee0_8420, pc);
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Intrinsic {
+                name: "add.2d".to_string(),
+                operands: vec![
+                    Expr::Reg(Reg::V(0)),
+                    Expr::Reg(Reg::V(1)),
+                    Expr::Reg(Reg::V(0)),
+                ],
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_ldxp_as_pair_load() {
+        let pc = 0x297678;
+        let result = lift_word(0xc87f_2120, pc);
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Pair(
+                Box::new(Stmt::Assign {
+                    dst: Reg::X(0),
+                    src: e_load(Expr::Reg(Reg::X(9)), 8),
+                }),
+                Box::new(Stmt::Assign {
+                    dst: Reg::X(8),
+                    src: e_load(e_add(Expr::Reg(Reg::X(9)), Expr::Imm(8)), 8),
+                }),
+            )
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_stxp_as_pair_store_and_success_status() {
+        let pc = 0x29767c;
+        let result = lift_word(0xc82a_2120, pc);
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Pair(
+                Box::new(Stmt::Pair(
+                    Box::new(Stmt::Store {
+                        addr: Expr::Reg(Reg::X(9)),
+                        value: Expr::Reg(Reg::X(0)),
+                        size: 8,
+                    }),
+                    Box::new(Stmt::Store {
+                        addr: e_add(Expr::Reg(Reg::X(9)), Expr::Imm(8)),
+                        value: Expr::Reg(Reg::X(8)),
+                        size: 8,
+                    }),
+                )),
+                Box::new(Stmt::Assign {
+                    dst: Reg::W(10),
+                    src: Expr::Imm(0),
+                }),
+            )
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
     fn lifts_char_respawn_cmp_x8_x9() {
         let pc = 0x07a34a9c;
         let result = lift_word(0xeb09_011f, pc);
@@ -2168,6 +2558,229 @@ mod tests {
                     src: e_add(Expr::Reg(Reg::SP), Expr::Imm(32)),
                 }),
             )
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_vector_fcvtzu_as_arranged_intrinsic() {
+        let pc = 0x6000;
+        let result = lift_word(0x6f4e_fd10, pc); // fcvtzu v16.2d, v8.2d, #0x32
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Assign {
+                dst: Reg::V(16),
+                src: e_intrinsic("fcvtzu.2d", vec![Expr::Reg(Reg::V(8))]),
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_vector_ucvtf_as_arranged_intrinsic() {
+        let pc = 0x7000;
+        let result = lift_word(0x6f44_e460, pc); // ucvtf v0.2d, v3.2d, #0x3c
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Assign {
+                dst: Reg::V(0),
+                src: e_intrinsic("ucvtf.2d", vec![Expr::Reg(Reg::V(3))]),
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_sri_with_arrangement() {
+        let pc = 0x7800;
+        let result = lift_word(0x6f4b_46f8, pc); // sri v24.2d, v23.2d, #0x35
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Intrinsic {
+                name: "sri.2d".to_string(),
+                operands: vec![
+                    Expr::Reg(Reg::V(24)),
+                    Expr::Reg(Reg::V(23)),
+                    Expr::Imm(0x35)
+                ],
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_sqshlu_with_arrangement() {
+        let pc = 0x7900;
+        let result = lift_word(0x6f51_67d8, pc); // sqshlu v24.2d, v30.2d, #0x11
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Intrinsic {
+                name: "sqshlu.2d".to_string(),
+                operands: vec![
+                    Expr::Reg(Reg::V(24)),
+                    Expr::Reg(Reg::V(30)),
+                    Expr::Imm(0x11)
+                ],
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_ld1_with_arrangement_and_multireg_operand() {
+        let pc = 0x7a00;
+        let result = lift_word(0x0cdf_747f, pc); // ld1 {v31.8b}, [x3], #0x8
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Intrinsic {
+                name: "ld1.4h".to_string(),
+                operands: vec![
+                    Expr::Intrinsic {
+                        name: "multi_reg".to_string(),
+                        operands: vec![Expr::Reg(Reg::V(31))],
+                    },
+                    Expr::Reg(Reg::X(3)),
+                    Expr::Imm(0x8),
+                ],
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_st1_with_arrangement_and_multireg_operand() {
+        let pc = 0x7b00;
+        let result = lift_word(0x4c9f_761f, pc); // st1 {v31.8h}, [x16], #0x10
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Intrinsic {
+                name: "st1.8h".to_string(),
+                operands: vec![
+                    Expr::Intrinsic {
+                        name: "multi_reg".to_string(),
+                        operands: vec![Expr::Reg(Reg::V(31))],
+                    },
+                    Expr::Reg(Reg::X(16)),
+                    Expr::Imm(0x10),
+                ],
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_uqrshrn2_with_arrangement() {
+        let pc = 0x7c00;
+        let result = lift_word(0x6f3e_9f08, pc); // uqrshrn2 v8.4s, v24.2d, #0x2
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Intrinsic {
+                name: "uqrshrn2.4s".to_string(),
+                operands: vec![Expr::Reg(Reg::V(8)), Expr::Reg(Reg::V(24)), Expr::Imm(0x2)],
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_umull2_with_lane_extract_operand() {
+        let pc = 0x8000;
+        let result = lift_word(0x6f4b_a090, pc); // umull2 v16.4s, v4.8h, v11.h[0]
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Intrinsic {
+                name: "umull2.4s".to_string(),
+                operands: vec![
+                    Expr::Reg(Reg::V(16)),
+                    Expr::Reg(Reg::V(4)),
+                    e_extract(Expr::Reg(Reg::V(11)), 0, 16),
+                ],
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_mla_with_lane_extract_operand() {
+        let pc = 0x9000;
+        let result = lift_word(0x6f54_02a0, pc); // mla v0.8h, v21.8h, v4.h[1]
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Intrinsic {
+                name: "mla.8h".to_string(),
+                operands: vec![
+                    Expr::Reg(Reg::V(0)),
+                    Expr::Reg(Reg::V(21)),
+                    e_extract(Expr::Reg(Reg::V(4)), 16, 16),
+                ],
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_umlsl2_with_lane_extract_operand() {
+        let pc = 0x9800;
+        let result = lift_word(0x6f60_69f8, pc); // umlsl2 v24.4s, v15.8h, v0.h[6]
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Intrinsic {
+                name: "umlsl2.4s".to_string(),
+                operands: vec![
+                    Expr::Reg(Reg::V(24)),
+                    Expr::Reg(Reg::V(15)),
+                    e_extract(Expr::Reg(Reg::V(0)), 96, 16),
+                ],
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_fcmla_with_lane_extract_and_rotation_operand() {
+        let pc = 0xa000;
+        let result = lift_word(0x6f46_5b68, pc); // fcmla v8.8h, v27.8h, v6.h[2], #0xb4
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Intrinsic {
+                name: "fcmla.8h".to_string(),
+                operands: vec![
+                    Expr::Reg(Reg::V(8)),
+                    Expr::Reg(Reg::V(27)),
+                    e_extract(Expr::Reg(Reg::V(6)), 32, 16),
+                    Expr::Imm(0xb4),
+                ],
+            }
+        );
+        assert_eq!(result.edges, vec![pc + 4]);
+    }
+
+    #[test]
+    fn lifts_fmulx_with_lane_extract_operand() {
+        let pc = 0xa100;
+        let result = lift_word(0x6fc4_9038, pc); // fmulx v24.2d, v1.2d, v4.d[0]
+
+        assert_eq!(
+            result.stmt,
+            Stmt::Intrinsic {
+                name: "fmulx.2d".to_string(),
+                operands: vec![
+                    Expr::Reg(Reg::V(24)),
+                    Expr::Reg(Reg::V(1)),
+                    e_extract(Expr::Reg(Reg::V(4)), 0, 64),
+                ],
+            }
         );
         assert_eq!(result.edges, vec![pc + 4]);
     }

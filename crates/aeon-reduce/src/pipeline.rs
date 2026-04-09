@@ -256,7 +256,7 @@ fn collect_ssa_vars_in_stmt(stmt: &SsaStmt, vars: &mut HashSet<SsaVar>) {
             collect_ssa_vars_in_stmt(a, vars);
             collect_ssa_vars_in_stmt(b, vars);
         }
-        SsaStmt::Ret | SsaStmt::Nop | SsaStmt::Barrier(_) | SsaStmt::Trap => {}
+        SsaStmt::Ret | SsaStmt::Nop | SsaStmt::Barrier(_) | SsaStmt::Trap { .. } => {}
     }
 }
 

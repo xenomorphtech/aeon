@@ -60,4 +60,4 @@ x2  = 0x0           x3  = 0xb400007831a17620
 
 ## Capture Method
 
-Captured using `frida/jit_trace_gate.js` page-trap with `doFullProcessSnapshot()` — reads `/proc/PID/maps`, dumps all readable regions via `Memory.readByteArray()`, captures register context from exception handler. Snapshot taken via xerda-server (custom Frida) on Android emulator.
+Captured using `frida/jit_trace_gate.js` page-trap with `doFullProcessSnapshot()` — reads `/proc/PID/maps`, dumps all readable regions via `Memory.readByteArray()`, captures register context from exception handler. Snapshot taken via `/data/local/tmp/xerda-server` (custom Frida-compatible server) on Android emulator.

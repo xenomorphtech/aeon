@@ -1030,7 +1030,10 @@ mod tests {
                         0x4004,
                         Stmt::Assign {
                             dst: Reg::X(0),
-                            src: e_intrinsic("movk", vec![Expr::Reg(Reg::X(0)), Expr::Imm(0xCAFE0000)]),
+                            src: e_intrinsic(
+                                "movk",
+                                vec![Expr::Reg(Reg::X(0)), Expr::Imm(0xCAFE0000)],
+                            ),
                         },
                         vec![0x4008],
                     ),
@@ -1064,7 +1067,11 @@ mod tests {
         for (function_addr, instructions, golden_name) in cases {
             let actual = normalize_reduced_instructions_artifact(function_addr, &instructions);
             let expected = read_json(golden_path(golden_name));
-            assert_eq!(actual, expected, "synthetic golden mismatch for {}", golden_name);
+            assert_eq!(
+                actual, expected,
+                "synthetic golden mismatch for {}",
+                golden_name
+            );
         }
     }
 
@@ -1084,7 +1091,12 @@ mod tests {
                 golden_path(golden_name).to_str().unwrap(),
             )
             .expect("binary golden evaluation should succeed");
-            assert_eq!(run.outcome, RunOutcome::Passed, "golden mismatch at 0x{:x}", addr);
+            assert_eq!(
+                run.outcome,
+                RunOutcome::Passed,
+                "golden mismatch at 0x{:x}",
+                addr
+            );
         }
     }
 

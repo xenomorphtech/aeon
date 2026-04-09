@@ -1,7 +1,7 @@
 //! Core SSA types -- defines `SsaVar` (versioned variable), `SsaExpr`,
 //! `SsaStmt`, `SsaBranchCond`, and supporting register location/width types.
 
-use aeonil::Condition;
+use aeonil::{Condition, TrapKind};
 
 pub type BlockId = u32;
 
@@ -205,7 +205,10 @@ pub enum SsaStmt {
         expr: SsaExpr,
     },
     Barrier(String),
-    Trap,
+    Trap {
+        kind: TrapKind,
+        imm: u16,
+    },
     Intrinsic {
         name: String,
         operands: Vec<SsaExpr>,

@@ -113,10 +113,33 @@ pub fn fold_expr(expr: &Expr) -> Expr {
             }
             _ => folded,
         },
+        Expr::Intrinsic { name, operands } if name == "movk" && operands.len() == 2 => {
+            match (&operands[0], &operands[1]) {
+                (Expr::Imm(dst), Expr::Imm(src)) => {
+                    fold_movk(*dst, *src).map(Expr::Imm).unwrap_or(folded)
+                }
+                _ => folded,
+            }
+        }
 
         // Everything else: already recursively folded by map_subexprs
         _ => folded,
     }
+}
+
+fn fold_movk(dst: u64, src: u64) -> Option<u64> {
+    let shift = if src == 0 {
+        0
+    } else {
+        (src.trailing_zeros() / 16) * 16
+    };
+    if shift >= 64 {
+        return None;
+    }
+
+    let imm16 = (src >> shift) & 0xffff;
+    let mask = 0xffffu64 << shift;
+    Some((dst & !mask) | ((imm16 << shift) & mask))
 }
 
 /// Fold expressions inside a `BranchCond`.
@@ -248,6 +271,30 @@ mod tests {
                 src: Expr::Imm(3),
             }]
         );
+    }
+
+    #[test]
+    fn fold_movk_intrinsic_with_shifted_immediate() {
+        let expr = Expr::Intrinsic {
+            name: "movk".to_string(),
+            operands: vec![Expr::Imm(0x7140), e_shl(Expr::Imm(0xace0), Expr::Imm(16))],
+        };
+        assert_eq!(fold_expr(&expr), Expr::Imm(0xace0_7140));
+    }
+
+    #[test]
+    fn fold_nested_movk_chain_expr() {
+        let expr = Expr::Intrinsic {
+            name: "movk".to_string(),
+            operands: vec![
+                Expr::Intrinsic {
+                    name: "movk".to_string(),
+                    operands: vec![Expr::Imm(0x7140), e_shl(Expr::Imm(0xace0), Expr::Imm(16))],
+                },
+                e_shl(Expr::Imm(0x76), Expr::Imm(32)),
+            ],
+        };
+        assert_eq!(fold_expr(&expr), Expr::Imm(0x76_ace0_7140));
     }
 
     #[test]

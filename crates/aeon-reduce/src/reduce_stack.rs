@@ -412,7 +412,7 @@ fn rewrite_stmt(stmt: Stmt, has_fp: bool) -> Stmt {
             operands: operands.iter().map(|e| rewrite_expr(e, has_fp)).collect(),
         },
         // Statements with no expressions to rewrite
-        other @ (Stmt::Ret | Stmt::Nop | Stmt::Barrier(_) | Stmt::Trap) => other,
+        other @ (Stmt::Ret | Stmt::Nop | Stmt::Barrier(_) | Stmt::Trap { .. }) => other,
     }
 }
 
