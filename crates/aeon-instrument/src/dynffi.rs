@@ -1,4 +1,6 @@
 use std::ptr;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use aeon_jit::{
     BlockEnterCallback, BranchBridgeCallback, BranchTranslateCallback, JitContext,
@@ -11,7 +13,7 @@ use crate::dynruntime::{DynamicRuntime, DynamicRuntimeConfig, DynamicRuntimeStop
 fn dynffi_trace_path() -> &'static str {
     #[cfg(target_os = "android")]
     {
-        "/data/user/0/com.netmarble.thered/files/aeon_dyn_runtime.log"
+        "/data/local/tmp/aeon_dyn_runtime.log"
     }
     #[cfg(not(target_os = "android"))]
     {
@@ -26,6 +28,13 @@ fn dynffi_trace_line(message: &str) {
         .append(true)
         .open(dynffi_trace_path())
     {
+        #[cfg(unix)]
+        {
+            let _ = std::fs::set_permissions(
+                dynffi_trace_path(),
+                std::fs::Permissions::from_mode(0o644),
+            );
+        }
         let _ = writeln!(file, "{message}");
     }
 }
@@ -269,11 +278,15 @@ const LIBART_VISIBLY_INITIALIZED_CALLBACK_RUN_OFFSET: u64 = 0x2cd3c8;
 #[cfg(target_arch = "aarch64")]
 const LIBART_ART_QUICK_TO_INTERPRETER_BRIDGE_OFFSET: u64 = 0x222320;
 #[cfg(target_arch = "aarch64")]
+const LIBART_ART_QUICK_TEST_SUSPEND_OFFSET: u64 = 0x221c80;
+#[cfg(target_arch = "aarch64")]
 const LIBART_ART_QUICK_LOCK_OBJECT_OFFSET: u64 = 0x218d80;
 #[cfg(target_arch = "aarch64")]
 const LIBART_NTERP_COMMON_INVOKE_STATIC_OFFSET: u64 = 0x21160c;
 #[cfg(target_arch = "aarch64")]
 const LIBART_ART_QUICK_INVOKE_STUB_OFFSET: u64 = 0x218968;
+#[cfg(target_arch = "aarch64")]
+const LIBART_ART_QUICK_UPDATE_INLINE_CACHE_OFFSET: u64 = 0x224bf0;
 
 #[cfg(target_arch = "aarch64")]
 fn dynamic_should_bail_art_checkpoint_jni_start(ctx: &JitContext, target: u64) -> bool {
@@ -307,6 +320,16 @@ fn dynamic_should_bail_art_checkpoint_jni_start(ctx: &JitContext, target: u64) -
 }
 
 #[cfg(target_arch = "aarch64")]
+fn dynamic_art_jni_start_kind(target: u64) -> Option<&'static str> {
+    let target_off = dynamic_module_file_offset(target, "libart.so")?;
+    match target_off {
+        LIBART_JNI_METHOD_START_OFFSET => Some("art_jni_method_start"),
+        LIBART_JNI_METHOD_START_SYNC_OFFSET => Some("art_jni_method_start_sync"),
+        _ => None,
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
 fn dynamic_should_bail_art_runtime_stub(target: u64) -> Option<&'static str> {
     let target_off = dynamic_module_file_offset(target, "libart.so")?;
     match target_off {
@@ -314,8 +337,36 @@ fn dynamic_should_bail_art_runtime_stub(target: u64) -> Option<&'static str> {
         LIBART_ART_QUICK_LOCK_OBJECT_OFFSET => Some("art_quick_lock_object"),
         LIBART_NTERP_COMMON_INVOKE_STATIC_OFFSET => Some("nterp_common_invoke_static"),
         LIBART_ART_QUICK_INVOKE_STUB_OFFSET => Some("art_quick_invoke_stub"),
+        LIBART_ART_QUICK_UPDATE_INLINE_CACHE_OFFSET => Some("art_quick_update_inline_cache"),
         _ => None,
     }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn dynamic_has_nearby_ret(pc: u64) -> bool {
+    if !dynamic_ptr_in_code_range(pc) || !dynamic_has_readable_mapping(pc, 16) {
+        return false;
+    }
+    unsafe {
+        for i in 0..4u64 {
+            let word = *((pc + i * 4) as *const u32);
+            if word == 0xd65f03c0 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(target_arch = "aarch64")]
+fn dynamic_should_bail_external_return(ctx: &JitContext, target: u64) -> bool {
+    if target == 0 || dynamic_ptr_in_code_range(target) {
+        return false;
+    }
+    if !dynamic_has_executable_mapping(target) {
+        return false;
+    }
+    dynamic_has_nearby_ret(ctx.pc)
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -527,9 +578,22 @@ pub unsafe extern "C" fn aeon_dyn_runtime_branch_bridge(
     target: u64,
 ) -> u64 {
     if let Some(ctx_ref) = ctx.as_mut() {
+        aeon_dyn_branch_bridge_stage = 0xbb01;
+        aeon_dyn_branch_bridge_last_target = target;
+        aeon_dyn_branch_bridge_saved_x30 = ctx_ref.x[30];
+        aeon_dyn_branch_bridge_resume_target = 0;
+        aeon_dyn_branch_bridge_ctx_pc = ctx_ref.pc;
+
+        aeon_dyn_branch_bridge_stage = 0xbb02;
         dynffi_trace_bridge_probe(ctx_ref, target);
+        aeon_dyn_branch_bridge_stage = 0xbb03;
+
+        let libart_off = dynamic_module_file_offset(target, "libart.so");
+        let nearby_ret = dynamic_has_nearby_ret(ctx_ref.pc);
+        aeon_dyn_branch_bridge_stage = 0xbb04;
+
         if dynamic_should_bail_art_checkpoint_jni_start(ctx_ref, target) {
-            let resume_pc = ctx_ref.pc;
+            let resume_pc = dynamic_choose_bail_resume_pc(ctx_ref);
             dynffi_trace_line(&format!(
                 "branch_bridge special_bail kind=art_jni_checkpoint ctx_pc=0x{:x} target=0x{:x} resume=0x{:x} lr=0x{:x}",
                 ctx_ref.pc, target, resume_pc, ctx_ref.x[30]
@@ -542,8 +606,62 @@ pub unsafe extern "C" fn aeon_dyn_runtime_branch_bridge(
             aeon_dyn_branch_bridge_ctx_pc = ctx_ref.pc;
             return AEON_DYN_BAIL_SENTINEL;
         }
+        aeon_dyn_branch_bridge_stage = 0xbb05;
+
+        if let Some(kind) = dynamic_art_jni_start_kind(target) {
+            let resume_pc = if dynamic_ptr_in_code_range(ctx_ref.x[30]) {
+                ctx_ref.x[30]
+            } else {
+                ctx_ref.pc
+            };
+            dynffi_trace_line(&format!(
+                "branch_bridge special_bail kind={kind} ctx_pc=0x{:x} target=0x{:x} resume=0x{:x} lr=0x{:x}",
+                ctx_ref.pc, target, resume_pc, ctx_ref.x[30]
+            ));
+            ctx_ref.pc = resume_pc;
+            aeon_dyn_branch_bridge_stage = 0xbac0;
+            aeon_dyn_branch_bridge_last_target = target;
+            aeon_dyn_branch_bridge_saved_x30 = ctx_ref.x[30];
+            aeon_dyn_branch_bridge_resume_target = resume_pc;
+            aeon_dyn_branch_bridge_ctx_pc = ctx_ref.pc;
+            return AEON_DYN_BAIL_SENTINEL;
+        }
+        aeon_dyn_branch_bridge_stage = 0xbb055;
+
+        if dynamic_module_file_offset(target, "libart.so") == Some(LIBART_ART_QUICK_TEST_SUSPEND_OFFSET) {
+            let resume_pc = dynamic_choose_bail_resume_pc(ctx_ref);
+            dynffi_trace_line(&format!(
+                "branch_bridge special_bail kind=art_quick_test_suspend ctx_pc=0x{:x} target=0x{:x} resume=0x{:x} lr=0x{:x}",
+                ctx_ref.pc, target, resume_pc, ctx_ref.x[30]
+            ));
+            ctx_ref.pc = resume_pc;
+            aeon_dyn_branch_bridge_stage = 0xbac2;
+            aeon_dyn_branch_bridge_last_target = target;
+            aeon_dyn_branch_bridge_saved_x30 = ctx_ref.x[30];
+            aeon_dyn_branch_bridge_resume_target = resume_pc;
+            aeon_dyn_branch_bridge_ctx_pc = ctx_ref.pc;
+            return AEON_DYN_BAIL_SENTINEL;
+        }
+        aeon_dyn_branch_bridge_stage = 0xbb056;
+
+        if dynamic_module_file_offset(target, "libart.so") == Some(LIBART_ART_QUICK_TO_INTERPRETER_BRIDGE_OFFSET) {
+            let resume_pc = dynamic_choose_bail_resume_pc(ctx_ref);
+            dynffi_trace_line(&format!(
+                "branch_bridge special_bail kind=art_quick_to_interpreter_bridge_resume ctx_pc=0x{:x} target=0x{:x} resume=0x{:x} lr=0x{:x}",
+                ctx_ref.pc, target, resume_pc, ctx_ref.x[30]
+            ));
+            ctx_ref.pc = resume_pc;
+            aeon_dyn_branch_bridge_stage = 0xbac3;
+            aeon_dyn_branch_bridge_last_target = target;
+            aeon_dyn_branch_bridge_saved_x30 = ctx_ref.x[30];
+            aeon_dyn_branch_bridge_resume_target = resume_pc;
+            aeon_dyn_branch_bridge_ctx_pc = ctx_ref.pc;
+            return AEON_DYN_BAIL_SENTINEL;
+        }
+        aeon_dyn_branch_bridge_stage = 0xbb0561;
+
         if let Some(kind) = dynamic_should_bail_art_runtime_stub(target) {
-            let resume_pc = ctx_ref.pc;
+            let resume_pc = target;
             dynffi_trace_line(&format!(
                 "branch_bridge special_bail kind={kind} ctx_pc=0x{:x} target=0x{:x} resume=0x{:x} lr=0x{:x}",
                 ctx_ref.pc, target, resume_pc, ctx_ref.x[30]
@@ -556,6 +674,24 @@ pub unsafe extern "C" fn aeon_dyn_runtime_branch_bridge(
             aeon_dyn_branch_bridge_ctx_pc = ctx_ref.pc;
             return AEON_DYN_BAIL_SENTINEL;
         }
+        aeon_dyn_branch_bridge_stage = 0xbb06;
+
+        if dynamic_should_bail_external_return(ctx_ref, target) {
+            let resume_pc = target;
+            dynffi_trace_line(&format!(
+                "branch_bridge special_bail kind=external_return ctx_pc=0x{:x} target=0x{:x} resume=0x{:x} lr=0x{:x}",
+                ctx_ref.pc, target, resume_pc, ctx_ref.x[30]
+            ));
+            ctx_ref.pc = resume_pc;
+            aeon_dyn_branch_bridge_stage = 0xbac1;
+            aeon_dyn_branch_bridge_last_target = target;
+            aeon_dyn_branch_bridge_saved_x30 = ctx_ref.x[30];
+            aeon_dyn_branch_bridge_resume_target = resume_pc;
+            aeon_dyn_branch_bridge_ctx_pc = ctx_ref.pc;
+            return AEON_DYN_BAIL_SENTINEL;
+        }
+        aeon_dyn_branch_bridge_stage = 0xbb07;
+
         if dynamic_is_non_callable_external_target(target) {
             let resume_pc = dynamic_choose_bail_resume_pc(ctx_ref);
             dynffi_trace_line(&format!(
@@ -570,6 +706,7 @@ pub unsafe extern "C" fn aeon_dyn_runtime_branch_bridge(
             aeon_dyn_branch_bridge_ctx_pc = ctx_ref.pc;
             return AEON_DYN_BAIL_SENTINEL;
         }
+        aeon_dyn_branch_bridge_stage = 0xbb08;
     }
     aeon_dyn_runtime_branch_bridge_impl(ctx, target)
 }

@@ -15,6 +15,8 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use half::f16;
 use std::fs::OpenOptions;
 use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
@@ -109,7 +111,7 @@ static BLOCK_COUNTERS_LEN: AtomicUsize = AtomicUsize::new(0);
 fn native_log_path() -> &'static str {
     #[cfg(target_os = "android")]
     {
-        "/data/user/0/com.netmarble.thered/files/aeon_jit_native.log"
+        "/data/local/tmp/aeon_jit_native.log"
     }
     #[cfg(not(target_os = "android"))]
     {
@@ -123,6 +125,13 @@ fn native_log_line(message: &str) {
         .append(true)
         .open(native_log_path())
     {
+        #[cfg(unix)]
+        {
+            let _ = std::fs::set_permissions(
+                native_log_path(),
+                std::fs::Permissions::from_mode(0o644),
+            );
+        }
         let _ = writeln!(file, "{message}");
     }
 }
@@ -169,7 +178,11 @@ pub extern "C" fn on_branch_bridge(ctx: *mut JitContext, target: u64) -> u64 {
         return target;
     }
     let callback: BranchBridgeCallback = unsafe { std::mem::transmute(callback) };
-    callback(ctx, target)
+    let out = callback(ctx, target);
+    native_log_line(&format!(
+        "branch_bridge out ctx_pc=0x{ctx_pc:x} target=0x{target:x} out=0x{out:x}"
+    ));
+    out
 }
 
 pub extern "C" fn on_block_enter(block_id: u64) {

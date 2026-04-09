@@ -38,6 +38,40 @@ pub struct LoadedBinary {
     pub sections: Vec<SectionInfo>,
 }
 
+pub fn load_raw(path: &str, base_addr: u64) -> Result<LoadedBinary, Box<dyn std::error::Error>> {
+    let data = std::fs::read(path)?;
+    let size = data.len() as u64;
+    let text_name = ".text".to_string();
+
+    Ok(LoadedBinary {
+        data,
+        text_section_file_offset: 0,
+        text_section_addr: base_addr,
+        text_section_size: size,
+        functions: vec![FunctionInfo {
+            addr: base_addr,
+            size,
+            name: Some("raw_text".to_string()),
+        }],
+        segments: vec![Segment {
+            file_offset: 0,
+            vaddr: base_addr,
+            file_size: size,
+            mem_size: size,
+        }],
+        sections: vec![SectionInfo {
+            name: text_name,
+            address: base_addr,
+            size,
+            file_offset: 0,
+            file_size: size,
+            is_alloc: true,
+            is_writable: false,
+            is_executable: true,
+        }],
+    })
+}
+
 impl LoadedBinary {
     /// Get raw bytes for a function within .text
     pub fn function_bytes(&self, func: &FunctionInfo) -> Option<&[u8]> {

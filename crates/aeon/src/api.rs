@@ -33,6 +33,16 @@ impl AeonSession {
         })
     }
 
+    pub fn load_raw(path: &str, base_addr: u64) -> Result<Self, Box<dyn std::error::Error>> {
+        let binary = elf::load_raw(path, base_addr)?;
+        Ok(Self {
+            path: path.to_string(),
+            analysis_state: RefCell::new(AeonEngine::with_binary(binary.clone())),
+            binary,
+            function_cache: RefCell::new(HashMap::new()),
+        })
+    }
+
     pub fn path(&self) -> &str {
         &self.path
     }

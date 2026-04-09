@@ -63,9 +63,31 @@ impl AeonFrontend {
             .get("path")
             .and_then(|value| value.as_str())
             .ok_or("Missing required parameter: path")?;
+        let format = args
+            .get("format")
+            .and_then(|value| value.as_str())
+            .unwrap_or("elf");
 
-        let session =
-            aeon::AeonSession::load(path).map_err(|e| format!("Failed to load binary: {}", e))?;
+        let session = match format {
+            "elf" => aeon::AeonSession::load(path)
+                .map_err(|e| format!("Failed to load ELF binary: {}", e))?,
+            "raw" => {
+                let base_addr = args
+                    .get("base_addr")
+                    .and_then(|value| value.as_str())
+                    .ok_or("Missing required parameter for raw binaries: base_addr")?;
+                let base_addr = parse_hex(base_addr)
+                    .ok_or_else(|| format!("Invalid hex address for base_addr: {}", base_addr))?;
+                aeon::AeonSession::load_raw(path, base_addr)
+                    .map_err(|e| format!("Failed to load raw binary: {}", e))?
+            }
+            other => {
+                return Err(format!(
+                    "Unsupported binary format: {} (expected 'elf' or 'raw')",
+                    other
+                ))
+            }
+        };
         let result = session.summary();
         self.session = Some(session);
         Ok(result)
@@ -310,9 +332,11 @@ pub fn tools_list() -> Value {
     json!({
         "tools": [
             tool_schema("load_binary",
-                "Load an ELF binary for analysis. Must be called before other tools.",
+                "Load an ELF or raw AArch64 binary for analysis. Must be called before other tools.",
                 json!({"type": "object", "properties": {
-                    "path": {"type": "string", "description": "Path to ELF binary"}
+                    "path": {"type": "string", "description": "Path to binary"},
+                    "format": {"type": "string", "description": "Binary format: 'elf' or 'raw'", "default": "elf"},
+                    "base_addr": {"type": "string", "description": "Required for raw binaries: virtual base address in hex"}
                 }, "required": ["path"]})),
 
             tool_schema("list_functions",

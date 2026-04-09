@@ -6,6 +6,8 @@
 // using DynCfg, then executes them through aeon-jit.
 
 use aeon_jit::{JitCompiler, JitContext};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use crate::context::MemoryProvider;
 use crate::dyncfg::DynCfg;
@@ -29,6 +31,13 @@ fn dyn_trace_line(message: &str) {
         .append(true)
         .open(dyn_trace_path())
     {
+        #[cfg(unix)]
+        {
+            let _ = std::fs::set_permissions(
+                dyn_trace_path(),
+                std::fs::Permissions::from_mode(0o644),
+            );
+        }
         let _ = writeln!(file, "{message}");
     }
 }
