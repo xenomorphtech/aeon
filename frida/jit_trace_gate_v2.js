@@ -187,6 +187,14 @@
             installNmssCoreHooks: bootstrapEnabled('installNmssCoreHooks', false),
             delayMs: bootstrapNumber('bootstrapDelayMs', 8000),
         },
+        traceFile: {
+            path: '/data/local/tmp/aeon_capture/aeon_trace.log',
+            handle: null,
+            lines: 0,
+            bytes: 0,
+            lastWriteAt: 0,
+            error: null,
+        },
     };
 
     var PTR_MASK = ptr('0x00FFFFFFFFFFFFFF');
@@ -208,6 +216,7 @@
     var TRAP_WINDOW_DEVICE_DIR = '/data/local/tmp/aeon_capture/trap_windows';
     var FREEZE_STATUS_PATH = '/data/local/tmp/aeon_capture/freeze.json';
     var POST_RESUME_STAGE_PATH = '/data/local/tmp/aeon_capture/post_resume_stage.log';
+    var TRACE_HEARTBEAT_DEVICE_PATH = '/data/local/tmp/aeon_capture/aeon_trace.log';
     var ENABLE_POST_RESUME_DEBUG = false;
     var MEMDUMP_CHUNK = 0x10000;
     var originalCallCertExport = null;
@@ -421,6 +430,10 @@
             write: new NativeFunction(libc.getExportByName('write'), 'long', ['int', 'pointer', 'long']),
             read: new NativeFunction(libc.getExportByName('read'), 'long', ['int', 'pointer', 'long']),
             close: new NativeFunction(libc.getExportByName('close'), 'int', ['int']),
+            fopen: new NativeFunction(libc.getExportByName('fopen'), 'pointer', ['pointer', 'pointer']),
+            fwrite: new NativeFunction(libc.getExportByName('fwrite'), 'ulong', ['pointer', 'ulong', 'ulong', 'pointer']),
+            fflush: new NativeFunction(libc.getExportByName('fflush'), 'int', ['pointer']),
+            fclose: new NativeFunction(libc.getExportByName('fclose'), 'int', ['pointer']),
             mkdir: new NativeFunction(libc.getExportByName('mkdir'), 'int', ['pointer', 'int']),
             chmod: new NativeFunction(libc.getExportByName('chmod'), 'int', ['pointer', 'int']),
             kill: new NativeFunction(libc.getExportByName('kill'), 'int', ['int', 'int']),
@@ -469,6 +482,69 @@
         try {
             lc.chmod(Memory.allocUtf8String(path), mode);
         } catch (e) {}
+    }
+
+    function traceFileClose() {
+        try {
+            if (state.traceFile && state.traceFile.handle && !ptr(state.traceFile.handle).isNull()) {
+                memdumpGetLibc().fclose(state.traceFile.handle);
+            }
+        } catch (e) {}
+        if (state.traceFile) state.traceFile.handle = null;
+    }
+
+    function traceFileReset() {
+        traceFileClose();
+        try { memdumpMkdir('/data/local/tmp/aeon_capture'); } catch (e) {}
+        try { unlinkIfExists(TRACE_HEARTBEAT_DEVICE_PATH); } catch (e) {}
+        state.traceFile.lines = 0;
+        state.traceFile.bytes = 0;
+        state.traceFile.lastWriteAt = 0;
+        state.traceFile.error = null;
+    }
+
+    function traceFileEnsureOpen() {
+        if (state.traceFile.handle && !ptr(state.traceFile.handle).isNull()) return state.traceFile.handle;
+        try {
+            memdumpMkdir('/data/local/tmp/aeon_capture');
+            var lc = memdumpGetLibc();
+            var handle = lc.fopen(
+                Memory.allocUtf8String(TRACE_HEARTBEAT_DEVICE_PATH),
+                Memory.allocUtf8String('ab')
+            );
+            if (!handle || ptr(handle).isNull()) {
+                throw new Error('fopen failed path=' + TRACE_HEARTBEAT_DEVICE_PATH);
+            }
+            state.traceFile.handle = handle;
+            state.traceFile.error = null;
+            return handle;
+        } catch (e) {
+            state.traceFile.error = String(e);
+            noteFailure('trace file open', e);
+            return null;
+        }
+    }
+
+    function traceFileWriteLine(line) {
+        try {
+            var handle = traceFileEnsureOpen();
+            if (!handle) return false;
+            var text = String(line || '') + '\n';
+            var buf = Memory.allocUtf8String(text);
+            var wrote = memdumpGetLibc().fwrite(buf, 1, text.length, handle);
+            memdumpGetLibc().fflush(handle);
+            if (Number(wrote) !== text.length) {
+                throw new Error('short fwrite wrote=' + String(wrote) + ' expected=' + text.length);
+            }
+            state.traceFile.lines += 1;
+            state.traceFile.bytes += text.length;
+            state.traceFile.lastWriteAt = nowMillis();
+            return true;
+        } catch (e) {
+            state.traceFile.error = String(e);
+            noteFailure('trace file write', e);
+            return false;
+        }
     }
 
     function readTextFile(path) {
@@ -4827,16 +4903,18 @@
             event.edge = edgeKey;
             event.count = trapCount;
             pushException(event);
-            console.log('[CAPTURE] [GATE] corridor exception hit type=' + event.type +
-                        ' address=' + event.address +
-                        ' pc=' + event.pc +
-                        ' lr=' + event.lr +
-                        ' thread=' + (threadId === null || threadId === undefined ? 'unknown' : threadId) +
-                        ' page=' + event.page +
-                        ' edge=' + event.edge +
-                        ' count=' + trapCount +
-                        ' translated=' + (state.translated.armed ? 'true' : 'false') +
-                        ' dynamic=' + (state.dynamic.armed ? 'true' : 'false'));
+            if (trapCount <= 4 || (trapCount % 256) === 0) {
+                traceFileWriteLine('[CAPTURE] [GATE] corridor exception hit type=' + event.type +
+                    ' address=' + event.address +
+                    ' pc=' + event.pc +
+                    ' lr=' + event.lr +
+                    ' thread=' + (threadId === null || threadId === undefined ? 'unknown' : threadId) +
+                    ' page=' + event.page +
+                    ' edge=' + event.edge +
+                    ' count=' + trapCount +
+                    ' translated=' + (state.translated.armed ? 'true' : 'false') +
+                    ' dynamic=' + (state.dynamic.armed ? 'true' : 'false'));
+            }
             if (!(state.dynamic.armed || state.translated.armed) &&
                 (trapCount <= 4 || (trapCount % 1024) === 0)) {
                 console.log('[CAPTURE] [GATE] trapped execute fault type=' + event.type +
@@ -5268,7 +5346,9 @@
     }
     }
 
+    traceFileReset();
     console.log('[CAPTURE] [GATE] relay v2 passive until explicit arm');
+    console.log('[CAPTURE] [GATE] trace file path=' + TRACE_HEARTBEAT_DEVICE_PATH);
     console.log('[CAPTURE] [GATE] bootstrap delay ms=' + state.bootstrap.delayMs);
     setTimeout(runBootstrapActions, state.bootstrap.delayMs);
 })();

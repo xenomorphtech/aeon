@@ -36,6 +36,7 @@ DEFAULT_CHALLENGES = [
 DEVICE_RUNTIME_LOG = "/data/user/0/com.netmarble.thered/files/aeon_dyn_runtime.log"
 DEVICE_TRACE_JSONL = "/data/user/0/com.netmarble.thered/files/aeon_dyn_trace.jsonl"
 DEVICE_RUNTIME_LIB = "/data/local/tmp/libaeon_instrument.so"
+DEVICE_GATE_TRACE_LOG = "/data/local/tmp/aeon_capture/aeon_trace.log"
 TRANSLATED_DEVICE_ELF = "/data/local/tmp/jit_exec_alias_0x9b5fe000.translated.elf"
 TRANSLATED_DEVICE_MAP = "/data/local/tmp/jit_exec_alias_0x9b5fe000.translated.map.json.compact.blockmap.jsonl"
 RELAY_JS = "/home/sdancer/aeon/frida/jit_trace_gate_v2.js"
@@ -69,6 +70,34 @@ def read_text_tail(path: Path, max_chars: int = 20000) -> str:
     return data[-max_chars:]
 
 
+def device_file_size(path: str, timeout: int = 3) -> int | None:
+    try:
+        proc = subprocess.run(
+            [
+                "adb",
+                "-s",
+                "localhost:5555",
+                "shell",
+                "sh",
+                "-c",
+                f"if [ -f {path!r} ]; then wc -c < {path!r}; else echo 0; fi",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    if proc.returncode != 0:
+        return None
+    out = (proc.stdout or "").strip()
+    try:
+        return int(out) if out else 0
+    except ValueError:
+        return None
+
+
 def call_with_capture_watch(
     port: int,
     challenge: str,
@@ -93,7 +122,8 @@ def call_with_capture_watch(
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()
     deadline = time.time() + call_timeout + 20
-    last_hit_count = 0
+    last_keepalive_count = 0
+    last_trace_bytes = 0
     while True:
         if result["done"]:
             return str(result["value"])
@@ -105,10 +135,14 @@ def call_with_capture_watch(
             tail = read_text_tail(capture_out)
             if "Frida process ended" in tail:
                 return "ERR:frida process ended before /call completed"
-            hit_count = tail.count("corridor exception hit")
-            if hit_count > last_hit_count:
-                last_hit_count = hit_count
+            keepalive_count = tail.count("RPC keepalive extend trace_bytes=")
+            if keepalive_count > last_keepalive_count:
+                last_keepalive_count = keepalive_count
                 deadline = time.time() + 15
+        trace_bytes = device_file_size(DEVICE_GATE_TRACE_LOG)
+        if trace_bytes is not None and trace_bytes > last_trace_bytes:
+            last_trace_bytes = trace_bytes
+            deadline = time.time() + 15
         if time.time() >= deadline:
             return f"ERR:/call watchdog timeout after idle 15s (requested timeout {call_timeout}s)"
         time.sleep(1)
@@ -315,7 +349,7 @@ def run_one(
     }
 
     summary["adb_clear"] = adb_run(
-        ["shell", "rm", "-f", DEVICE_RUNTIME_LOG, DEVICE_TRACE_JSONL],
+        ["shell", "rm", "-f", DEVICE_RUNTIME_LOG, DEVICE_TRACE_JSONL, DEVICE_GATE_TRACE_LOG],
         timeout=adb_timeout,
     )
 
@@ -418,6 +452,10 @@ def run_one(
     )
     summary["adb_pull_trace"] = adb_run(
         ["pull", DEVICE_TRACE_JSONL, str(run_dir / "aeon_dyn_trace.jsonl")],
+        timeout=adb_timeout,
+    )
+    summary["adb_pull_gate_trace"] = adb_run(
+        ["pull", DEVICE_GATE_TRACE_LOG, str(run_dir / "aeon_trace.log")],
         timeout=adb_timeout,
     )
 

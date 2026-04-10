@@ -39,6 +39,7 @@ XERDA_SERVER_PATH = "/data/local/tmp/xerda-server"
 PACKAGE = "com.netmarble.thered"
 ADB = ["adb", "-s", "localhost:5555"]
 DEVICE_DIR = "/data/local/tmp/aeon_capture"
+TRACE_HEARTBEAT_DEVICE_PATH = f"{DEVICE_DIR}/aeon_trace.log"
 TRANSLATED_DEVICE_ELF = "/data/local/tmp/jit_exec_alias_0x9b5fe000.translated.elf"
 TRANSLATED_DEVICE_MAP = "/data/local/tmp/jit_exec_alias_0x9b5fe000.translated.map.json.compact.blockmap.jsonl"
 DYNAMIC_DEVICE_LIB = "/data/user/0/com.netmarble.thered/files/libaeon_instrument.so"
@@ -1018,6 +1019,27 @@ class FridaCLI:
         self.loaded_scripts = []
         self.trace_activity_at = 0.0
         self.trace_activity_count = 0
+        self.trace_activity_bytes = 0
+
+    def _poll_trace_file_size(self):
+        try:
+            proc = subprocess.run(
+                ADB + [
+                    "shell",
+                    "sh",
+                    "-c",
+                    f"if [ -f {shlex.quote(TRACE_HEARTBEAT_DEVICE_PATH)} ]; then wc -c < {shlex.quote(TRACE_HEARTBEAT_DEVICE_PATH)}; else echo 0; fi",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            if proc.returncode != 0:
+                return None
+            out = (proc.stdout or "").strip()
+            return int(out) if out else 0
+        except Exception:
+            return None
 
     def start(self, spawn=True, pid=None, agent_source=None):
         subprocess.run(
@@ -1056,9 +1078,6 @@ class FridaCLI:
                         log.info(f"[FRIDA] {line}")
                 if 'RPC ready' in line or 'nmsscr=' in line:
                     self.ready = True
-                if 'corridor exception hit' in line:
-                    self.trace_activity_at = time.time()
-                    self.trace_activity_count += 1
                 with self._rlines_lock:
                     self._lines.append(line)
                     if len(self._lines) > 500:
@@ -1103,6 +1122,8 @@ class FridaCLI:
                 return None
             deadline = None if timeout is None else (time.time() + timeout)
             last_activity_count = self.trace_activity_count
+            last_activity_bytes = self.trace_activity_bytes
+            next_trace_poll = 0.0
             while True:
                 time.sleep(0.15)
                 with self._rlines_lock:
@@ -1120,11 +1141,23 @@ class FridaCLI:
                     if payload.startswith("ERR:"):
                         return payload
                     return payload
-                if keepalive_on_activity and self.trace_activity_count > last_activity_count:
+                if keepalive_on_activity and time.time() >= next_trace_poll:
+                    next_trace_poll = time.time() + 1.0
+                    size = self._poll_trace_file_size()
+                    if size is not None and size > self.trace_activity_bytes:
+                        self.trace_activity_at = time.time()
+                        self.trace_activity_count += 1
+                        self.trace_activity_bytes = size
+                if keepalive_on_activity and (
+                    self.trace_activity_count > last_activity_count or
+                    self.trace_activity_bytes > last_activity_bytes
+                ):
                     last_activity_count = self.trace_activity_count
+                    last_activity_bytes = self.trace_activity_bytes
                     deadline = None if activity_idle_timeout is None else (self.trace_activity_at + activity_idle_timeout)
                     log.info(
-                        f"RPC keepalive extend hits={self.trace_activity_count} "
+                        f"RPC keepalive extend trace_bytes={self.trace_activity_bytes} "
+                        f"activity_count={self.trace_activity_count} "
                         f"idle_timeout={activity_idle_timeout}s"
                     )
                 if not self.alive:
