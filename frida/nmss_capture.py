@@ -54,6 +54,17 @@ log = logging.getLogger("capture")
 
 AGENT_JS = r"""
 'use strict';
+console.log('[CAPTURE] Agent boot pid=' + Process.id + ' arch=' + Process.arch);
+Process.setExceptionHandler(function(details) {
+    try {
+        console.log('[CAPTURE] Agent exception type=' + details.type +
+                    ' address=' + details.address +
+                    ' memory=' + JSON.stringify(details.memory || null));
+    } catch (e) {
+        console.log('[CAPTURE] Agent exception logging failed: ' + e);
+    }
+    return false;
+});
 var CERT_FN_OFFSET = 0x17ded0;
 var RESOLVE_ENCODER_OFFSET = 0x209dc4;
 var BLR_X8_OFFSET = 0x20b548;
@@ -728,8 +739,37 @@ rpc.exports = {
         });
     },
     callCert: function(c) {
-        var r=null; Java.performNow(function(){try{var i=getNmssInstance();
-        if(!i){r='NO_INSTANCE';return;} r=i.getCertValue(c); if(r)r=r.toString();}catch(e){r='ERR:'+e;}}); return r||'';
+        var r = null;
+        console.log('[CAPTURE] callCert stage=js-enter challenge=' + c);
+        try {
+            console.log('[CAPTURE] callCert stage=before-Java.performNow challenge=' + c);
+            Java.performNow(function () {
+                console.log('[CAPTURE] callCert stage=inside-Java.performNow challenge=' + c);
+                try {
+                    console.log('[CAPTURE] callCert stage=before-getNmssInstance challenge=' + c);
+                    var i = getNmssInstance();
+                    console.log('[CAPTURE] callCert stage=after-getNmssInstance challenge=' + c +
+                                ' has_instance=' + (!!i));
+                    if (!i) { r = 'NO_INSTANCE'; return; }
+                    console.log('[CAPTURE] callCert stage=before-getCertValue challenge=' + c);
+                    r = i.getCertValue(c);
+                    console.log('[CAPTURE] callCert stage=after-getCertValue challenge=' + c +
+                                ' token_null=' + (r === null || r === undefined));
+                    if (r) r = r.toString();
+                    console.log('[CAPTURE] callCert stage=after-toString challenge=' + c +
+                                ' token_len=' + (r ? r.length : 0));
+                } catch (e) {
+                    console.log('[CAPTURE] callCert stage=Java.performNow-exception challenge=' + c + ' err=' + e);
+                    r = 'ERR:' + e;
+                }
+            });
+            console.log('[CAPTURE] callCert stage=after-Java.performNow challenge=' + c +
+                        ' result_prefix=' + (r ? String(r).slice(0, 64) : '<null>'));
+        } catch (outer) {
+            console.log('[CAPTURE] callCert stage=outer-exception challenge=' + c + ' err=' + outer);
+            r = 'ERR:' + outer;
+        }
+        return r || '';
     },
     captureCert: function(c) {
         setupHook();
@@ -751,6 +791,17 @@ console.log('[CAPTURE] Agent loaded, RPC ready');
 
 MINIMAL_AGENT_JS = r"""
 'use strict';
+console.log('[CAPTURE] Minimal agent boot pid=' + Process.id + ' arch=' + Process.arch);
+Process.setExceptionHandler(function(details) {
+    try {
+        console.log('[CAPTURE] Minimal agent exception type=' + details.type +
+                    ' address=' + details.address +
+                    ' memory=' + JSON.stringify(details.memory || null));
+    } catch (e) {
+        console.log('[CAPTURE] Minimal agent exception logging failed: ' + e);
+    }
+    return false;
+});
 
 function resolveAppLoader() {
     var loader = null;
@@ -965,6 +1016,8 @@ class FridaCLI:
         self._lines = []
         self._rlines_lock = threading.Lock()
         self.loaded_scripts = []
+        self.trace_activity_at = 0.0
+        self.trace_activity_count = 0
 
     def start(self, spawn=True, pid=None, agent_source=None):
         subprocess.run(
@@ -993,17 +1046,34 @@ class FridaCLI:
                 line = line.rstrip('\n')
                 if '[CAPTURE]' in line:
                     log.info(f"[JS] {line}")
+                elif line:
+                    if line.startswith('[Remote::'):
+                        preview = line[:240]
+                        if len(line) > 240:
+                            preview += '...<truncated>'
+                        log.info(f"[FRIDA] {preview}")
+                    else:
+                        log.info(f"[FRIDA] {line}")
                 if 'RPC ready' in line or 'nmsscr=' in line:
                     self.ready = True
+                if 'corridor exception hit' in line:
+                    self.trace_activity_at = time.time()
+                    self.trace_activity_count += 1
                 with self._rlines_lock:
                     self._lines.append(line)
                     if len(self._lines) > 500:
                         self._lines = self._lines[-200:]
         except: pass
         self.alive = False
-        log.warning("Frida process ended")
+        rc = None
+        try:
+            if self.proc is not None:
+                rc = self.proc.poll()
+        except Exception:
+            rc = None
+        log.warning(f"Frida process ended rc={rc} ready={self.ready}")
 
-    def eval_rpc(self, expr, timeout=15):
+    def eval_rpc(self, expr, timeout=15, keepalive_on_activity=False, activity_idle_timeout=15):
         if not self.alive: return None
         with self._lock:
             with self._rlines_lock:
@@ -1031,8 +1101,9 @@ class FridaCLI:
             except:
                 self.alive = False
                 return None
-            deadline = time.time() + timeout
-            while time.time() < deadline:
+            deadline = None if timeout is None else (time.time() + timeout)
+            last_activity_count = self.trace_activity_count
+            while True:
                 time.sleep(0.15)
                 with self._rlines_lock:
                     snapshot = list(self._lines)
@@ -1049,7 +1120,17 @@ class FridaCLI:
                     if payload.startswith("ERR:"):
                         return payload
                     return payload
-            return None
+                if keepalive_on_activity and self.trace_activity_count > last_activity_count:
+                    last_activity_count = self.trace_activity_count
+                    deadline = None if activity_idle_timeout is None else (self.trace_activity_at + activity_idle_timeout)
+                    log.info(
+                        f"RPC keepalive extend hits={self.trace_activity_count} "
+                        f"idle_timeout={activity_idle_timeout}s"
+                    )
+                if not self.alive:
+                    return None
+                if deadline is not None and time.time() >= deadline:
+                    return None
 
     def kill(self):
         if self.proc:
@@ -1362,7 +1443,14 @@ class Handler(BaseHTTPRequestHandler):
             prepare = parse_bool_param(params, "prepare", default=False)
             fixed_trace = parse_bool_param(params, "fixed_trace", default=False)
             stalker = parse_bool_param(params, "stalker", default=False)
+            traced = parse_bool_param(params, "traced", default=False)
+            scope_mode = (params.get("scope_mode") or [None])[0]
             thread_ids = parse_thread_ids(params)
+            log.info(
+                f"/call start challenge={c} timeout={call_timeout} "
+                f"alive={bridge.alive} ready={bridge.ready} fixed_trace={fixed_trace} stalker={stalker} "
+                f"traced={traced} scope_mode={scope_mode or 'normal'}"
+            )
             prepare_result = prepare_cert_ready(c, timeout=min(call_timeout, 60)) if prepare and bridge.alive else None
             stalker_armed = bridge.eval_rpc(
                 "globalThis.__jitGateStalkerArm && globalThis.__jitGateStalkerArm()",
@@ -1375,7 +1463,29 @@ class Handler(BaseHTTPRequestHandler):
                     f"globalThis.__jitGateFixedThreadTraceArm && globalThis.__jitGateFixedThreadTraceArm({arm_arg})",
                     timeout=10,
                 )
-            result = bridge.eval_rpc(f"rpc.exports.callCert('{c}')", timeout=call_timeout)
+            call_started = time.time()
+            if scope_mode:
+                call_expr = (
+                    "(function(){"
+                    f"var __prev = globalThis.__jitGateSetCallScopeMode({json.dumps(scope_mode)});"
+                    f"try {{ return rpc.exports.{('callCertTraced' if traced else 'callCert')}("
+                    f"{json.dumps(c)}"
+                    "); }} finally { globalThis.__jitGateSetCallScopeMode(__prev || 'normal'); }"
+                    "})()"
+                )
+            else:
+                call_expr = f"rpc.exports.{('callCertTraced' if traced else 'callCert')}({json.dumps(c)})"
+            result = bridge.eval_rpc(
+                call_expr,
+                timeout=call_timeout,
+                keepalive_on_activity=True,
+                activity_idle_timeout=15,
+            )
+            log.info(
+                f"/call end challenge={c} elapsed={time.time() - call_started:.2f}s "
+                f"alive={bridge.alive} traced={traced} scope_mode={scope_mode or 'normal'} "
+                f"result_prefix={(result[:96] if isinstance(result, str) else result)}"
+            )
             page_trace_pending = None
             if bridge.alive:
                 pending_deadline = time.time() + 10.0
@@ -1617,7 +1727,7 @@ class Handler(BaseHTTPRequestHandler):
 
         elif parsed.path == "/dynamic/load":
             lib_path = (params.get("lib") or [DYNAMIC_DEVICE_LIB])[0]
-            expr = f"rpc.exports.jitGateDynamicLoad({json.dumps(lib_path)})"
+            expr = f"globalThis.__jitGateDynamicLoad({json.dumps(lib_path)})"
             result = bridge.eval_rpc(expr, timeout=120) if bridge.alive else None
             self._json(200, {
                 "lib": lib_path,
@@ -1627,24 +1737,27 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/dynamic/arm":
             lib_path = (params.get("lib") or [None])[0]
             min_pc = (params.get("min_pc") or params.get("minPc") or [None])[0]
+            trace_all_threads = parse_bool_param(params, "trace_all_threads", default=True)
             max_steps = parse_int_param(params, "max_steps", 4096, minimum=1, maximum=1_000_000)
             lib_arg = json.dumps(lib_path) if lib_path else "undefined"
             min_pc_arg = json.dumps(min_pc) if min_pc else "undefined"
-            expr = f"rpc.exports.jitGateDynamicArm({lib_arg}, {min_pc_arg}, {max_steps})"
+            trace_all_threads_arg = "true" if trace_all_threads else "false"
+            expr = f"globalThis.__jitGateDynamicArm({lib_arg}, {min_pc_arg}, {max_steps}, {trace_all_threads_arg})"
             result = bridge.eval_rpc(expr, timeout=120) if bridge.alive else None
             self._json(200, {
                 "lib": lib_path,
                 "min_pc": min_pc,
+                "trace_all_threads": trace_all_threads,
                 "max_steps": max_steps,
                 "result": result,
             })
 
         elif parsed.path == "/dynamic/status":
-            result = bridge.eval_rpc("rpc.exports.jitGateDynamicStatus()", timeout=10) if bridge.alive else None
+            result = bridge.eval_rpc("globalThis.__jitGateDynamicStatus()", timeout=10) if bridge.alive else None
             self._json(200, {"result": result})
 
         elif parsed.path == "/dynamic/clear":
-            result = bridge.eval_rpc("rpc.exports.jitGateDynamicClear()", timeout=10) if bridge.alive else None
+            result = bridge.eval_rpc("globalThis.__jitGateDynamicClear()", timeout=10) if bridge.alive else None
             self._json(200, {"result": result})
 
         elif parsed.path == "/pull":
@@ -1749,6 +1862,17 @@ def main():
             log.error("Game not running"); sys.exit(1)
         bridge.start(spawn=False, pid=int(pid), agent_source=agent_source)
     else:
+        try:
+            subprocess.run(
+                ADB + ["shell", "am", "force-stop", "com.netmarble.thered"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            log.info("Pre-spawn force-stop issued for com.netmarble.thered")
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"Pre-spawn force-stop failed: {exc}")
         bridge.start(spawn=True, agent_source=agent_source)
 
     log.info("Waiting for agent...")
