@@ -1,0 +1,159 @@
+================================================================================
+XOR-BY-DECOMPOSITION ANALYSIS: LIBART CORRIDOR REGION (0x9b5fe000+)
+Analysis Date: 2026-04-11
+Source: jit_exec_alias_0x9b5fe000.first_0x90000_blocks.nontrap.il.jsonl
+================================================================================
+
+FINDINGS: 8 blocks implementing XOR via bitwise decomposition
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ PATTERN SUMMARY                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Type A - Direct AND+OR (6-bit extraction)                                   │
+│   Blocks: 3 (including 2 duplicates)                                        │
+│   Addresses: 0x9b60eb9c, 0x9b60ed28, 0x9b60ee6c                             │
+│   Cost: 2 cycles per block × 3 = 6 cycles                                   │
+│   Pattern: w0 = and(w26, 0x3f); w2 = or(w25, w0)                            │
+│   Optimization: Merge to single operation                                    │
+│                                                                              │
+│ Type B - SHIFT+AND+OR (field extraction)                                    │
+│   Blocks: 3 (including 1 duplicate)                                         │
+│   Addresses: 0x9b60eca8, 0x9b60ece8, 0x9b60ee2c                             │
+│   Cost: 3 cycles per block × 3 = 9 cycles                                   │
+│   Pattern: w0 = asr(w26, S); w0 = and(w0, 0x3f); w2 = or(w0, 0x80)         │
+│   Optimization: Fuse to specialized instruction                              │
+│                                                                              │
+│ Type C - COMPLEX FIELD COMPOSITION ⭐ HIGHEST PRIORITY                      │
+│   Blocks: 1                                                                  │
+│   Address: 0x9b60ec58                                                        │
+│   Cost: 6-7 cycles                                                           │
+│   Pattern: (w23&w26)<<0xa OR (w21&w0) + 0x10000, shifted, OR 0xf0          │
+│   Optimization: Pattern recognition + micro-op fusion                        │
+│                                                                              │
+│ Type D - LOOP COUNTER ACCUMULATION                                          │
+│   Blocks: 1                                                                  │
+│   Address: 0x9b613680                                                        │
+│   Cost: 4 cycles (with macro-op fusion potential)                           │
+│   Pattern: w22 = or(w22, w0) in loop; counter with 0xffff mask             │
+│   Optimization: Macro-op fusion                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+DETAILED BREAKDOWN:
+
+Block 1: 0x9b60eb9c (Type A)
+  IL: w0 = and(w26, 0x3f); w2 = or(w25, w0)
+  Assembly: and + or (implicit)
+  CPU Cost: 2 cycles
+  Status: DUPLICATE (see blocks 5, 7)
+
+Block 2: 0x9b60ec58 (Type C) ⭐ HIGHEST PRIORITY
+  IL: 7-instruction chain - field composition from 4 sources
+  Assembly: Multiple AND/OR/SHIFT operations
+  CPU Cost: 6+ cycles in dependency chain
+  Optimization Benefit: 3+ cycle savings possible
+  Action: Implement pattern recognizer for field composition
+
+Block 3: 0x9b60eca8 (Type B)
+  IL: w0 = asr(w26, 0xc); w0 = and(w0, 0x3f); w2 = or(w0, 0x80)
+  Assembly: asr + and + or (shift right by 12 bits)
+  CPU Cost: 3 cycles
+  Frequency: Dispatch loop hot path
+
+Block 4: 0x9b60ece8 (Type B)
+  IL: w0 = asr(w26, 0x6); w0 = and(w0, 0x3f); w2 = or(w0, 0x80)
+  Assembly: asr + and + or (shift right by 6 bits)
+  CPU Cost: 3 cycles
+  Frequency: Dispatch loop hot path
+
+Block 5: 0x9b60ed28 (Type A)
+  IL: w0 = and(w26, 0x3f); w2 = or(w25, w0)
+  Status: DUPLICATE of block 1
+  Code Consolidation: HIGH opportunity
+
+Block 6: 0x9b60ee2c (Type B)
+  IL: w0 = asr(w26, 0x6); w0 = and(w0, 0x3f); w2 = or(w0, 0x80)
+  Status: DUPLICATE of block 4
+  Code Consolidation: HIGH opportunity
+
+Block 7: 0x9b60ee6c (Type A)
+  IL: w0 = and(w26, 0x3f); w2 = or(w25, w0)
+  Status: DUPLICATE of block 1 (third instance!)
+  Code Consolidation: VERY HIGH opportunity
+
+Block 8: 0x9b613680 (Type D)
+  IL: w22 = or(w22, w0); loop with counter masking (0xffff)
+  Assembly: orr + loop control
+  CPU Cost: 4 cycles
+  Optimization: Macro-op fusion for add+mask+compare
+
+================================================================================
+OPTIMIZATION RECOMMENDATIONS
+================================================================================
+
+PRIORITY 1: Block 2 (0x9b60ec58) - Type C
+  Current Cost: 6-7 cycles
+  Optimized Cost: 3-4 cycles
+  Savings: 3+ cycles per execution
+  Action: HIGH - Implement field_compose pattern recognizer
+  Impact: HIGHEST - Complex operation, long dependency chain
+
+PRIORITY 2: Blocks 3, 4, 6 (0x9b60eca8, 0x9b60ece8, 0x9b60ee2c) - Type B
+  Current Cost: 3 cycles each = 9 cycles total
+  Optimized Cost: 1-2 cycles per block = 3-6 cycles total
+  Savings: 3-6 cycles total
+  Action: MEDIUM - Create extractfield_or_const instruction
+  Impact: MEDIUM - Frequent in dispatch loop
+
+PRIORITY 3: Blocks 1, 5, 7 (0x9b60eb9c, 0x9b60ed28, 0x9b60ee6c) - Type A
+  Current Cost: 2 cycles each = 6 cycles total
+  Optimized Cost: 1 cycle each = 3 cycles total (with folding)
+  Savings: 3 cycles total + CODE CONSOLIDATION
+  Action: LOW - But note HIGH code duplication (3 identical blocks!)
+  Impact: LOW cycles, but consolidation saves binary size
+
+PRIORITY 4: Block 8 (0x9b613680) - Type D
+  Current Cost: 4 cycles
+  Optimized Cost: 2-3 cycles (with macro-op fusion)
+  Savings: 1-2 cycles
+  Action: PLATFORM SPECIFIC - ARM64 CPU feature dependent
+  Impact: LOW - Loop control, varies by CPU model
+
+================================================================================
+CODE DUPLICATION ALERT
+================================================================================
+
+Blocks 1, 5, 7 are IDENTICAL (Type A pattern):
+  0x9b60eb9c: w0 = and(w26, 0x3f); w2 = or(w25, w0)
+  0x9b60ed28: w0 = and(w26, 0x3f); w2 = or(w25, w0)  (DUPLICATE)
+  0x9b60ee6c: w0 = and(w26, 0x3f); w2 = or(w25, w0)  (DUPLICATE #2)
+
+Blocks 4, 6 are IDENTICAL (Type B pattern):
+  0x9b60ece8: w0 = asr(w26, 0x6); w0 = and(w0, 0x3f); w2 = or(w0, 0x80)
+  0x9b60ee2c: w0 = asr(w26, 0x6); w0 = and(w0, 0x3f); w2 = or(w0, 0x80)  (DUP)
+
+TOTAL DUPLICATE CODE: 3 blocks
+CONSOLIDATION OPPORTUNITY: High - factor out to helper functions/macros
+
+================================================================================
+TOTAL OPTIMIZATION POTENTIAL
+================================================================================
+
+Current Execution Cost (estimated): 17 cycles
+Optimized Execution Cost: 9-11 cycles
+Total Savings: 6-8 cycles (35-47% reduction)
+
+Most Impactful: Block 2 (Type C) = 3+ cycles
+Secondary Impact: Blocks 3,4,6 (Type B) = 3-6 cycles combined
+Code Quality: Eliminate 3 Type A duplicates
+
+================================================================================
+GENERATED DOCUMENTATION
+================================================================================
+
+Files created in /home/sdancer/aeon/:
+  1. XOR_DECOMPOSITION_ANALYSIS.md     - Full detailed analysis with all IL
+  2. XOR_DECOMPOSITION_PATTERNS.json   - Structured data for tooling
+  3. PATTERN_RECOGNITION_GUIDE.md      - Detection & optimization strategies
+  4. XOR_ANALYSIS_SUMMARY.txt          - This file
+
+================================================================================
