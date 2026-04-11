@@ -8,12 +8,19 @@ Endpoints:
     GET  /prepare?c=<hex16>       — plain readiness preflight before mem/dynamic hooks
     GET  /translated/load         — load translated JIT ELF + map into the live Frida session
     GET  /translated/arm          — arm translated JIT dispatch for execute faults in the trapped JIT window
+    GET  /translated/selective/arm — protect only selected translated pages and capture post-translation register candidates
+    GET  /translated/selective/status — selective translated probe status
+    GET  /translated/selective/clear — disable selective translated probe
     GET  /translated/status       — translated JIT dispatch status
     GET  /translated/clear        — disable translated JIT dispatch
     GET  /dynamic/load            — load resident dynamic Aeon runtime into the live Frida session
     GET  /dynamic/arm             — arm dynamic exact-PC JIT dispatch for execute faults in the trapped JIT window
     GET  /dynamic/status          — dynamic JIT dispatch status
     GET  /dynamic/clear           — disable dynamic JIT dispatch
+    GET  /eval-state/arm          — arm non-stop trap-context capture for live_cert_eval
+    GET  /eval-state/status       — evaluator-state capture status
+    GET  /eval-state/clear        — disarm evaluator-state capture
+    GET  /eval-state/pull         — pull captured evaluator-state json to host
     GET  /capture?c=<hex16>       — call + capture JIT hash state to disk
     GET  /trace?c=<hex16>         — capture JIT hash state + run Aeon JIT trace
     POST /eval                    — evaluate arbitrary JS in the REPL
@@ -37,7 +44,8 @@ XERDA_HOST_PORT = 27043
 XERDA_DEVICE_PORT = 27042
 XERDA_SERVER_PATH = "/data/local/tmp/xerda-server"
 PACKAGE = "com.netmarble.thered"
-ADB = ["adb", "-s", "localhost:5555"]
+ADB_SERIAL = os.environ.get("AEON_ADB_SERIAL", "localhost:5555")
+ADB = ["adb", "-s", ADB_SERIAL]
 DEVICE_DIR = "/data/local/tmp/aeon_capture"
 TRACE_HEARTBEAT_DEVICE_PATH = f"{DEVICE_DIR}/aeon_trace.log"
 TRANSLATED_DEVICE_ELF = "/data/local/tmp/jit_exec_alias_0x9b5fe000.translated.elf"
@@ -49,6 +57,8 @@ TRACE_PATH = os.path.join(OUTPUT_DIR, "trace.bin")
 DYNAMIC_TRACE_DEVICE_PATH = "/data/user/0/com.netmarble.thered/files/aeon_dyn_trace.jsonl"
 DYNAMIC_TRACE_HOST_PATH = os.path.join(OUTPUT_DIR, "dynamic_trace.jsonl")
 READY_CHALLENGE = "6BA4D60738580083"
+EVAL_STATE_DEVICE_PATH = f"{DEVICE_DIR}/eval_state.json"
+EVAL_STATE_HOST_DIR = os.path.join(REPO_ROOT, "capture", "manual", "eval_state")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("capture")
@@ -667,6 +677,10 @@ function prepareCertReadyCore(challenge, readyChallenge) {
     };
     Java.performNow(function () {
         try {
+            var dispatchTid = Process.getCurrentThreadId();
+            result.dispatch_tid = dispatchTid;
+            console.log('[CAPTURE] prepareCertReady stage=dispatch-enter challenge=' +
+                        requestedChallenge + ' tid=' + dispatchTid);
             var waitedActivity = waitForGameActivity(5000);
             if (waitedActivity) {
                 result.activity_class = waitedActivity.$className;
@@ -702,10 +716,15 @@ function prepareCertReadyCore(challenge, readyChallenge) {
             try { inst.onResume(); result.on_resume = 'ok'; } catch (e) { result.on_resume = 'ERR:' + e; }
             try { inst.run(warmChallenge); result.run = 'ok'; } catch (e) { result.run = 'ERR:' + e; }
             try {
+                console.log('[CAPTURE] prepareCertReady stage=before-getCertValue challenge=' +
+                            requestedChallenge + ' tid=' + Process.getCurrentThreadId());
                 var token = inst.getCertValue(requestedChallenge);
                 result.token = token ? token.toString() : '';
                 result.token_len = result.token.length;
                 result.ok = result.token_len > 0;
+                console.log('[CAPTURE] prepareCertReady stage=after-getCertValue challenge=' +
+                            requestedChallenge + ' tid=' + Process.getCurrentThreadId() +
+                            ' token_len=' + result.token_len);
             } catch (e) {
                 result.error = 'getCertValue ERR:' + e;
             }
@@ -741,23 +760,28 @@ rpc.exports = {
     },
     callCert: function(c) {
         var r = null;
-        console.log('[CAPTURE] callCert stage=js-enter challenge=' + c);
+        console.log('[CAPTURE] callCert stage=js-enter challenge=' + c +
+                    ' tid=' + Process.getCurrentThreadId());
         try {
             console.log('[CAPTURE] callCert stage=before-Java.performNow challenge=' + c);
             Java.performNow(function () {
-                console.log('[CAPTURE] callCert stage=inside-Java.performNow challenge=' + c);
+                console.log('[CAPTURE] callCert stage=inside-Java.performNow challenge=' + c +
+                            ' tid=' + Process.getCurrentThreadId());
                 try {
                     console.log('[CAPTURE] callCert stage=before-getNmssInstance challenge=' + c);
                     var i = getNmssInstance();
                     console.log('[CAPTURE] callCert stage=after-getNmssInstance challenge=' + c +
                                 ' has_instance=' + (!!i));
                     if (!i) { r = 'NO_INSTANCE'; return; }
-                    console.log('[CAPTURE] callCert stage=before-getCertValue challenge=' + c);
+                    console.log('[CAPTURE] callCert stage=before-getCertValue challenge=' + c +
+                                ' tid=' + Process.getCurrentThreadId());
                     r = i.getCertValue(c);
                     console.log('[CAPTURE] callCert stage=after-getCertValue challenge=' + c +
+                                ' tid=' + Process.getCurrentThreadId() +
                                 ' token_null=' + (r === null || r === undefined));
                     if (r) r = r.toString();
                     console.log('[CAPTURE] callCert stage=after-toString challenge=' + c +
+                                ' tid=' + Process.getCurrentThreadId() +
                                 ' token_len=' + (r ? r.length : 0));
                 } catch (e) {
                     console.log('[CAPTURE] callCert stage=Java.performNow-exception challenge=' + c + ' err=' + e);
@@ -944,6 +968,10 @@ function prepareCertReadyCore(challenge, readyChallenge) {
     };
     Java.performNow(function () {
         try {
+            var dispatchTid = Process.getCurrentThreadId();
+            result.dispatch_tid = dispatchTid;
+            console.log('[CAPTURE] minimal prepareCertReady stage=dispatch-enter challenge=' +
+                        requestedChallenge + ' tid=' + dispatchTid);
             var waitedActivity = waitForGameActivity(5000);
             if (waitedActivity) result.activity_class = waitedActivity.$className;
             var instanceInfo = getNmssInstance();
@@ -961,10 +989,15 @@ function prepareCertReadyCore(challenge, readyChallenge) {
             try { inst.onResume(); result.on_resume = 'ok'; } catch (e) { result.on_resume = 'ERR:' + e; }
             try { inst.run(warmChallenge); result.run = 'ok'; } catch (e) { result.run = 'ERR:' + e; }
             try {
+                console.log('[CAPTURE] minimal prepareCertReady stage=before-getCertValue challenge=' +
+                            requestedChallenge + ' tid=' + Process.getCurrentThreadId());
                 var token = inst.getCertValue(requestedChallenge);
                 result.token = token ? token.toString() : '';
                 result.token_len = result.token.length;
                 result.ok = result.token_len > 0;
+                console.log('[CAPTURE] minimal prepareCertReady stage=after-getCertValue challenge=' +
+                            requestedChallenge + ' tid=' + Process.getCurrentThreadId() +
+                            ' token_len=' + result.token_len);
             } catch (e) {
                 result.error = 'getCertValue ERR:' + e;
             }
@@ -988,12 +1021,22 @@ rpc.exports = {
     },
     callCert: function(c) {
         var r = null;
+        console.log('[CAPTURE] minimal callCert stage=js-enter challenge=' + c +
+                    ' tid=' + Process.getCurrentThreadId());
         Java.performNow(function () {
             try {
                 var info = getNmssInstance();
                 if (!info.inst) { r = 'NO_INSTANCE'; return; }
+                console.log('[CAPTURE] minimal callCert stage=before-getCertValue challenge=' + c +
+                            ' tid=' + Process.getCurrentThreadId());
                 r = info.inst.getCertValue(c);
+                console.log('[CAPTURE] minimal callCert stage=after-getCertValue challenge=' + c +
+                            ' tid=' + Process.getCurrentThreadId() +
+                            ' token_null=' + (r === null || r === undefined));
                 if (r) r = r.toString();
+                console.log('[CAPTURE] minimal callCert stage=after-toString challenge=' + c +
+                            ' tid=' + Process.getCurrentThreadId() +
+                            ' token_len=' + (r ? r.length : 0));
             } catch (e) {
                 r = 'ERR:' + e;
             }
@@ -1390,6 +1433,29 @@ def pull_memdump(file_list_json=None):
     return files
 
 
+def pull_device_file(device_path, host_path, timeout=30):
+    os.makedirs(os.path.dirname(host_path), exist_ok=True)
+    try:
+        os.remove(host_path)
+    except FileNotFoundError:
+        pass
+    result = subprocess.run(
+        ADB + ["pull", device_path, host_path],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    return {
+        "ok": os.path.exists(host_path),
+        "device_path": device_path,
+        "host_path": host_path,
+        "size": os.path.getsize(host_path) if os.path.exists(host_path) else 0,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "returncode": result.returncode,
+    }
+
+
 def trace_cmd(output_dir=OUTPUT_DIR, trace_path=TRACE_PATH):
     snapshot_path = os.path.join(output_dir, "snapshot.json")
     cmd = [
@@ -1577,10 +1643,21 @@ class Handler(BaseHTTPRequestHandler):
             c = (params.get("c") or [READY_CHALLENGE])[0]
             timeout = parse_int_param(params, "timeout", 60, minimum=10, maximum=300)
             ready_challenge = (params.get("ready") or [READY_CHALLENGE])[0]
-            result = prepare_cert_ready(c, ready_challenge=ready_challenge, timeout=timeout)
+            traced = parse_bool_param(params, "traced", default=False)
+            if traced and bridge.alive:
+                expr = f"rpc.exports.prepareCertReadyTraced({json.dumps(c)}, {json.dumps(ready_challenge)})"
+                result = bridge.eval_rpc(
+                    expr,
+                    timeout=timeout,
+                    keepalive_on_activity=True,
+                    activity_idle_timeout=15,
+                )
+            else:
+                result = prepare_cert_ready(c, ready_challenge=ready_challenge, timeout=timeout)
             self._json(200, {
                 "challenge": c,
                 "ready_challenge": ready_challenge,
+                "traced": traced,
                 "result": result,
             })
 
@@ -1754,6 +1831,35 @@ class Handler(BaseHTTPRequestHandler):
             result = bridge.eval_rpc("rpc.exports.jitGateTranslatedStatus()", timeout=10) if bridge.alive else None
             self._json(200, {"result": result})
 
+        elif parsed.path == "/translated/selective/arm":
+            pages = (params.get("pages") or params.get("page") or [None])[0]
+            target_pcs = (params.get("target_pcs") or params.get("pcs") or [None])[0]
+            label = (params.get("label") or [None])[0]
+            expect = (params.get("expect") or params.get("expected") or [None])[0]
+            fault_only = parse_bool_param(params, "fault_only", default=False)
+            pages_arg = json.dumps(pages) if pages else "undefined"
+            target_pcs_arg = json.dumps(target_pcs) if target_pcs else "undefined"
+            label_arg = json.dumps(label) if label else "undefined"
+            expect_arg = json.dumps(expect) if expect else "undefined"
+            expr = f"rpc.exports.jitGateTranslatedSelectiveArm({pages_arg}, {target_pcs_arg}, {label_arg}, {expect_arg}, {json.dumps(fault_only)})"
+            result = bridge.eval_rpc(expr, timeout=30) if bridge.alive else None
+            self._json(200, {
+                "pages": pages,
+                "target_pcs": target_pcs,
+                "label": label,
+                "expect": expect,
+                "fault_only": fault_only,
+                "result": result,
+            })
+
+        elif parsed.path == "/translated/selective/status":
+            result = bridge.eval_rpc("rpc.exports.jitGateTranslatedSelectiveStatus()", timeout=10) if bridge.alive else None
+            self._json(200, {"result": result})
+
+        elif parsed.path == "/translated/selective/clear":
+            result = bridge.eval_rpc("rpc.exports.jitGateTranslatedSelectiveClear()", timeout=10) if bridge.alive else None
+            self._json(200, {"result": result})
+
         elif parsed.path == "/translated/clear":
             result = bridge.eval_rpc("rpc.exports.jitGateTranslatedClear()", timeout=10) if bridge.alive else None
             self._json(200, {"result": result})
@@ -1793,6 +1899,136 @@ class Handler(BaseHTTPRequestHandler):
             result = bridge.eval_rpc("globalThis.__jitGateDynamicClear()", timeout=10) if bridge.alive else None
             self._json(200, {"result": result})
 
+        elif parsed.path == "/eval-state/arm":
+            challenge = (params.get("c") or params.get("challenge") or [None])[0]
+            min_pc = (params.get("min_pc") or params.get("minPc") or [None])[0]
+            thread_id = (params.get("thread") or params.get("tid") or [None])[0]
+            challenge_arg = json.dumps(challenge) if challenge else "undefined"
+            min_pc_arg = json.dumps(min_pc) if min_pc else "undefined"
+            thread_arg = str(int(thread_id, 10)) if thread_id else "undefined"
+            expr = f"rpc.exports.jitGateEvalStateArm({challenge_arg}, {min_pc_arg}, {thread_arg})"
+            result = bridge.eval_rpc(expr, timeout=30) if bridge.alive else None
+            self._json(200, {
+                "challenge": challenge,
+                "min_pc": min_pc,
+                "thread_id": thread_id,
+                "result": result,
+                "device_path": EVAL_STATE_DEVICE_PATH,
+            })
+
+        elif parsed.path == "/eval-state/status":
+            result = bridge.eval_rpc("rpc.exports.jitGateEvalStateStatus()", timeout=10) if bridge.alive else None
+            self._json(200, {
+                "result": result,
+                "device_path": EVAL_STATE_DEVICE_PATH,
+            })
+
+        elif parsed.path == "/eval-state/clear":
+            result = bridge.eval_rpc("rpc.exports.jitGateEvalStateClear()", timeout=10) if bridge.alive else None
+            self._json(200, {
+                "result": result,
+                "device_path": EVAL_STATE_DEVICE_PATH,
+            })
+
+        elif parsed.path == "/eval-state/pull":
+            host_name = (params.get("name") or ["eval_state.json"])[0]
+            host_path = os.path.join(EVAL_STATE_HOST_DIR, os.path.basename(host_name))
+            result = pull_device_file(EVAL_STATE_DEVICE_PATH, host_path, timeout=30)
+            extras = []
+            extras_error = None
+            if result.get("ok"):
+                try:
+                    with open(host_path, "r", encoding="utf-8") as fh:
+                        status = json.load(fh)
+                    maps_path = status.get("maps_path")
+                    if maps_path:
+                        local_maps = os.path.join(EVAL_STATE_HOST_DIR, os.path.basename(maps_path))
+                        maps_result = pull_device_file(maps_path, local_maps, timeout=30)
+                        maps_result["device_path"] = maps_path
+                        maps_result["host_path"] = local_maps
+                        extras.append(maps_result)
+                    for page in (status.get("pages") or []):
+                        device_page = page.get("dump_path")
+                        if not device_page:
+                            continue
+                        local_page = os.path.join(EVAL_STATE_HOST_DIR, os.path.basename(device_page))
+                        page_result = pull_device_file(device_page, local_page, timeout=30)
+                        page_result["device_path"] = device_page
+                        page_result["host_path"] = local_page
+                        page_result["page_base"] = page.get("page_base")
+                        page_result["registers"] = page.get("registers") or []
+                        extras.append(page_result)
+                except Exception as exc:
+                    extras_error = str(exc)
+            self._json(200, {
+                **result,
+                "host_path": host_path,
+                "extras": extras,
+                "extras_error": extras_error,
+            })
+
+        elif parsed.path == "/live-nmss/install":
+            base = (params.get("base") or [None])[0]
+            base_arg = json.dumps(base) if base else "undefined"
+            expr = f"rpc.exports.jitGateLiveNmssInstall({base_arg})"
+            result = bridge.eval_rpc(expr, timeout=30) if bridge.alive else None
+            self._json(200, {
+                "base": base,
+                "result": result,
+            })
+
+        elif parsed.path == "/live-nmss/arm":
+            challenge = (params.get("challenge") or [None])[0]
+            thread = (params.get("thread") or [None])[0]
+            window_ms = (params.get("window_ms") or [None])[0]
+            thread_value = int(thread, 10) if thread else None
+            window_value = int(window_ms, 10) if window_ms else None
+            challenge_arg = json.dumps(challenge) if challenge else "null"
+            thread_arg = json.dumps(thread_value) if thread else "null"
+            window_arg = json.dumps(window_value) if window_ms else "null"
+            expr = f"rpc.exports.jitGateLiveNmssArm({challenge_arg}, {thread_arg}, {window_arg})"
+            result = bridge.eval_rpc(expr, timeout=30) if bridge.alive else None
+            self._json(200, {
+                "challenge": challenge,
+                "thread": thread_value,
+                "window_ms": window_value,
+                "result": result,
+            })
+
+        elif parsed.path == "/live-nmss/mem/install":
+            base = (params.get("base") or [None])[0]
+            base_arg = json.dumps(base) if base else "undefined"
+            expr = f"rpc.exports.jitGateLiveNmssMemInstall({base_arg})"
+            result = bridge.eval_rpc(expr, timeout=30) if bridge.alive else None
+            self._json(200, {
+                "base": base,
+                "result": result,
+            })
+
+        elif parsed.path == "/live-nmss/mem/arm":
+            result = bridge.eval_rpc("rpc.exports.jitGateLiveNmssMemArm()", timeout=30) if bridge.alive else None
+            self._json(200, {"result": result})
+
+        elif parsed.path == "/live-nmss/mem/status":
+            result = bridge.eval_rpc("rpc.exports.jitGateLiveNmssMemStatus()", timeout=10) if bridge.alive else None
+            self._json(200, {"result": result})
+
+        elif parsed.path == "/live-nmss/mem/clear":
+            result = bridge.eval_rpc("rpc.exports.jitGateLiveNmssMemClear()", timeout=10) if bridge.alive else None
+            self._json(200, {"result": result})
+
+        elif parsed.path == "/live-nmss/status":
+            result = bridge.eval_rpc("rpc.exports.jitGateLiveNmssStatus()", timeout=10) if bridge.alive else None
+            self._json(200, {"result": result})
+
+        elif parsed.path == "/live-nmss/dump":
+            result = bridge.eval_rpc("rpc.exports.jitGateLiveNmssDump()", timeout=10) if bridge.alive else None
+            self._json(200, {"result": result})
+
+        elif parsed.path == "/live-nmss/clear":
+            result = bridge.eval_rpc("rpc.exports.jitGateLiveNmssClear()", timeout=10) if bridge.alive else None
+            self._json(200, {"result": result})
+
         elif parsed.path == "/pull":
             files = pull_capture()
             self._json(200, {"files": files, "dir": OUTPUT_DIR})
@@ -1815,12 +2051,28 @@ class Handler(BaseHTTPRequestHandler):
                 "GET /call?c=<hex16>&fixed_trace=1[&threads=tid,tid][&timeout=300]": "call getCertValue and arm in-process fixed-thread trace",
                 f"GET /translated/load[?elf={TRANSLATED_DEVICE_ELF}&map={TRANSLATED_DEVICE_MAP}]": "load translated JIT ELF + map into Frida session",
                 f"GET /translated/arm[?elf={TRANSLATED_DEVICE_ELF}&map={TRANSLATED_DEVICE_MAP}&min_pc=0x...&max_steps=4096]": "arm translated execute-fault diversion into translated JIT blocks",
+                "GET /translated/selective/arm[?pages=0x...,0x...&target_pcs=0x...&label=name&expect=HEX&fault_only=1]": "trap only selected translated pages and record translated register/value candidates",
+                "GET /translated/selective/status": "selective translated probe status",
+                "GET /translated/selective/clear": "disable selective translated probe",
                 "GET /translated/status": "translated JIT dispatch status",
                 "GET /translated/clear": "disable translated JIT dispatch",
                 f"GET /dynamic/load[?lib={DYNAMIC_DEVICE_LIB}]": "load resident dynamic Aeon runtime into Frida session",
                 f"GET /dynamic/arm[?lib={DYNAMIC_DEVICE_LIB}&min_pc=0x...&max_steps=4096]": "arm exact-PC dynamic execute-fault diversion",
                 "GET /dynamic/status": "dynamic JIT dispatch status",
                 "GET /dynamic/clear": "disable dynamic JIT dispatch",
+                "GET /eval-state/arm[?challenge=HEX16&min_pc=0x...&thread=TID]": "arm non-stop execute-fault context capture for live_cert_eval",
+                "GET /eval-state/status": "evaluator state capture status",
+                "GET /eval-state/clear": "disarm evaluator state capture",
+                "GET /eval-state/pull[?name=eval_state.json]": "pull captured evaluator state json to host",
+                "GET /live-nmss/install[?base=0x...]": "resolve deleted-module base and install live NMSS dispatcher/package/hash hooks",
+                "GET /live-nmss/arm[?challenge=HEX16&thread=TID&window_ms=15000]": "arm live NMSS capture for the next matching cert wrapper",
+                "GET /live-nmss/mem/install[?base=0x...]": "install live NMSS memory-access watches on hash-path code addresses",
+                "GET /live-nmss/mem/arm": "arm MemoryAccessMonitor for live NMSS code touches",
+                "GET /live-nmss/mem/status": "memory watch status / recent events",
+                "GET /live-nmss/mem/clear": "disable live NMSS memory watches",
+                "GET /live-nmss/status": "live NMSS hook status",
+                "GET /live-nmss/dump": "dump live NMSS recent logs and seen states",
+                "GET /live-nmss/clear": "detach live NMSS hooks",
                 "GET /capture?c=<hex16>": "call + capture JIT hash state",
                 "GET /trace?c=<hex16>": "capture JIT hash state + run Aeon JIT trace",
                 "GET /fixed-trace/arm[?threads=tid,tid]": "arm in-process fixed-thread trace for the next cert call",
@@ -1932,12 +2184,23 @@ def main():
     log.info(f"  GET /call?c=<hex>&fixed_trace=1 — arm fixed-thread trace for this call")
     log.info(f"  GET /translated/load[?elf=...&map=...] — load translated JIT ELF + map")
     log.info(f"  GET /translated/arm[?elf=...&map=...&min_pc=0x...&max_steps=4096] — arm translated dispatch")
+    log.info(f"  GET /translated/selective/arm[?pages=0x...,0x...&target_pcs=0x...&label=name&expect=HEX&fault_only=1] — trap only selected translated pages and record translated register/value candidates")
+    log.info(f"  GET /translated/selective/status — selective translated probe status")
+    log.info(f"  GET /translated/selective/clear — disable selective translated probe")
     log.info(f"  GET /translated/status — translated dispatch status")
     log.info(f"  GET /translated/clear — disable translated dispatch")
     log.info(f"  GET /dynamic/load[?lib={DYNAMIC_DEVICE_LIB}] — load resident dynamic Aeon runtime")
     log.info(f"  GET /dynamic/arm[?lib={DYNAMIC_DEVICE_LIB}&min_pc=0x...&max_steps=4096] — arm dynamic exact-PC dispatch")
     log.info(f"  GET /dynamic/status — dynamic dispatch status")
     log.info(f"  GET /dynamic/clear — disable dynamic dispatch")
+    log.info(f"  GET /eval-state/arm[?challenge=HEX16&min_pc=0x...&thread=TID] — arm non-stop live_cert_eval state capture")
+    log.info(f"  GET /eval-state/status — evaluator state capture status")
+    log.info(f"  GET /eval-state/clear — disarm evaluator state capture")
+    log.info(f"  GET /eval-state/pull[?name=eval_state.json] — pull captured evaluator state json")
+    log.info(f"  GET /live-nmss/install[?base=0x...] — resolve deleted-module base and install live NMSS hooks")
+    log.info(f"  GET /live-nmss/status — live NMSS hook status")
+    log.info(f"  GET /live-nmss/dump — dump live NMSS logs and seen states")
+    log.info(f"  GET /live-nmss/clear — detach live NMSS hooks")
     log.info(f"  GET /capture?c=<hex> — capture JIT hash + pull")
     log.info(f"  GET /trace?c=<hex> — capture JIT hash + Aeon JIT trace")
     log.info(f"  GET /fixed-trace/arm[?threads=tid,tid] — arm in-process fixed-thread trace")
