@@ -1,0 +1,10 @@
+[package]
+name = "nmss-cert"
+version = "0.1.0"
+edition = "2021"
+description = "Offline NMSS cert reproducer — Merkle/SHA-256 round chain model"
+
+[dependencies]
+sha2 = "0.10"
+
+[dev-dependencies]

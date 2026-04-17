@@ -8,5 +8,6 @@ members = [
     "crates/aeon-frontend",
     "crates/aeon-reduce",
     "crates/survey",
+    "crates/nmss-cert",
 ]
 resolver = "2"
