@@ -42,20 +42,32 @@ Run locally
 
 LLM wire format (reference, no client dependency)
 -------------------------------------------------
-    POST https://generativelanguage.googleapis.com/v1beta/models/
-         gemini-2.0-flash-lite:generateContent?key=$GEMINI_API_KEY
+The `send` subcommand supports two providers via ``--provider``:
 
-    Request body (application/json):
-        {"contents":[{"parts":[{"text": <PROMPT_STRING>}]}],
-         "generationConfig":{"temperature":0.2,"maxOutputTokens":4096}}
+    openrouter  (default)
+        POST https://openrouter.ai/api/v1/chat/completions
+        Header: Authorization: Bearer $OPENROUTER_API_KEY
+        Body:  {"model": $OPENROUTER_MODEL,
+                "messages": [{"role":"user","content": <PROMPT>}],
+                "temperature": 0.2, "max_tokens": 4096}
+        Read:  resp["choices"][0]["message"]["content"]
+               resp["choices"][0]["finish_reason"]  (stop|length|
+                                                     content_filter|tool_calls)
+               resp["usage"].{prompt_tokens,completion_tokens,total_tokens}
 
-    Response body:
-        {"candidates":[{"content":{"parts":[{"text": <REPLY>}]}}]}
+    gemini
+        POST https://generativelanguage.googleapis.com/v1beta/models/
+             {model}:generateContent?key=$GEMINI_API_KEY
+        Body:  {"contents":[{"parts":[{"text": <PROMPT>}]}],
+                "generationConfig":{"temperature":0.2,"maxOutputTokens":4096}}
+        Read:  resp["candidates"][0]["content"]["parts"][0]["text"]
+               resp["candidates"][0]["finishReason"]
+               resp["usageMetadata"].{promptTokenCount,candidatesTokenCount,
+                                      totalTokenCount}
 
-    The `send` subcommand implements exactly this via stdlib urllib — no
-    third-party SDK required.  No `llm-pkg`, `google-generativeai`, or
-    `google-genai` package is installed anywhere in /home/sdancer (only
-    `llm-viewer-server`, which is an unrelated relay).
+OPENROUTER_API_KEY and OPENROUTER_MODEL are loaded automatically from
+/home/sdancer/orchestrator/.env (chmod 600, gitignored).  Both providers
+are backed by stdlib urllib only — no third-party SDK required.
 """
 from __future__ import annotations
 
@@ -425,7 +437,16 @@ def emit_llm_request(target: Target, block_addr: int,
             "Propose the simplest closed-form expression that matches ALL "
             "supplied test vectors.  If MBA obfuscation is suspected, apply "
             "the standard rewrites: x+y = (x^y)+2·(x&y), x|y = x+y-(x&y), "
-            "etc.  Return the final expression in SMT-LIB or Python syntax."
+            "etc.\n\n"
+            "Respond with ONE fenced ```python``` code block containing a "
+            "top-level function with this exact signature:\n\n"
+            "    def simplified("
+            + ", ".join(i.name for i in target.inputs)
+            + ") -> int:\n"
+            "        ...\n\n"
+            "The function must return the output as a non-negative Python int "
+            f"fitting in {target.output.width_bits} bits.  Do not include "
+            "any other code blocks or explanations inside the fence."
         ),
     }
 
@@ -568,31 +589,81 @@ def verify_expression(target: Target, expr_path: Path, fuzz_runs: int = 10000,
 
 
 # ---------------------------------------------------------------------------
-# Stage 6 — send an emit_llm_request JSON to a Gemini endpoint (stdlib only)
+# Stage 6 — send an emit_llm_request JSON to an LLM endpoint (stdlib only)
 # ---------------------------------------------------------------------------
+#
+# Two providers are supported:
+#
+#   openrouter (default)  —  POST https://openrouter.ai/api/v1/chat/completions
+#                            Authorization: Bearer $OPENROUTER_API_KEY
+#                            Body: OpenAI-compatible chat.completions shape
+#                            OPENROUTER_MODEL in .env pins the default model
+#                            (currently google/gemini-2.5-flash; google/
+#                            gemini-3.1-flash doesn't exist on OpenRouter —
+#                            closest is google/gemini-3.1-flash-lite-preview)
+#
+#   gemini                —  POST generativelanguage.googleapis.com
+#                            /v1beta/models/{model}:generateContent?key=…
+#                            Body: Gemini-native {contents, generationConfig}
+#
+# Both providers return a canonical UsageMetadata + ExtractResult via
+# provider-specific constructors / extractors.
 
 GEMINI_ENDPOINT_TMPL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     "{model}:generateContent?key={api_key}"
 )
+OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
+
+# Default model IDs per provider.
+DEFAULT_GEMINI_MODEL = "gemini-2.0-flash-lite"
+DEFAULT_OPENROUTER_MODEL = "google/gemini-2.5-flash"
+
+# OpenRouter etiquette headers — identify the caller so rate limits can be
+# tracked per-project.  Both are optional.
+OPENROUTER_REFERER = "https://github.com/anthropics/aeon-ollvm-codex1"
+OPENROUTER_TITLE = "cert-emu-deobf-pipeline"
+
+
+def load_env_file(path: Path | str = "/home/sdancer/orchestrator/.env") -> dict[str, str]:
+    """Parse a simple KEY="VALUE" .env file.
+
+    Returns the parsed map (also merged into os.environ for any keys not
+    already set).  No third-party dotenv dependency; a minimal hand-rolled
+    parser is enough for the single-line assignments we use.
+    """
+    out: dict[str, str] = {}
+    p = Path(path)
+    if not p.exists():
+        return out
+    for raw in p.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        v = v.strip()
+        # strip surrounding quotes (single or double)
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+            v = v[1:-1]
+        out[k] = v
+        os.environ.setdefault(k, v)
+    return out
+
+
+def _build_prompt_string(request_payload: dict[str, Any]) -> str:
+    """Canonical prompt serialisation used by both providers."""
+    return (
+        request_payload.get("task_prompt", "") + "\n\n"
+        "Payload:\n" + json.dumps(request_payload, indent=2)
+    )
 
 
 def send_to_gemini(request_payload: dict[str, Any], model: str,
                    api_key: str, timeout: float = 60.0) -> dict[str, Any]:
-    """POST emit_llm_request's JSON to Gemini and return the parsed response.
-
-    Uses only stdlib urllib — no third-party SDK needed.  The request payload
-    (as produced by `emit_llm_request`) is serialised into a single prompt
-    `text` part.  Use `extract_text_result` on the return value to get a
-    structured (status, text) pair that handles SAFETY / MAX_TOKENS / missing
-    parts correctly.
-    """
-    prompt = (
-        request_payload.get("task_prompt", "") + "\n\n"
-        "Payload:\n" + json.dumps(request_payload, indent=2)
-    )
+    """POST emit_llm_request's JSON to Gemini's generateContent endpoint."""
     body = {
-        "contents": [{"parts": [{"text": prompt}]}],
+        "contents": [{"parts": [{"text": _build_prompt_string(request_payload)}]}],
         "generationConfig": {"temperature": 0.2, "maxOutputTokens": 4096},
     }
     url = GEMINI_ENDPOINT_TMPL.format(model=model, api_key=api_key)
@@ -606,20 +677,70 @@ def send_to_gemini(request_payload: dict[str, Any], model: str,
         return json.loads(resp.read().decode())
 
 
+def send_to_openrouter(request_payload: dict[str, Any], model: str,
+                       api_key: str, timeout: float = 60.0,
+                       referer: str = OPENROUTER_REFERER,
+                       title: str = OPENROUTER_TITLE) -> dict[str, Any]:
+    """POST emit_llm_request's JSON to OpenRouter's chat.completions endpoint.
+
+    OpenRouter speaks the OpenAI chat.completions wire format:
+
+        body = {"model": ..., "messages": [{"role":"user","content": ...}],
+                "temperature": 0.2, "max_tokens": 4096}
+        response["choices"][0]["message"]["content"]  # extracted text
+        response["choices"][0]["finish_reason"]       # stop|length|
+                                                      # content_filter|tool_calls
+        response["usage"] = {"prompt_tokens", "completion_tokens",
+                             "total_tokens"}
+    """
+    body = {
+        "model": model,
+        "messages": [{"role": "user",
+                      "content": _build_prompt_string(request_payload)}],
+        "temperature": 0.2,
+        "max_tokens": 4096,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    if referer:
+        headers["HTTP-Referer"] = referer
+    if title:
+        headers["X-Title"] = title
+    req = urllib.request.Request(
+        OPENROUTER_ENDPOINT,
+        data=json.dumps(body).encode(),
+        headers=headers,
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode())
+
+
 @dataclass
 class UsageMetadata:
-    """Gemini's token-accounting fields.  Zero if absent from the response."""
+    """Canonical token-accounting.  Zero if absent from the response."""
     prompt_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
 
     @classmethod
-    def from_response(cls, resp: dict[str, Any]) -> "UsageMetadata":
+    def from_gemini_response(cls, resp: dict[str, Any]) -> "UsageMetadata":
         um = resp.get("usageMetadata") or {}
         return cls(
             prompt_tokens=int(um.get("promptTokenCount", 0) or 0),
             output_tokens=int(um.get("candidatesTokenCount", 0) or 0),
             total_tokens=int(um.get("totalTokenCount", 0) or 0),
+        )
+
+    @classmethod
+    def from_openrouter_response(cls, resp: dict[str, Any]) -> "UsageMetadata":
+        um = resp.get("usage") or {}
+        return cls(
+            prompt_tokens=int(um.get("prompt_tokens", 0) or 0),
+            output_tokens=int(um.get("completion_tokens", 0) or 0),
+            total_tokens=int(um.get("total_tokens", 0) or 0),
         )
 
     def as_log_line(self) -> str:
@@ -632,14 +753,14 @@ class UsageMetadata:
 
 @dataclass
 class ExtractResult:
-    """Structured outcome of parsing a Gemini generateContent response.
+    """Canonical outcome of parsing an LLM response (provider-agnostic).
 
     ``status`` is one of:
-      - "ok"              — text extracted; finishReason STOP or unspecified
-      - "truncated"       — finishReason MAX_TOKENS; text present but partial
-      - "safety_blocked"  — finishReason SAFETY (prompt or candidate blocked)
-      - "function_call"   — candidate is a function-call, no text part
-      - "empty"           — no candidates or no parts at all
+      - "ok"              — text extracted, normal completion
+      - "truncated"       — hit output-token cap but text is usable
+      - "safety_blocked"  — content filter (prompt or candidate)
+      - "function_call"   — response is a tool/function-call, no text
+      - "empty"           — no choices / no content
       - "error"           — malformed response / unexpected shape
     """
     status: str
@@ -655,24 +776,21 @@ class ExtractResult:
         return self.status == "ok"
 
 
+# -- Gemini-specific extractor ---------------------------------------------
+
 # finishReason values considered partial-success (still have usable text)
-_TERMINAL_WITH_TEXT = {"STOP", "MAX_TOKENS", None, ""}
+_GEMINI_TERMINAL_WITH_TEXT = {"STOP", "MAX_TOKENS", None, ""}
 
 
-def extract_text_result(resp: dict[str, Any]) -> ExtractResult:
-    """Parse a Gemini generateContent response into a structured result.
+def extract_text_result_gemini(resp: dict[str, Any]) -> ExtractResult:
+    """Parse a Gemini generateContent response into an ExtractResult.
 
-    Handles every failure mode observed in the Gemini v1beta API:
-      - prompt-level safety block (``promptFeedback.blockReason`` set)
-      - candidate-level safety block (``finishReason == "SAFETY"``)
-      - MAX_TOKENS truncation (still returns the partial text)
-      - function-call responses (``parts[*].functionCall`` without text)
-      - empty response / missing candidates / missing content / missing parts
-      - unexpected top-level shapes
+    Handles every Gemini-specific failure mode: prompt-level blockReason,
+    candidate finishReason (SAFETY/MAX_TOKENS/RECITATION/OTHER), function-call
+    responses, missing content / parts, malformed shapes.
     """
-    usage = UsageMetadata.from_response(resp)
+    usage = UsageMetadata.from_gemini_response(resp)
 
-    # Prompt-level block — the model refused the whole prompt.
     pfb = resp.get("promptFeedback") or {}
     if pfb.get("blockReason"):
         return ExtractResult(
@@ -725,64 +843,157 @@ def extract_text_result(resp: dict[str, Any]) -> ExtractResult:
 
     if finish == "SAFETY":
         return ExtractResult(
-            status="safety_blocked",
-            text=text,
-            finish_reason=finish,
-            usage=usage,
-            candidate_index=0,
-            raw_response=resp,
+            status="safety_blocked", text=text, finish_reason=finish,
+            usage=usage, candidate_index=0, raw_response=resp,
             error_message="candidate blocked by SAFETY",
         )
     if has_function_call and not text:
         return ExtractResult(
-            status="function_call",
-            text="",
-            finish_reason=finish,
-            usage=usage,
-            candidate_index=0,
-            raw_response=resp,
+            status="function_call", text="", finish_reason=finish,
+            usage=usage, candidate_index=0, raw_response=resp,
             error_message="response is a function-call, no text part",
         )
     if not text:
         return ExtractResult(
-            status="empty",
-            text="",
-            finish_reason=finish,
-            usage=usage,
-            candidate_index=0,
-            raw_response=resp,
+            status="empty", text="", finish_reason=finish,
+            usage=usage, candidate_index=0, raw_response=resp,
             error_message="no text parts in candidate",
         )
     if finish == "MAX_TOKENS":
         return ExtractResult(
-            status="truncated",
-            text=text,
-            finish_reason=finish,
-            usage=usage,
-            candidate_index=0,
-            raw_response=resp,
+            status="truncated", text=text, finish_reason=finish,
+            usage=usage, candidate_index=0, raw_response=resp,
             error_message="response truncated at maxOutputTokens",
         )
-    if finish not in _TERMINAL_WITH_TEXT:
-        # RECITATION, OTHER, LANGUAGE, etc. — surface verbatim as error.
+    if finish not in _GEMINI_TERMINAL_WITH_TEXT:
         return ExtractResult(
-            status="error",
-            text=text,
-            finish_reason=finish,
-            usage=usage,
-            candidate_index=0,
-            raw_response=resp,
+            status="error", text=text, finish_reason=finish,
+            usage=usage, candidate_index=0, raw_response=resp,
             error_message=f"unexpected finishReason={finish}",
         )
 
     return ExtractResult(
-        status="ok",
-        text=text,
-        finish_reason=finish,
-        usage=usage,
-        candidate_index=0,
-        raw_response=resp,
+        status="ok", text=text, finish_reason=finish,
+        usage=usage, candidate_index=0, raw_response=resp,
     )
+
+
+# -- OpenRouter / OpenAI-style extractor -----------------------------------
+
+# OpenAI-style finish_reason values that imply partial-or-complete text.
+_OPENAI_TERMINAL_WITH_TEXT = {"stop", "length", None, ""}
+
+
+def extract_text_result_openrouter(resp: dict[str, Any]) -> ExtractResult:
+    """Parse an OpenRouter (OpenAI chat.completions) response.
+
+    OpenAI-style ``finish_reason`` values:
+      - ``stop``           → ok
+      - ``length``         → truncated (analogous to Gemini MAX_TOKENS)
+      - ``content_filter`` → safety_blocked
+      - ``tool_calls``     → function_call
+      - ``function_call``  → function_call (deprecated name)
+      - missing / null     → ok (most providers omit when completing)
+
+    Also handles:
+      - OpenRouter's top-level ``error`` object (rate limit / upstream fail)
+      - empty/missing ``choices`` list
+      - missing ``message`` / ``content``
+      - ``message.tool_calls`` present without text (new-style function call)
+    """
+    usage = UsageMetadata.from_openrouter_response(resp)
+
+    # OpenRouter surfaces upstream errors in a top-level "error" object rather
+    # than relying purely on HTTP status codes.
+    err = resp.get("error")
+    if isinstance(err, dict) and err.get("message"):
+        return ExtractResult(
+            status="error",
+            text="",
+            finish_reason=None,
+            usage=usage,
+            raw_response=resp,
+            error_message=f"upstream error: {err.get('message')}",
+        )
+
+    choices = resp.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ExtractResult(
+            status="empty",
+            text="",
+            finish_reason=None,
+            usage=usage,
+            raw_response=resp,
+            error_message="no choices in response",
+        )
+
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        return ExtractResult(
+            status="error",
+            text="",
+            finish_reason=None,
+            usage=usage,
+            raw_response=resp,
+            error_message="choices[0] is not an object",
+        )
+
+    finish = choice.get("finish_reason")
+    raw_message = choice.get("message")
+    message = raw_message if isinstance(raw_message, dict) else {}
+    content = message.get("content")
+    text = ""
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        # Some providers return content as a list of parts.
+        pieces = []
+        for p in content:
+            if isinstance(p, dict) and isinstance(p.get("text"), str):
+                pieces.append(p["text"])
+        text = "".join(pieces)
+
+    has_tool_call = bool(message.get("tool_calls") or message.get("function_call"))
+
+    if finish == "content_filter":
+        return ExtractResult(
+            status="safety_blocked", text=text, finish_reason=finish,
+            usage=usage, candidate_index=0, raw_response=resp,
+            error_message="response blocked by content filter",
+        )
+    if finish in ("tool_calls", "function_call") or (has_tool_call and not text):
+        return ExtractResult(
+            status="function_call", text="", finish_reason=finish,
+            usage=usage, candidate_index=0, raw_response=resp,
+            error_message="response is a tool/function-call, no text",
+        )
+    if not text:
+        return ExtractResult(
+            status="empty", text="", finish_reason=finish,
+            usage=usage, candidate_index=0, raw_response=resp,
+            error_message="no text content in choice",
+        )
+    if finish == "length":
+        return ExtractResult(
+            status="truncated", text=text, finish_reason=finish,
+            usage=usage, candidate_index=0, raw_response=resp,
+            error_message="response truncated at max_tokens",
+        )
+    if finish not in _OPENAI_TERMINAL_WITH_TEXT:
+        return ExtractResult(
+            status="error", text=text, finish_reason=finish,
+            usage=usage, candidate_index=0, raw_response=resp,
+            error_message=f"unexpected finish_reason={finish}",
+        )
+
+    return ExtractResult(
+        status="ok", text=text, finish_reason=finish,
+        usage=usage, candidate_index=0, raw_response=resp,
+    )
+
+
+# Legacy alias — callers may still invoke `extract_text_result` for Gemini.
+extract_text_result = extract_text_result_gemini
 
 
 # ---------------------------------------------------------------------------
@@ -874,19 +1085,45 @@ def _cmd_verify(args) -> int:
 
 
 def _cmd_send(args) -> int:
-    api_key = os.environ.get(args.api_key_env)
+    # Auto-load the orchestrator .env so OPENROUTER_API_KEY / OPENROUTER_MODEL
+    # are available without the caller having to source it manually.
+    load_env_file()
+
+    # Resolve provider-specific defaults if --model wasn't explicitly set.
+    provider = args.provider
+    model = args.model
+    if not model:
+        if provider == "openrouter":
+            model = os.environ.get("OPENROUTER_MODEL") or DEFAULT_OPENROUTER_MODEL
+        else:
+            model = os.environ.get("GEMINI_MODEL") or DEFAULT_GEMINI_MODEL
+
+    # Resolve env var holding the key based on provider, unless overridden.
+    key_env = args.api_key_env
+    if not key_env:
+        key_env = ("OPENROUTER_API_KEY" if provider == "openrouter"
+                   else "GEMINI_API_KEY")
+
+    api_key = os.environ.get(key_env)
     if not api_key:
-        print(f"missing env var {args.api_key_env}", file=sys.stderr)
+        print(f"missing env var {key_env} (provider={provider})", file=sys.stderr)
         return 2
+
     payload = json.loads(Path(args.request_file).read_text())
     try:
-        resp = send_to_gemini(payload, args.model, api_key)
+        if provider == "openrouter":
+            resp = send_to_openrouter(payload, model, api_key)
+        else:
+            resp = send_to_gemini(payload, model, api_key)
     except urllib.error.HTTPError as e:
         print(f"HTTP {e.code}: {e.read().decode(errors='replace')}",
               file=sys.stderr)
         return 1
 
-    result = extract_text_result(resp)
+    if provider == "openrouter":
+        result = extract_text_result_openrouter(resp)
+    else:
+        result = extract_text_result_gemini(resp)
     # Always log usage to stderr unless caller explicitly silenced it.
     if args.emit_usage:
         print(result.usage.as_log_line(), file=sys.stderr)
@@ -952,12 +1189,19 @@ def main(argv: list[str] | None = None) -> int:
     sp.set_defaults(fn=_cmd_verify)
 
     sp = sub.add_parser("send",
-        help="POST an emit_llm_request JSON to Gemini generateContent")
+        help="POST an emit_llm_request JSON to an LLM endpoint")
     sp.add_argument("request_file", help="path to emit's JSON output")
-    sp.add_argument("--model", default="gemini-2.0-flash-lite",
-        help="Gemini model ID (default gemini-2.0-flash-lite)")
-    sp.add_argument("--api-key-env", default="GEMINI_API_KEY",
-        help="env var holding the API key (default GEMINI_API_KEY)")
+    sp.add_argument("--provider", choices=("openrouter", "gemini"),
+        default="openrouter",
+        help="LLM provider (default openrouter; reads /home/sdancer/"
+             "orchestrator/.env for OPENROUTER_API_KEY + OPENROUTER_MODEL)")
+    sp.add_argument("--model", default=None,
+        help="model ID — default is $OPENROUTER_MODEL for openrouter "
+             f"(fallback {DEFAULT_OPENROUTER_MODEL}) or {DEFAULT_GEMINI_MODEL} "
+             "for gemini")
+    sp.add_argument("--api-key-env", default=None,
+        help="env var holding the API key (default OPENROUTER_API_KEY "
+             "for openrouter, GEMINI_API_KEY for gemini)")
     sp.add_argument("--out", help="write response JSON to this path")
     sp.add_argument("--print-text", action="store_true",
         help="print only the first candidate's text")
