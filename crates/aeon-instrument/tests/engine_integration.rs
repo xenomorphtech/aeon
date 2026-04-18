@@ -218,7 +218,7 @@ fn engine_for_sample(
 
 #[test]
 fn smoke_hello_runs_to_halt() {
-    let _lock = TEST_LOCK.lock().unwrap();
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (mut engine, _mapped, _stack) = engine_for_sample("samples/hello_aarch64.c", "main");
     engine.config.max_steps = 50_000;
 
@@ -241,7 +241,7 @@ fn smoke_hello_runs_to_halt() {
 
 #[test]
 fn hello_return_value() {
-    let _lock = TEST_LOCK.lock().unwrap();
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (mut engine, _mapped, _stack) = engine_for_sample("samples/hello_aarch64.c", "main");
     engine.config.max_steps = 50_000;
     engine.run();
@@ -256,7 +256,7 @@ fn hello_return_value() {
 
 #[test]
 fn hello_traces_memory() {
-    let _lock = TEST_LOCK.lock().unwrap();
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (mut engine, _mapped, _stack) = engine_for_sample("samples/hello_aarch64.c", "main");
     engine.config.max_steps = 50_000;
     engine.run();
@@ -273,7 +273,7 @@ fn hello_traces_memory() {
 
 #[test]
 fn hello_discovers_multiple_blocks() {
-    let _lock = TEST_LOCK.lock().unwrap();
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (mut engine, _mapped, _stack) = engine_for_sample("samples/hello_aarch64.c", "main");
     engine.config.max_steps = 50_000;
     engine.run();
@@ -289,7 +289,7 @@ fn hello_discovers_multiple_blocks() {
 
 #[test]
 fn max_steps_stops_engine() {
-    let _lock = TEST_LOCK.lock().unwrap();
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (mut engine, _mapped, _stack) = engine_for_sample("samples/hello_aarch64.c", "main");
     engine.config.max_steps = 5;
 
@@ -304,7 +304,7 @@ fn max_steps_stops_engine() {
 
 #[test]
 fn breakpoint_stops_engine() {
-    let _lock = TEST_LOCK.lock().unwrap();
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let elf_path = compile_sample("samples/hello_aarch64.c");
     let checksum_addr = symbol_address(&elf_path, "checksum");
 
@@ -322,7 +322,7 @@ fn breakpoint_stops_engine() {
 
 #[test]
 fn code_range_stops_when_execution_leaves_function() {
-    let _lock = TEST_LOCK.lock().unwrap();
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let elf_path = compile_sample("samples/hello_aarch64.c");
     let (main_start, main_end) = symbol_range(&elf_path, "main");
 
@@ -348,7 +348,7 @@ fn code_range_stops_when_execution_leaves_function() {
 
 #[test]
 fn loops_runs_to_halt() {
-    let _lock = TEST_LOCK.lock().unwrap();
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (mut engine, _mapped, _stack) = engine_for_sample("samples/loops_cond_aarch64.c", "main");
     engine.config.max_steps = 100_000;
 
@@ -367,7 +367,7 @@ fn loops_runs_to_halt() {
 
 #[test]
 fn loops_symbolic_fold_finds_invariants() {
-    let _lock = TEST_LOCK.lock().unwrap();
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (mut engine, _mapped, _stack) = engine_for_sample("samples/loops_cond_aarch64.c", "main");
     engine.config.max_steps = 100_000;
     engine.run();
@@ -399,7 +399,7 @@ fn loops_symbolic_fold_finds_invariants() {
 
 #[test]
 fn loops_has_stride_1_induction_variable() {
-    let _lock = TEST_LOCK.lock().unwrap();
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (mut engine, _mapped, _stack) = engine_for_sample("samples/loops_cond_aarch64.c", "main");
     engine.config.max_steps = 100_000;
     engine.run();
@@ -422,7 +422,7 @@ fn loops_has_stride_1_induction_variable() {
 
 #[test]
 fn disk_trace_roundtrip() {
-    let _lock = TEST_LOCK.lock().unwrap();
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let trace_path = std::env::temp_dir().join("aeon_disk_trace_test.bin");
 
     let (mut engine, _mapped, _stack) = engine_for_sample("samples/hello_aarch64.c", "main");
@@ -588,7 +588,7 @@ fn engine_for_dyn_elf(path: &str, func_offset: u64) -> (InstrumentEngine, Mapped
 
 #[test]
 fn nmss_crypto_sub_20bb48_traces_to_disk() {
-    let _lock = TEST_LOCK.lock().unwrap();
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     if !Path::new(NMSS_PATH).exists() {
         eprintln!("NMSS binary not found at {}, skipping", NMSS_PATH);
@@ -657,7 +657,7 @@ fn nmss_crypto_sub_20bb48_traces_to_disk() {
 
 #[test]
 fn nmss_crypto_sub_2070a8_traces_to_disk() {
-    let _lock = TEST_LOCK.lock().unwrap();
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     if !Path::new(NMSS_PATH).exists() {
         eprintln!("NMSS binary not found at {}, skipping", NMSS_PATH);
