@@ -191,7 +191,9 @@ Generated from `crates/aeon-frontend/src/service.rs` via `cargo run -p aeon-fron
 | `get_function_at` | Find the function containing a given address. Returns function metadata by default, and can optionally attach asm and/or AeonIL listings. |
 | `get_string` | Read a null-terminated string at any virtual address (works across all ELF segments, not just .text). |
 | `get_data` | Read raw bytes at any virtual address (works across all ELF segments). Returns hex + ASCII. |
-| `emulate_snippet` | Execute an ARM64 code region in a bounded sandbox. Returns final register state, memory writes, and any decoded strings. Use for reversing obfuscated loops, string decryption, or format decoders. |
+| `emulate_snippet_il` | Execute an ARM64 code region using AeonIL interpretation. Executes lifted IL statements without full binary emulation. Useful for symbolic execution or analyzing stripped code. |
+| `emulate_snippet_native` | Execute an ARM64 code region in unicorn ARM64 sandbox. Full native emulation with memory support. Returns final register state, memory writes, and decoded strings. |
+| `emulate_snippet` | Execute an ARM64 code region in a bounded sandbox. Alias for emulate_snippet_native. Returns final register state, memory writes, and any decoded strings. Use for reversing obfuscated loops, string decryption, or format decoders. |
 <!-- END GENERATED TOOL SURFACE -->
 
 ## Architecture

@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::{hash_map::Entry, HashMap};
 
 use serde_json::{json, Value};
+use bad64;
 
 use crate::coverage::analyze_lift_coverage;
 use crate::elf::{self, FunctionInfo, LoadedBinary};
@@ -836,6 +837,95 @@ impl AeonSession {
         report
     }
 
+    pub fn emulate_snippet_il(
+        &self,
+        start_addr: u64,
+        end_addr: u64,
+        initial_registers: HashMap<String, u64>,
+        step_limit: usize,
+    ) -> Result<Value, String> {
+        use crate::emulation::{self, Value as EmulValue};
+        use std::collections::BTreeMap;
+
+        if start_addr >= end_addr {
+            return Err("start_addr must be less than end_addr".to_string());
+        }
+
+        let binary_len = (end_addr - start_addr) as usize;
+        if binary_len > 0x10000 {
+            return Err("snippet too large (max 64KB)".to_string());
+        }
+
+        let file_offset = self.binary
+            .vaddr_to_file_offset(start_addr)
+            .ok_or_else(|| format!("Cannot read bytes at 0x{:x}", start_addr))?;
+
+        if file_offset + binary_len > self.binary.data.len() {
+            return Err(format!("Cannot read 0x{:x} bytes at 0x{:x}", binary_len, start_addr));
+        }
+
+        let raw_bytes = &self.binary.data[file_offset..file_offset + binary_len];
+
+        // Lift instructions in range
+        let mut stmts = Vec::new();
+        let mut offset = 0usize;
+        let mut pc = start_addr;
+
+        while offset + 4 <= raw_bytes.len() && pc < end_addr {
+            let word = u32::from_le_bytes(raw_bytes[offset..offset + 4].try_into().unwrap());
+            match bad64::decode(word, pc) {
+                Ok(insn) => {
+                    let next_pc = Some(pc + 4);
+                    let lift_result = lifter::lift(&insn, pc, next_pc);
+                    stmts.push(lift_result.stmt);
+                }
+                Err(_) => {
+                    // Skip invalid instructions
+                }
+            }
+            offset += 4;
+            pc += 4;
+        }
+
+        // Convert initial registers from string keys to Reg enum
+        let mut regs_map = BTreeMap::new();
+        for (name, value) in initial_registers {
+            if let Some(reg) = parse_register_name(&name) {
+                regs_map.insert(reg, EmulValue::U64(value));
+            }
+        }
+
+        // Execute IL snippet
+        let result = emulation::execute_snippet(&stmts, regs_map, step_limit);
+
+        // Convert result to JSON
+        let mut final_regs = std::collections::HashMap::new();
+        for (reg, value) in &result.final_registers {
+            final_regs.insert(reg_name(reg), value_to_hex_string(value));
+        }
+
+        let memory_writes: Vec<Value> = result.touched_memory
+            .iter()
+            .map(|cell| {
+                json!({
+                    "addr": format!("{:?}", cell.id.location),
+                    "size": cell.id.size,
+                    "value": value_to_hex_string(&cell.value),
+                })
+            })
+            .collect();
+
+        Ok(json!({
+            "mode": "il",
+            "start_addr": format!("0x{:x}", start_addr),
+            "end_addr": format!("0x{:x}", end_addr),
+            "steps_executed": result.steps_executed,
+            "budget_exhausted": result.budget_exhausted,
+            "final_registers": final_regs,
+            "memory_writes": memory_writes,
+        }))
+    }
+
     pub fn emulate_snippet(
         &self,
         start_addr: u64,
@@ -897,6 +987,55 @@ fn reg_name(r: &Reg) -> String {
         Reg::S(n) => format!("s{}", n),
         Reg::H(n) => format!("h{}", n),
         Reg::VByte(n) => format!("b{}", n),
+    }
+}
+
+fn parse_register_name(name: &str) -> Option<Reg> {
+    let lower = name.to_lowercase();
+    match lower.as_str() {
+        "x0" => Some(Reg::X(0)),
+        "x1" => Some(Reg::X(1)),
+        "x2" => Some(Reg::X(2)),
+        "x3" => Some(Reg::X(3)),
+        "x4" => Some(Reg::X(4)),
+        "x5" => Some(Reg::X(5)),
+        "x6" => Some(Reg::X(6)),
+        "x7" => Some(Reg::X(7)),
+        "x8" => Some(Reg::X(8)),
+        "x9" => Some(Reg::X(9)),
+        "x10" => Some(Reg::X(10)),
+        "x11" => Some(Reg::X(11)),
+        "x12" => Some(Reg::X(12)),
+        "x13" => Some(Reg::X(13)),
+        "x14" => Some(Reg::X(14)),
+        "x15" => Some(Reg::X(15)),
+        "x16" => Some(Reg::X(16)),
+        "x17" => Some(Reg::X(17)),
+        "x18" => Some(Reg::X(18)),
+        "x19" => Some(Reg::X(19)),
+        "x20" => Some(Reg::X(20)),
+        "x21" => Some(Reg::X(21)),
+        "x22" => Some(Reg::X(22)),
+        "x23" => Some(Reg::X(23)),
+        "x24" => Some(Reg::X(24)),
+        "x25" => Some(Reg::X(25)),
+        "x26" => Some(Reg::X(26)),
+        "x27" => Some(Reg::X(27)),
+        "x28" => Some(Reg::X(28)),
+        "x29" => Some(Reg::X(29)),
+        "x30" => Some(Reg::X(30)),
+        "sp" => Some(Reg::SP),
+        "pc" => Some(Reg::PC),
+        _ => None,
+    }
+}
+
+fn value_to_hex_string(value: &crate::emulation::Value) -> String {
+    match value {
+        crate::emulation::Value::U64(v) => format!("0x{:x}", v),
+        crate::emulation::Value::U128(v) => format!("0x{:x}", v),
+        crate::emulation::Value::F64(v) => format!("0x{:x}", v.to_bits()),
+        crate::emulation::Value::Unknown => "unknown".to_string(),
     }
 }
 

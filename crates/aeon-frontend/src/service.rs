@@ -51,7 +51,9 @@ impl AeonFrontend {
             "get_function_at" => self.tool_get_function_at(args),
             "get_string" => self.tool_get_string(args),
             "get_data" => self.tool_get_data(args),
-            "emulate_snippet" => self.tool_emulate_snippet(args),
+            "emulate_snippet_il" => self.tool_emulate_snippet_il(args),
+            "emulate_snippet_native" => self.tool_emulate_snippet_native(args),
+            "emulate_snippet" => self.tool_emulate_snippet_native(args),
             _ => Err(format!("Unknown tool: {}", name)),
         }
     }
@@ -358,9 +360,23 @@ impl AeonFrontend {
         session.get_data(addr, size)
     }
 
-    fn tool_emulate_snippet(&self, args: &Value) -> Result<Value, String> {
+    fn tool_emulate_snippet_il(&self, args: &Value) -> Result<Value, String> {
         let session = self.require_session()?;
-        let start_addr = parse_addr_arg(args)?;
+        let start_addr = parse_hex_arg(args, "start_addr")?;
+        let end_addr = parse_hex_arg(args, "end_addr")?;
+        let step_limit = args
+            .get("step_limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1000) as usize;
+
+        let initial_registers = parse_register_map(args)?;
+
+        session.emulate_snippet_il(start_addr, end_addr, initial_registers, step_limit)
+    }
+
+    fn tool_emulate_snippet_native(&self, args: &Value) -> Result<Value, String> {
+        let session = self.require_session()?;
+        let start_addr = parse_hex_arg(args, "start_addr")?;
         let end_addr = parse_hex_arg(args, "end_addr")?;
         let step_limit = args
             .get("step_limit")
@@ -561,8 +577,27 @@ pub fn tools_list() -> Value {
                     "size": {"type": "integer", "description": "Number of bytes to read", "default": 64}
                 }, "required": ["addr"]})),
 
+            tool_schema("emulate_snippet_il",
+                "Execute an ARM64 code region using AeonIL interpretation. Executes lifted IL statements without full binary emulation. Useful for symbolic execution or analyzing stripped code.",
+                json!({"type": "object", "properties": {
+                    "start_addr": {"type": "string", "description": "Hex address to begin execution, e.g. '0x1234'"},
+                    "end_addr": {"type": "string", "description": "Hex address to stop execution (exclusive)"},
+                    "initial_registers": {"type": "object", "description": "Register values at entry. Keys: x0-x30, sp. Values: hex strings or integers.", "additionalProperties": {}},
+                    "step_limit": {"type": "integer", "description": "Max IL statements to execute (default 1000)", "default": 1000}
+                }, "required": ["start_addr", "end_addr"]})),
+
+            tool_schema("emulate_snippet_native",
+                "Execute an ARM64 code region in unicorn ARM64 sandbox. Full native emulation with memory support. Returns final register state, memory writes, and decoded strings.",
+                json!({"type": "object", "properties": {
+                    "start_addr": {"type": "string", "description": "Hex address to begin execution, e.g. '0x1234'"},
+                    "end_addr": {"type": "string", "description": "Hex address to stop execution (exclusive)"},
+                    "initial_registers": {"type": "object", "description": "Register values at entry. Keys: x0-x30, sp, pc, nzcv. Values: hex strings or integers.", "additionalProperties": {}},
+                    "initial_memory": {"type": "object", "description": "Memory overlays. Keys: hex addresses. Values: hex string or array of bytes.", "additionalProperties": {}},
+                    "step_limit": {"type": "integer", "description": "Max instructions to execute (default 1000)", "default": 1000}
+                }, "required": ["start_addr", "end_addr"]})),
+
             tool_schema("emulate_snippet",
-                "Execute an ARM64 code region in a bounded sandbox. Returns final register state, memory writes, and any decoded strings. Use for reversing obfuscated loops, string decryption, or format decoders.",
+                "Execute an ARM64 code region in a bounded sandbox. Alias for emulate_snippet_native. Returns final register state, memory writes, and any decoded strings. Use for reversing obfuscated loops, string decryption, or format decoders.",
                 json!({"type": "object", "properties": {
                     "start_addr": {"type": "string", "description": "Hex address to begin execution, e.g. '0x1234'"},
                     "end_addr": {"type": "string", "description": "Hex address to stop execution (exclusive)"},
