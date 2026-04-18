@@ -5644,6 +5644,13 @@ mod tests {
         assert_eq!(LAST_TRANSLATE_TARGET.load(Ordering::SeqCst), 0x2000);
         assert_eq!(BRIDGE_COUNT.load(Ordering::SeqCst), 0);
         assert_eq!(LAST_BRIDGE_TARGET.load(Ordering::SeqCst), 0);
+
+        // Cleanup: clear callbacks to avoid polluting subsequent tests
+        {
+            let mut cleanup = JitCompiler::new(JitConfig::default());
+            cleanup.set_branch_translate_callback(None);
+            cleanup.set_branch_bridge_callback(None);
+        }
     }
 
     #[test]
@@ -5687,6 +5694,13 @@ mod tests {
         assert_eq!(LAST_BRIDGE_TARGET.load(Ordering::SeqCst), 0x7000);
         assert_eq!(LAST_BRIDGE_CTX_X30.load(Ordering::SeqCst), 0x2000);
         assert_eq!(next, 0x2000);
+
+        // Cleanup: clear callbacks to avoid polluting subsequent tests
+        {
+            let mut cleanup = JitCompiler::new(JitConfig::default());
+            cleanup.set_branch_translate_callback(None);
+            cleanup.set_branch_bridge_callback(None);
+        }
     }
 
     #[test]
