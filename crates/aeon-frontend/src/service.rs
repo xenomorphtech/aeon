@@ -48,6 +48,7 @@ impl AeonFrontend {
             "get_function_at" => self.tool_get_function_at(args),
             "get_string" => self.tool_get_string(args),
             "get_data" => self.tool_get_data(args),
+            "emulate_snippet" => self.tool_emulate_snippet(args),
             _ => Err(format!("Unknown tool: {}", name)),
         }
     }
@@ -326,6 +327,21 @@ impl AeonFrontend {
             .unwrap_or(64) as usize;
         session.get_data(addr, size)
     }
+
+    fn tool_emulate_snippet(&self, args: &Value) -> Result<Value, String> {
+        let session = self.require_session()?;
+        let start_addr = parse_addr_arg(args)?;
+        let end_addr = parse_hex_arg(args, "end_addr")?;
+        let step_limit = args
+            .get("step_limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1000) as usize;
+
+        let initial_registers = parse_register_map(args)?;
+        let initial_memory = parse_memory_map(args)?;
+
+        session.emulate_snippet(start_addr, end_addr, initial_registers, initial_memory, step_limit)
+    }
 }
 
 pub fn tools_list() -> Value {
@@ -493,6 +509,16 @@ pub fn tools_list() -> Value {
                     "addr": {"type": "string", "description": "Virtual address in hex"},
                     "size": {"type": "integer", "description": "Number of bytes to read", "default": 64}
                 }, "required": ["addr"]})),
+
+            tool_schema("emulate_snippet",
+                "Execute an ARM64 code region in a bounded sandbox. Returns final register state, memory writes, and any decoded strings. Use for reversing obfuscated loops, string decryption, or format decoders.",
+                json!({"type": "object", "properties": {
+                    "start_addr": {"type": "string", "description": "Hex address to begin execution, e.g. '0x1234'"},
+                    "end_addr": {"type": "string", "description": "Hex address to stop execution (exclusive)"},
+                    "initial_registers": {"type": "object", "description": "Register values at entry. Keys: x0-x30, sp, pc, nzcv. Values: hex strings or integers.", "additionalProperties": {}},
+                    "initial_memory": {"type": "object", "description": "Memory overlays. Keys: hex addresses. Values: hex string or array of bytes.", "additionalProperties": {}},
+                    "step_limit": {"type": "integer", "description": "Max instructions to execute (default 1000)", "default": 1000}
+                }, "required": ["start_addr", "end_addr"]})),
         ]
     })
 }
@@ -550,6 +576,71 @@ fn parse_bool_arg(args: &Value, key: &str, default: bool) -> Result<bool, String
             .ok_or_else(|| format!("Invalid boolean parameter: {}", key)),
         None => Ok(default),
     }
+}
+
+fn parse_hex_arg(args: &Value, key: &str) -> Result<u64, String> {
+    let s = args
+        .get(key)
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| format!("Missing required parameter: {}", key))?;
+    parse_hex(s).ok_or_else(|| format!("Invalid hex address for {}: {}", key, s))
+}
+
+fn parse_register_map(args: &Value) -> Result<std::collections::HashMap<String, u64>, String> {
+    use std::collections::HashMap;
+    let mut result = HashMap::new();
+
+    if let Some(regs) = args.get("initial_registers").and_then(|v| v.as_object()) {
+        for (name, value) in regs {
+            let val = if let Some(s) = value.as_str() {
+                parse_hex(s).ok_or_else(|| format!("Invalid hex value for register {}: {}", name, s))?
+            } else if let Some(n) = value.as_u64() {
+                n
+            } else {
+                return Err(format!("Invalid register value for {}: expected hex string or integer", name));
+            };
+            result.insert(name.clone(), val);
+        }
+    }
+
+    Ok(result)
+}
+
+fn parse_memory_map(args: &Value) -> Result<std::collections::HashMap<u64, Vec<u8>>, String> {
+    use std::collections::HashMap;
+    let mut result = HashMap::new();
+
+    if let Some(mem) = args.get("initial_memory").and_then(|v| v.as_object()) {
+        for (addr_str, value) in mem {
+            let addr = parse_hex(addr_str)
+                .ok_or_else(|| format!("Invalid hex address for memory: {}", addr_str))?;
+
+            let bytes = if let Some(s) = value.as_str() {
+                // Parse hex string
+                let hex_str = s.trim_start_matches("0x").trim_start_matches("0X");
+                let num = u64::from_str_radix(hex_str, 16)
+                    .map_err(|_| format!("Invalid hex value: {}", s))?;
+                // Convert u64 to little-endian bytes
+                num.to_le_bytes().to_vec()
+            } else if let Some(arr) = value.as_array() {
+                // Parse array of bytes
+                let mut bytes = Vec::new();
+                for item in arr {
+                    let byte = item.as_u64()
+                        .ok_or_else(|| format!("Invalid byte value in memory array"))?
+                        as u8;
+                    bytes.push(byte);
+                }
+                bytes
+            } else {
+                return Err(format!("Invalid memory value at {}: expected hex string or array of bytes", addr_str));
+            };
+
+            result.insert(addr, bytes);
+        }
+    }
+
+    Ok(result)
 }
 
 fn escape_markdown_cell(value: &str) -> String {
@@ -653,5 +744,29 @@ mod tests {
                 .is_some_and(|slots| !slots.is_empty()),
             "stack frame output should expose stack-slot summaries"
         );
+    }
+
+    #[test]
+    fn emulate_snippet_in_tools_list() {
+        let tool_list = tools_list();
+        let tools = tool_list["tools"]
+            .as_array()
+            .expect("tools list should be an array");
+
+        let emulate_tool = tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(|n| n.as_str()) == Some("emulate_snippet"))
+            .expect("emulate_snippet tool should be registered");
+
+        assert!(emulate_tool["description"]
+            .as_str()
+            .unwrap()
+            .contains("Execute an ARM64 code region"));
+
+        let schema = &emulate_tool["inputSchema"];
+        assert_eq!(schema["type"], "object");
+        assert!(schema["properties"].get("start_addr").is_some());
+        assert!(schema["properties"].get("end_addr").is_some());
+        assert!(schema["properties"].get("step_limit").is_some());
     }
 }

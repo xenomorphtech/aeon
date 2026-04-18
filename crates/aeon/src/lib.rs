@@ -12,5 +12,6 @@ pub mod lifter;
 pub mod object_layout;
 pub mod pointer_analysis;
 pub mod rc4_search;
+pub mod sandbox;
 
 pub use api::AeonSession;

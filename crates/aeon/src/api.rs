@@ -565,6 +565,20 @@ impl AeonSession {
         report
     }
 
+    pub fn emulate_snippet(
+        &self,
+        start_addr: u64,
+        end_addr: u64,
+        initial_registers: HashMap<String, u64>,
+        initial_memory: HashMap<u64, Vec<u8>>,
+        step_limit: usize,
+    ) -> Result<Value, String> {
+        use crate::sandbox::{run_sandbox, SandboxConfig};
+        let config = SandboxConfig { step_limit, ..Default::default() };
+        let result = run_sandbox(&self.binary, start_addr, end_addr, &initial_registers, &initial_memory, &config)?;
+        serde_json::to_value(&result).map_err(|e| format!("serialize result: {}", e))
+    }
+
     fn with_function_artifacts<T>(
         &self,
         addr: u64,
