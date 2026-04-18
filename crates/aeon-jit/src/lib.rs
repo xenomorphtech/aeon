@@ -1356,7 +1356,7 @@ impl LoweringState {
             }
             Stmt::Ret => {
                 self.flush_scalars(builder)?;
-                let ret = builder.ins().iconst(types::I64, 0);
+                let ret = self.read_x(builder, 30)?;
                 builder.ins().return_(&[ret]);
                 self.terminated = true;
             }
@@ -5447,50 +5447,70 @@ fn simd_offset(index: usize) -> usize {
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::cell::RefCell;
+    use std::sync::{Mutex, OnceLock};
 
-    static READ_COUNT: AtomicUsize = AtomicUsize::new(0);
-    static WRITE_COUNT: AtomicUsize = AtomicUsize::new(0);
-    static BRIDGE_COUNT: AtomicUsize = AtomicUsize::new(0);
-    static LAST_READ_ADDR: AtomicU64 = AtomicU64::new(0);
-    static LAST_WRITE_ADDR: AtomicU64 = AtomicU64::new(0);
-    static LAST_WRITE_VALUE: AtomicU64 = AtomicU64::new(0);
-    static LAST_TRANSLATE_TARGET: AtomicU64 = AtomicU64::new(0);
-    static LAST_BRIDGE_TARGET: AtomicU64 = AtomicU64::new(0);
-    static LAST_BRIDGE_CTX_X30: AtomicU64 = AtomicU64::new(0);
+    fn callback_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    thread_local! {
+        static READ_COUNT: RefCell<usize> = RefCell::new(0);
+        static WRITE_COUNT: RefCell<usize> = RefCell::new(0);
+        static BRIDGE_COUNT: RefCell<usize> = RefCell::new(0);
+        static LAST_READ_ADDR: RefCell<u64> = RefCell::new(0);
+        static LAST_WRITE_ADDR: RefCell<u64> = RefCell::new(0);
+        static LAST_WRITE_VALUE: RefCell<u64> = RefCell::new(0);
+        static LAST_TRANSLATE_TARGET: RefCell<u64> = RefCell::new(0);
+        static LAST_BRIDGE_TARGET: RefCell<u64> = RefCell::new(0);
+        static LAST_BRIDGE_CTX_X30: RefCell<u64> = RefCell::new(0);
+    }
+
+    fn reset_test_statics() {
+        READ_COUNT.with(|v| *v.borrow_mut() = 0);
+        WRITE_COUNT.with(|v| *v.borrow_mut() = 0);
+        BRIDGE_COUNT.with(|v| *v.borrow_mut() = 0);
+        LAST_READ_ADDR.with(|v| *v.borrow_mut() = 0);
+        LAST_WRITE_ADDR.with(|v| *v.borrow_mut() = 0);
+        LAST_WRITE_VALUE.with(|v| *v.borrow_mut() = 0);
+        LAST_TRANSLATE_TARGET.with(|v| *v.borrow_mut() = 0);
+        LAST_BRIDGE_TARGET.with(|v| *v.borrow_mut() = 0);
+        LAST_BRIDGE_CTX_X30.with(|v| *v.borrow_mut() = 0);
+    }
 
     extern "C" fn test_on_memory_read(addr: u64, _size: u8) {
-        READ_COUNT.fetch_add(1, Ordering::SeqCst);
-        LAST_READ_ADDR.store(addr, Ordering::SeqCst);
+        READ_COUNT.with(|v| *v.borrow_mut() += 1);
+        LAST_READ_ADDR.with(|v| *v.borrow_mut() = addr);
     }
 
     extern "C" fn test_on_memory_write(addr: u64, _size: u8, value: u64) {
-        WRITE_COUNT.fetch_add(1, Ordering::SeqCst);
-        LAST_WRITE_ADDR.store(addr, Ordering::SeqCst);
-        LAST_WRITE_VALUE.store(value, Ordering::SeqCst);
+        WRITE_COUNT.with(|v| *v.borrow_mut() += 1);
+        LAST_WRITE_ADDR.with(|v| *v.borrow_mut() = addr);
+        LAST_WRITE_VALUE.with(|v| *v.borrow_mut() = value);
     }
 
     extern "C" fn test_branch_translate_dynamic(target: u64) -> u64 {
-        LAST_TRANSLATE_TARGET.store(target, Ordering::SeqCst);
+        LAST_TRANSLATE_TARGET.with(|v| *v.borrow_mut() = target);
         0
     }
 
     extern "C" fn test_branch_translate_identity(target: u64) -> u64 {
-        LAST_TRANSLATE_TARGET.store(target, Ordering::SeqCst);
+        LAST_TRANSLATE_TARGET.with(|v| *v.borrow_mut() = target);
         target
     }
 
     extern "C" fn test_branch_bridge_count(_ctx: *mut JitContext, target: u64) -> u64 {
-        BRIDGE_COUNT.fetch_add(1, Ordering::SeqCst);
-        LAST_BRIDGE_TARGET.store(target, Ordering::SeqCst);
+        BRIDGE_COUNT.with(|v| *v.borrow_mut() += 1);
+        LAST_BRIDGE_TARGET.with(|v| *v.borrow_mut() = target);
         target
     }
 
     extern "C" fn test_branch_bridge_capture_x30(ctx: *mut JitContext, target: u64) -> u64 {
-        BRIDGE_COUNT.fetch_add(1, Ordering::SeqCst);
-        LAST_BRIDGE_TARGET.store(target, Ordering::SeqCst);
+        BRIDGE_COUNT.with(|v| *v.borrow_mut() += 1);
+        LAST_BRIDGE_TARGET.with(|v| *v.borrow_mut() = target);
         let x30 = unsafe { ctx.as_ref().map(|ctx| ctx.x[30]).unwrap_or(0) };
-        LAST_BRIDGE_CTX_X30.store(x30, Ordering::SeqCst);
+        LAST_BRIDGE_CTX_X30.with(|v| *v.borrow_mut() = x30);
         x30
     }
 
@@ -5535,11 +5555,7 @@ mod tests {
 
     #[test]
     fn compiles_and_executes_a_basic_block() {
-        READ_COUNT.store(0, Ordering::SeqCst);
-        WRITE_COUNT.store(0, Ordering::SeqCst);
-        LAST_READ_ADDR.store(0, Ordering::SeqCst);
-        LAST_WRITE_ADDR.store(0, Ordering::SeqCst);
-        LAST_WRITE_VALUE.store(0, Ordering::SeqCst);
+        reset_test_statics();
 
         let mut compiler = JitCompiler::new(JitConfig {
             instrument_memory: true,
@@ -5601,25 +5617,22 @@ mod tests {
         assert_eq!(slot, 12);
         assert_eq!(compiler.block_id(0x1000), Some(0));
         assert_eq!(counters[0], 1);
-        assert_eq!(READ_COUNT.load(Ordering::SeqCst), 1);
-        assert_eq!(WRITE_COUNT.load(Ordering::SeqCst), 1);
+        assert_eq!(READ_COUNT.with(|v| *v.borrow()), 1);
+        assert_eq!(WRITE_COUNT.with(|v| *v.borrow()), 1);
         assert_eq!(
-            LAST_READ_ADDR.load(Ordering::SeqCst),
+            LAST_READ_ADDR.with(|v| *v.borrow()),
             (&mut slot as *mut u64) as u64
         );
         assert_eq!(
-            LAST_WRITE_ADDR.load(Ordering::SeqCst),
+            LAST_WRITE_ADDR.with(|v| *v.borrow()),
             (&mut slot as *mut u64) as u64
         );
-        assert_eq!(LAST_WRITE_VALUE.load(Ordering::SeqCst), 12);
+        assert_eq!(LAST_WRITE_VALUE.with(|v| *v.borrow()), 12);
     }
 
     #[test]
     fn branch_translate_zero_returns_raw_target_without_bridge() {
-        BRIDGE_COUNT.store(0, Ordering::SeqCst);
-        LAST_TRANSLATE_TARGET.store(0, Ordering::SeqCst);
-        LAST_BRIDGE_TARGET.store(0, Ordering::SeqCst);
-        LAST_BRIDGE_CTX_X30.store(0, Ordering::SeqCst);
+        reset_test_statics();
 
         let mut compiler = JitCompiler::new(JitConfig::default());
         compiler.set_branch_translate_callback(Some(test_branch_translate_dynamic));
@@ -5641,9 +5654,9 @@ mod tests {
 
         assert_eq!(next, 0x2000);
         assert_eq!(ctx.pc, 0x2000);
-        assert_eq!(LAST_TRANSLATE_TARGET.load(Ordering::SeqCst), 0x2000);
-        assert_eq!(BRIDGE_COUNT.load(Ordering::SeqCst), 0);
-        assert_eq!(LAST_BRIDGE_TARGET.load(Ordering::SeqCst), 0);
+        assert_eq!(LAST_TRANSLATE_TARGET.with(|v| *v.borrow()), 0x2000);
+        assert_eq!(BRIDGE_COUNT.with(|v| *v.borrow()), 0);
+        assert_eq!(LAST_BRIDGE_TARGET.with(|v| *v.borrow()), 0);
 
         // Cleanup: clear callbacks to avoid polluting subsequent tests
         {
@@ -5655,10 +5668,7 @@ mod tests {
 
     #[test]
     fn unresolved_branch_bridge_sees_flushed_x30() {
-        BRIDGE_COUNT.store(0, Ordering::SeqCst);
-        LAST_TRANSLATE_TARGET.store(0, Ordering::SeqCst);
-        LAST_BRIDGE_TARGET.store(0, Ordering::SeqCst);
-        LAST_BRIDGE_CTX_X30.store(0, Ordering::SeqCst);
+        reset_test_statics();
 
         let mut compiler = JitCompiler::new(JitConfig::default());
         compiler.set_branch_translate_callback(Some(test_branch_translate_identity));
@@ -5689,10 +5699,10 @@ mod tests {
         ctx.x[30] = 0xdeadbeef;
         let next = unsafe { func(&mut ctx) };
 
-        assert_eq!(LAST_TRANSLATE_TARGET.load(Ordering::SeqCst), 0x7000);
-        assert_eq!(BRIDGE_COUNT.load(Ordering::SeqCst), 1);
-        assert_eq!(LAST_BRIDGE_TARGET.load(Ordering::SeqCst), 0x7000);
-        assert_eq!(LAST_BRIDGE_CTX_X30.load(Ordering::SeqCst), 0x2000);
+        assert_eq!(LAST_TRANSLATE_TARGET.with(|v| *v.borrow()), 0x7000);
+        assert_eq!(BRIDGE_COUNT.with(|v| *v.borrow()), 1);
+        assert_eq!(LAST_BRIDGE_TARGET.with(|v| *v.borrow()), 0x7000);
+        assert_eq!(LAST_BRIDGE_CTX_X30.with(|v| *v.borrow()), 0x2000);
         assert_eq!(next, 0x2000);
 
         // Cleanup: clear callbacks to avoid polluting subsequent tests
@@ -5740,6 +5750,7 @@ mod tests {
 
     #[test]
     fn executes_checksum_loop_block_with_post_index_load() {
+        reset_test_statics();
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![
             Stmt::Assign {
@@ -7346,6 +7357,7 @@ mod tests {
 
     #[test]
     fn flag_cond_eq_and_ne() {
+        reset_test_statics();
         // equal
         assert_eq!(branch_result(Condition::EQ, 5, 5), 0x2000);
         assert_eq!(branch_result(Condition::NE, 5, 5), 0x1004);
@@ -7356,6 +7368,7 @@ mod tests {
 
     #[test]
     fn flag_cond_cs_cc_unsigned_carry() {
+        reset_test_statics();
         // 5 - 3 = 2 → carry set (no borrow)
         assert_eq!(branch_result(Condition::CS, 5, 3), 0x2000);
         assert_eq!(branch_result(Condition::CC, 5, 3), 0x1004);
@@ -7366,6 +7379,7 @@ mod tests {
 
     #[test]
     fn flag_cond_mi_pl_negative() {
+        reset_test_statics();
         // 3 - 5 = -2 → negative
         assert_eq!(branch_result(Condition::MI, 3, 5), 0x2000);
         assert_eq!(branch_result(Condition::PL, 3, 5), 0x1004);
@@ -7379,6 +7393,7 @@ mod tests {
 
     #[test]
     fn flag_cond_hi_ls_unsigned_greater() {
+        reset_test_statics();
         // HI = unsigned higher (C && !Z)
         assert_eq!(branch_result(Condition::HI, 5, 3), 0x2000);
         assert_eq!(branch_result(Condition::LS, 5, 3), 0x1004);
@@ -7392,6 +7407,7 @@ mod tests {
 
     #[test]
     fn flag_cond_ge_lt_signed() {
+        reset_test_statics();
         // signed: 5 >= 3
         assert_eq!(branch_result(Condition::GE, 5, 3), 0x2000);
         assert_eq!(branch_result(Condition::LT, 5, 3), 0x1004);
@@ -7409,6 +7425,7 @@ mod tests {
 
     #[test]
     fn flag_cond_gt_le_signed() {
+        reset_test_statics();
         // 5 > 3
         assert_eq!(branch_result(Condition::GT, 5, 3), 0x2000);
         assert_eq!(branch_result(Condition::LE, 5, 3), 0x1004);
@@ -7422,6 +7439,7 @@ mod tests {
 
     #[test]
     fn flag_cond_vs_vc_overflow() {
+        reset_test_statics();
         // Signed overflow: MAX_POSITIVE - (-1) = MAX+1 → overflow
         let max_pos = i64::MAX as u64; // 0x7FFFFFFFFFFFFFFF
         let neg1 = u64::MAX; // -1
