@@ -54,6 +54,8 @@ impl AeonFrontend {
             "emulate_snippet_il" => self.tool_emulate_snippet_il(args),
             "emulate_snippet_native" => self.tool_emulate_snippet_native(args),
             "emulate_snippet" => self.tool_emulate_snippet_native(args),
+            "emulate_snippet_native_advanced" => self.tool_emulate_snippet_native_advanced(args),
+            "execute_datalog" => self.tool_execute_datalog(args),
             _ => Err(format!("Unknown tool: {}", name)),
         }
     }
@@ -233,6 +235,19 @@ impl AeonFrontend {
         Ok(session.get_xrefs(addr))
     }
 
+    fn tool_execute_datalog(&self, args: &Value) -> Result<Value, String> {
+        let session = self.require_session()?;
+        let query = args
+            .get("query")
+            .and_then(|value| value.as_str())
+            .ok_or("Missing required parameter: query")?;
+        let addr = parse_addr_arg(args)?;
+        let register = args.get("register").and_then(|value| value.as_str());
+        let limit = args.get("limit").and_then(|value| value.as_u64()).map(|v| v as usize);
+
+        session.execute_datalog(query, addr, register, limit)
+    }
+
     fn tool_scan_pointers(&self) -> Result<Value, String> {
         let session = self.require_session()?;
         Ok(session.scan_pointers())
@@ -388,6 +403,38 @@ impl AeonFrontend {
 
         session.emulate_snippet(start_addr, end_addr, initial_registers, initial_memory, step_limit)
     }
+
+    fn tool_emulate_snippet_native_advanced(&self, args: &Value) -> Result<Value, String> {
+        let session = self.require_session()?;
+        let start_addr = parse_hex_arg(args, "start_addr")?;
+        let end_addr = parse_hex_arg(args, "end_addr")?;
+        let step_limit = args
+            .get("step_limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1000) as usize;
+
+        let initial_registers = parse_register_map(args)?;
+        let initial_memory = parse_memory_map(args)?;
+        let watchpoints = parse_watchpoints(args)?;
+        let address_hooks = parse_address_hooks(args)?;
+        let record_pc_trace = args
+            .get("record_pc_trace")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let req = aeon::api::AdvancedEmulationRequest {
+            start_addr,
+            end_addr,
+            initial_registers,
+            initial_memory,
+            step_limit,
+            watchpoints,
+            address_hooks,
+            record_pc_trace,
+        };
+
+        session.emulate_snippet_native_advanced(req)
+    }
 }
 
 pub fn tools_list() -> Value {
@@ -507,6 +554,15 @@ pub fn tools_list() -> Value {
                     "addr": {"type": "string", "description": "Function address in hex"}
                 }, "required": ["addr"]})),
 
+            tool_schema("execute_datalog",
+                "Run a named Datalog query over a function or the whole binary. Returns structured facts derived by the ascent Datalog engine from lifted AeonIL.",
+                json!({"type": "object", "properties": {
+                    "query": {"type": "string", "enum": ["reachability", "defines", "reads_mem", "writes_mem", "flows_to", "call_graph", "call_graph_transitive"], "description": "Named Datalog query to execute"},
+                    "addr": {"type": "string", "description": "Virtual address in hex. For per-function queries, identifies the function. For cross-function queries, identifies the root function."},
+                    "register": {"type": "string", "description": "Register name (e.g. 'x0', 'w1', 'sp'). Required for 'defines' and 'flows_to' queries."},
+                    "limit": {"type": "integer", "description": "Maximum number of result tuples to return", "default": 500}
+                }, "required": ["query", "addr"]})),
+
             tool_schema("scan_pointers",
                 "Scan non-executable mapped sections for pointer-sized values that reference other locations in the binary, classifying data-to-data and data-to-code edges.",
                 json!({"type": "object", "properties": {}})),
@@ -604,9 +660,277 @@ pub fn tools_list() -> Value {
                     "initial_registers": {"type": "object", "description": "Register values at entry. Keys: x0-x30, sp, pc, nzcv. Values: hex strings or integers.", "additionalProperties": {}},
                     "initial_memory": {"type": "object", "description": "Memory overlays. Keys: hex addresses. Values: hex string or array of bytes.", "additionalProperties": {}},
                     "step_limit": {"type": "integer", "description": "Max instructions to execute (default 1000)", "default": 1000}
-                }, "required": ["start_addr", "end_addr"]})),
+                }, "required": ["start_addr", "end_addr"]}))
         ]
+    });
+
+    let mut tools_vec = tools_list_base();
+    tools_vec.push(tool_schema("emulate_snippet_native_advanced",
+        "Execute an ARM64 code region with advanced features: memory watchpoints, instruction hooks with register patching, PC tracing, and extended register state (SIMD).",
+        build_advanced_emulation_schema()));
+
+    json!({
+        "tools": tools_vec
     })
+}
+
+fn build_advanced_emulation_schema() -> Value {
+    let mut props = serde_json::Map::new();
+    props.insert("start_addr".to_string(), json!({"type": "string", "description": "Hex address to begin execution, e.g. '0x1234'"}));
+    props.insert("end_addr".to_string(), json!({"type": "string", "description": "Hex address to stop execution (exclusive)"}));
+    props.insert("initial_registers".to_string(), json!({"type": "object", "description": "Register values at entry. Keys: x0-x30, sp, pc, nzcv. Values: hex strings or integers.", "additionalProperties": {}}));
+    props.insert("initial_memory".to_string(), json!({"type": "object", "description": "Memory overlays. Keys: hex addresses. Values: hex string or array of bytes.", "additionalProperties": {}}));
+    props.insert("step_limit".to_string(), json!({"type": "integer", "description": "Max instructions to execute (default 1000)", "default": 1000}));
+
+    let wpt_patch = json!({"type": "object", "properties": {
+        "name": {"type": "string", "description": "Register name (x0-x30, sp, pc, nzcv)"},
+        "value": {"type": "string", "description": "Value in hex"}
+    }, "required": ["name", "value"]});
+
+    let wpt_item = json!({"type": "object", "properties": {
+        "addr": {"type": "string", "description": "Watchpoint address in hex"},
+        "size": {"type": "integer", "description": "Range size (default 8)"},
+        "on_read": {"type": "boolean", "description": "Trigger on reads (default false)"},
+        "on_write": {"type": "boolean", "description": "Trigger on writes (default true)"},
+        "stop_on_hit": {"type": "boolean", "description": "Stop execution on hit (default false)"}
+    }, "required": ["addr"]});
+
+    let hook_item = json!({"type": "object", "properties": {
+        "addr": {"type": "string", "description": "Hook address in hex"},
+        "stop_on_hit": {"type": "boolean", "description": "Stop execution on hit (default false)"},
+        "patches": {"type": "array", "description": "Register patches to apply", "items": wpt_patch}
+    }, "required": ["addr"]});
+
+    props.insert("watchpoints".to_string(), json!({"type": "array", "description": "Memory watchpoints to track", "items": wpt_item}));
+    props.insert("address_hooks".to_string(), json!({"type": "array", "description": "Instruction hooks with optional register patches", "items": hook_item}));
+    props.insert("record_pc_trace".to_string(), json!({"type": "boolean", "description": "Record visited PC values (default false)"}));
+
+    json!({"type": "object", "properties": props, "required": ["start_addr", "end_addr"]})
+}
+
+fn tools_list_base() -> Vec<Value> {
+    vec![
+        tool_schema("load_binary",
+            "Load an ELF or raw AArch64 binary for analysis. Must be called before other tools.",
+            json!({"type": "object", "properties": {
+                "path": {"type": "string", "description": "Path to binary"},
+                "format": {"type": "string", "description": "Binary format: 'elf' or 'raw'", "default": "elf"},
+                "base_addr": {"type": "string", "description": "Required for raw binaries: virtual base address in hex"}
+            }, "required": ["path"]})),
+
+        tool_schema("list_functions",
+            "List functions discovered from .eh_frame unwind tables. Supports pagination and name filtering.",
+            json!({"type": "object", "properties": {
+                "offset": {"type": "integer", "description": "Start index", "default": 0},
+                "limit": {"type": "integer", "description": "Max results", "default": 100},
+                "name_filter": {"type": "string", "description": "Substring filter on symbol name"}
+            }})),
+
+        tool_schema("set_analysis_name",
+            "Backwards-compatible alias for rename_symbol. Attaches or overwrites a semantic symbol on an address.",
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Virtual address in hex"},
+                "name": {"type": "string", "description": "Analysis name to assign to the address"}
+            }, "required": ["addr", "name"]})),
+
+        tool_schema("rename_symbol",
+            "Attach or overwrite a semantic symbol name on an address.",
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Virtual address in hex"},
+                "name": {"type": "string", "description": "Semantic symbol name to assign to the address"}
+            }, "required": ["addr", "name"]})),
+
+        tool_schema("define_struct",
+            "Attach or overwrite a structure definition on an address.",
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Virtual address in hex"},
+                "definition": {"type": "string", "description": "Structure definition text"}
+            }, "required": ["addr", "definition"]})),
+
+        tool_schema("add_hypothesis",
+            "Record a semantic hypothesis on an address. Duplicate notes are ignored.",
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Virtual address in hex"},
+                "note": {"type": "string", "description": "Hypothesis or analyst note"}
+            }, "required": ["addr", "note"]})),
+
+        tool_schema("search_analysis_names",
+            "Search analysis names attached to addresses using a regex pattern.",
+            json!({"type": "object", "properties": {
+                "pattern": {"type": "string", "description": "Regex pattern matched against analysis names"}
+            }, "required": ["pattern"]})),
+
+        tool_schema("get_blackboard_entry",
+            "Look up all semantic context recorded for an address: symbol name, struct definition, hypotheses, and containing function. Use to inspect what the blackboard knows about a specific address.",
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Address to look up in hex"}
+            }, "required": ["addr"]})),
+
+        tool_schema("get_il",
+            "Get the lifted AeonIL intermediate language listing for the function containing a given address.",
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"}
+            }, "required": ["addr"]})),
+
+        tool_schema("get_function_il",
+            "Backwards-compatible alias for get_il.",
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"}
+            }, "required": ["addr"]})),
+
+        tool_schema("get_reduced_il",
+            "Return block-structured reduced AeonIL for the function containing a given address.",
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"}
+            }, "required": ["addr"]})),
+
+        tool_schema("get_ssa",
+            "Return reduced SSA form for the function containing a given address, optionally optimized.",
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"},
+                "optimize": {"type": "boolean", "description": "Run SSA optimization passes before returning JSON", "default": true}
+            }, "required": ["addr"]})),
+
+        tool_schema("get_stack_frame",
+            "Summarize the detected stack frame and visible stack-slot accesses for the function containing a given address.",
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"}
+            }, "required": ["addr"]})),
+
+        tool_schema("get_function_cfg",
+            "Get the Control Flow Graph for a function. Returns adjacency list, terminal blocks, and reachability from Datalog analysis.",
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Function address in hex"}
+            }, "required": ["addr"]})),
+
+        tool_schema("get_function_skeleton",
+            "Get a dense summary of function properties for efficient triage: argument count, calls, strings, loops, crypto constants, stack frame size, and suspicious patterns.",
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Function address in hex"}
+            }, "required": ["addr"]})),
+
+        tool_schema("get_data_flow_slice",
+            "Trace value flow for a register backward or forward through a function: backward shows where a value comes from, forward shows where it goes. Detects data dependencies through assignments and control flow.",
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Instruction address in hex, e.g. '0x5e611fc'"},
+                "register": {"type": "string", "description": "Register name (e.g., 'x0', 'w1', 'sp')"},
+                "direction": {"type": "string", "enum": ["backward", "forward"], "description": "Direction of data flow to trace"}
+            }, "required": ["addr", "register", "direction"]})),
+
+        tool_schema("get_xrefs",
+            "Get cross-references for an address: outgoing calls from the function, and incoming calls from other functions.",
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Function address in hex"}
+            }, "required": ["addr"]})),
+
+        tool_schema("execute_datalog",
+            "Run a named Datalog query over a function or the whole binary. Returns structured facts derived by the ascent Datalog engine from lifted AeonIL.",
+            json!({"type": "object", "properties": {
+                "query": {"type": "string", "enum": ["reachability", "defines", "reads_mem", "writes_mem", "flows_to", "call_graph", "call_graph_transitive"], "description": "Named Datalog query to execute"},
+                "addr": {"type": "string", "description": "Virtual address in hex. For per-function queries, identifies the function. For cross-function queries, identifies the root function."},
+                "register": {"type": "string", "description": "Register name (e.g. 'x0', 'w1', 'sp'). Required for 'defines' and 'flows_to' queries."},
+                "limit": {"type": "integer", "description": "Maximum number of result tuples to return", "default": 500}
+            }, "required": ["query", "addr"]})),
+
+        tool_schema("scan_pointers",
+            "Scan non-executable mapped sections for pointer-sized values that reference other locations in the binary, classifying data-to-data and data-to-code edges.",
+            json!({"type": "object", "properties": {}})),
+
+        tool_schema("scan_vtables",
+            "Detect candidate C++ vtables in .rodata/.data-style sections by finding arrays of function pointers and grouping related tables.",
+            json!({"type": "object", "properties": {}})),
+
+        tool_schema("get_function_pointers",
+            "Enumerate pointer-valued operands and resolved code/data references for one function or a paginated slice of functions.",
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Optional function address in hex; when present, analyzes the containing function"},
+                "offset": {"type": "integer", "description": "Start index when scanning multiple functions", "default": 0},
+                "limit": {"type": "integer", "description": "Max functions to analyze when addr is omitted", "default": 50}
+            }})),
+
+        tool_schema("find_call_paths",
+            "Find shortest and optionally all bounded call-graph paths between two functions using direct calls and vtable-resolved indirect calls.",
+            json!({"type": "object", "properties": {
+                "start_addr": {"type": "string", "description": "Start function address in hex"},
+                "goal_addr": {"type": "string", "description": "Goal function address in hex"},
+                "max_depth": {"type": "integer", "description": "Maximum call depth to explore", "default": 6},
+                "include_all_paths": {"type": "boolean", "description": "Include all simple paths up to max_depth", "default": false},
+                "max_paths": {"type": "integer", "description": "Maximum number of paths to return when include_all_paths is true", "default": 32}
+            }, "required": ["start_addr", "goal_addr"]})),
+
+        tool_schema("get_bytes",
+            "Read raw bytes from the binary at a virtual address. Returns hex-encoded string.",
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Virtual address in hex"},
+                "size": {"type": "integer", "description": "Number of bytes", "default": 64}
+            }, "required": ["addr"]})),
+
+        tool_schema("search_rc4",
+            "Search for RC4 cipher implementations using Datalog behavioral subgraph isomorphism. Detects KSA (swap+256+mod256) and PRGA (swap+keystream XOR) patterns.",
+            json!({"type": "object", "properties": {}})),
+
+        tool_schema("get_coverage",
+            "Get IL lift coverage statistics: proper IL vs intrinsic vs nop vs decode errors.",
+            json!({"type": "object", "properties": {}})),
+
+        tool_schema("get_asm",
+            "Disassemble ARM64 instructions between two virtual addresses. Returns asm only, without AeonIL.",
+            json!({"type": "object", "properties": {
+                "start_addr": {"type": "string", "description": "Start virtual address in hex, e.g. '0x512025c'"},
+                "stop_addr": {"type": "string", "description": "Stop virtual address in hex (exclusive), e.g. '0x51202cc'"}
+            }, "required": ["start_addr", "stop_addr"]})),
+
+        tool_schema("get_function_at",
+            "Find the function containing a given address. Returns function metadata by default, and can optionally attach asm and/or AeonIL listings.",
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"},
+                "include_asm": {"type": "boolean", "description": "Include asm in the returned listing", "default": false},
+                "include_il": {"type": "boolean", "description": "Include AeonIL in the returned listing", "default": false}
+            }, "required": ["addr"]})),
+
+        tool_schema("get_string",
+            "Read a null-terminated string at any virtual address (works across all ELF segments, not just .text).",
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Virtual address in hex"},
+                "max_len": {"type": "integer", "description": "Max bytes to scan for null terminator", "default": 256}
+            }, "required": ["addr"]})),
+
+        tool_schema("get_data",
+            "Read raw bytes at any virtual address (works across all ELF segments). Returns hex + ASCII.",
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Virtual address in hex"},
+                "size": {"type": "integer", "description": "Number of bytes to read", "default": 64}
+            }, "required": ["addr"]})),
+
+        tool_schema("emulate_snippet_il",
+            "Execute an ARM64 code region using AeonIL interpretation. Executes lifted IL statements without full binary emulation. Useful for symbolic execution or analyzing stripped code.",
+            json!({"type": "object", "properties": {
+                "start_addr": {"type": "string", "description": "Hex address to begin execution, e.g. '0x1234'"},
+                "end_addr": {"type": "string", "description": "Hex address to stop execution (exclusive)"},
+                "initial_registers": {"type": "object", "description": "Register values at entry. Keys: x0-x30, sp. Values: hex strings or integers.", "additionalProperties": {}},
+                "step_limit": {"type": "integer", "description": "Max IL statements to execute (default 1000)", "default": 1000}
+            }, "required": ["start_addr", "end_addr"]})),
+
+        tool_schema("emulate_snippet_native",
+            "Execute an ARM64 code region in unicorn ARM64 sandbox. Full native emulation with memory support. Returns final register state, memory writes, and decoded strings.",
+            json!({"type": "object", "properties": {
+                "start_addr": {"type": "string", "description": "Hex address to begin execution, e.g. '0x1234'"},
+                "end_addr": {"type": "string", "description": "Hex address to stop execution (exclusive)"},
+                "initial_registers": {"type": "object", "description": "Register values at entry. Keys: x0-x30, sp, pc, nzcv. Values: hex strings or integers.", "additionalProperties": {}},
+                "initial_memory": {"type": "object", "description": "Memory overlays. Keys: hex addresses. Values: hex string or array of bytes.", "additionalProperties": {}},
+                "step_limit": {"type": "integer", "description": "Max instructions to execute (default 1000)", "default": 1000}
+            }, "required": ["start_addr", "end_addr"]})),
+
+        tool_schema("emulate_snippet",
+            "Execute an ARM64 code region in a bounded sandbox. Alias for emulate_snippet_native. Returns final register state, memory writes, and any decoded strings. Use for reversing obfuscated loops, string decryption, or format decoders.",
+            json!({"type": "object", "properties": {
+                "start_addr": {"type": "string", "description": "Hex address to begin execution, e.g. '0x1234'"},
+                "end_addr": {"type": "string", "description": "Hex address to stop execution (exclusive)"},
+                "initial_registers": {"type": "object", "description": "Register values at entry. Keys: x0-x30, sp, pc, nzcv. Values: hex strings or integers.", "additionalProperties": {}},
+                "initial_memory": {"type": "object", "description": "Memory overlays. Keys: hex addresses. Values: hex string or array of bytes.", "additionalProperties": {}},
+                "step_limit": {"type": "integer", "description": "Max instructions to execute (default 1000)", "default": 1000}
+            }, "required": ["start_addr", "end_addr"]})),
+    ]
 }
 
 pub fn tools_markdown_table() -> String {
@@ -723,6 +1047,96 @@ fn parse_memory_map(args: &Value) -> Result<std::collections::HashMap<u64, Vec<u
             };
 
             result.insert(addr, bytes);
+        }
+    }
+
+    Ok(result)
+}
+
+fn parse_watchpoints(args: &Value) -> Result<Vec<aeon::sandbox::WatchpointSpec>, String> {
+    let mut result = Vec::new();
+
+    if let Some(watchpoints) = args.get("watchpoints").and_then(|v| v.as_array()) {
+        for (idx, wpt) in watchpoints.iter().enumerate() {
+            let obj = wpt.as_object()
+                .ok_or_else(|| format!("Watchpoint {} must be an object", idx))?;
+
+            let addr = obj.get("addr")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("Watchpoint {} missing addr", idx))
+                .and_then(|s| parse_hex(s).ok_or_else(|| format!("Invalid addr for watchpoint {}", idx)))?;
+
+            let size = obj.get("size")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(8);
+
+            let on_read = obj.get("on_read")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let on_write = obj.get("on_write")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+
+            let stop_on_hit = obj.get("stop_on_hit")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            result.push(aeon::sandbox::WatchpointSpec {
+                addr,
+                size,
+                on_read,
+                on_write,
+                stop_on_hit,
+            });
+        }
+    }
+
+    Ok(result)
+}
+
+fn parse_address_hooks(args: &Value) -> Result<Vec<aeon::sandbox::AddressHookSpec>, String> {
+    let mut result = Vec::new();
+
+    if let Some(hooks) = args.get("address_hooks").and_then(|v| v.as_array()) {
+        for (idx, hook) in hooks.iter().enumerate() {
+            let obj = hook.as_object()
+                .ok_or_else(|| format!("Address hook {} must be an object", idx))?;
+
+            let addr = obj.get("addr")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("Address hook {} missing addr", idx))
+                .and_then(|s| parse_hex(s).ok_or_else(|| format!("Invalid addr for hook {}", idx)))?;
+
+            let stop_on_hit = obj.get("stop_on_hit")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let mut patches = Vec::new();
+            if let Some(patch_array) = obj.get("patches").and_then(|v| v.as_array()) {
+                for (pidx, patch) in patch_array.iter().enumerate() {
+                    let patch_obj = patch.as_object()
+                        .ok_or_else(|| format!("Patch {} in hook {} must be an object", pidx, idx))?;
+
+                    let name = patch_obj.get("name")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| format!("Patch {} in hook {} missing name", pidx, idx))?
+                        .to_string();
+
+                    let value = patch_obj.get("value")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| format!("Patch {} in hook {} missing value", pidx, idx))
+                        .and_then(|s| parse_hex(s).ok_or_else(|| format!("Invalid value for patch {} in hook {}", pidx, idx)))?;
+
+                    patches.push(aeon::sandbox::RegisterPatch { name, value });
+                }
+            }
+
+            result.push(aeon::sandbox::AddressHookSpec {
+                addr,
+                stop_on_hit,
+                patches,
+            });
         }
     }
 

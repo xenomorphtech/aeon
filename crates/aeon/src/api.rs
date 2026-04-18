@@ -684,6 +684,184 @@ impl AeonSession {
         Ok(value)
     }
 
+    pub fn execute_datalog(
+        &self,
+        query: &str,
+        addr: u64,
+        register: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Value, String> {
+        let limit = limit.unwrap_or(500).min(5000);
+        match query {
+            "reachability" | "defines" | "reads_mem" | "writes_mem" | "flows_to" => {
+                self.execute_function_datalog(query, addr, register, limit)
+            }
+            "call_graph" | "call_graph_transitive" => {
+                self.execute_cross_function_datalog(query, addr, limit)
+            }
+            _ => Err(format!(
+                "Unknown query: '{}'. Supported: reachability, defines, reads_mem, writes_mem, flows_to, call_graph, call_graph_transitive",
+                query
+            )),
+        }
+    }
+
+    fn execute_function_datalog(
+        &self,
+        query: &str,
+        addr: u64,
+        register: Option<&str>,
+        limit: usize,
+    ) -> Result<Value, String> {
+        use crate::datalog::{extract_function_facts, FunctionDatalog};
+
+        self.with_function_artifacts(addr, |func, artifacts| {
+            let decoded = artifacts.decoded();
+            let func_addr = func.addr;
+
+            let mut prog = FunctionDatalog::default();
+            extract_function_facts(&mut prog, func_addr, decoded);
+            prog.run();
+
+            // Query results based on query type
+            let mut results = Vec::new();
+            match query {
+                "reachability" => {
+                    for (fn_addr, src, dst) in &prog.reachable {
+                        if *fn_addr == func_addr && results.len() < limit {
+                            results.push(json!({
+                                "src": format!("0x{:x}", src),
+                                "dst": format!("0x{:x}", dst),
+                            }));
+                        }
+                    }
+                }
+                "defines" => {
+                    for (inst_addr, reg_name) in &prog.defines {
+                        if let Some(filter_reg) = register {
+                            let filter_lower = filter_reg.to_lowercase();
+                            let reg_base = if reg_name.starts_with('w') {
+                                &reg_name[1..]
+                            } else {
+                                &reg_name[..]
+                            };
+                            let filter_base = if filter_lower.starts_with('w') {
+                                &filter_lower[1..]
+                            } else {
+                                &filter_lower[..]
+                            };
+                            if reg_base != filter_base {
+                                continue;
+                            }
+                        }
+                        if results.len() < limit {
+                            results.push(json!({
+                                "addr": format!("0x{:x}", inst_addr),
+                                "reg": reg_name,
+                            }));
+                        }
+                    }
+                }
+                "reads_mem" => {
+                    for (inst_addr, size) in &prog.reads_mem {
+                        if results.len() < limit {
+                            results.push(json!({
+                                "addr": format!("0x{:x}", inst_addr),
+                                "size": size,
+                            }));
+                        }
+                    }
+                }
+                "writes_mem" => {
+                    for (inst_addr, size) in &prog.writes_mem {
+                        if results.len() < limit {
+                            results.push(json!({
+                                "addr": format!("0x{:x}", inst_addr),
+                                "size": size,
+                            }));
+                        }
+                    }
+                }
+                "flows_to" => {
+                    let filter_reg = register.ok_or("flows_to query requires 'register' parameter")?;
+                    for (def_addr, reg_name, use_addr) in &prog.flows_to {
+                        if reg_name == filter_reg && results.len() < limit {
+                            results.push(json!({
+                                "from": format!("0x{:x}", def_addr),
+                                "register": reg_name,
+                                "to": format!("0x{:x}", use_addr),
+                            }));
+                        }
+                    }
+                }
+                _ => unreachable!(),
+            }
+
+            Ok(json!({
+                "query": query,
+                "addr": format!("0x{:x}", addr),
+                "function": format!("0x{:x}", func_addr),
+                "result_count": results.len(),
+                "results": results,
+            }))
+        })
+    }
+
+    fn execute_cross_function_datalog(
+        &self,
+        query: &str,
+        addr: u64,
+        limit: usize,
+    ) -> Result<Value, String> {
+        use crate::datalog::{extract_cross_function_facts, CrossFunctionDatalog};
+
+        let mut prog = CrossFunctionDatalog::default();
+
+        // Load facts from all functions
+        for func in &self.binary.functions {
+            if let Ok(decoded) = decode_function(&self.binary, func) {
+                extract_cross_function_facts(&mut prog, func.addr, &decoded);
+            }
+        }
+
+        // Run the Datalog program
+        prog.run();
+
+        // Query results based on query type
+        let mut results = Vec::new();
+        match query {
+            "call_graph" => {
+                for (caller, callee, call_site) in &prog.call_edge {
+                    if *caller == addr && results.len() < limit {
+                        results.push(json!({
+                            "from": format!("0x{:x}", caller),
+                            "to": format!("0x{:x}", callee),
+                            "call_site": format!("0x{:x}", call_site),
+                        }));
+                    }
+                }
+            }
+            "call_graph_transitive" => {
+                for (caller, callee) in &prog.can_reach {
+                    if *caller == addr && results.len() < limit {
+                        results.push(json!({
+                            "caller": format!("0x{:x}", caller),
+                            "callee": format!("0x{:x}", callee),
+                        }));
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
+
+        Ok(json!({
+            "query": query,
+            "addr": format!("0x{:x}", addr),
+            "result_count": results.len(),
+            "results": results,
+        }))
+    }
+
     pub fn get_bytes(&self, addr: u64, size: usize) -> Result<Value, String> {
         let size = size.min(4096);
         let offset_in_text = addr
@@ -836,7 +1014,20 @@ impl AeonSession {
         annotate_rc4_report(&mut report, &self.binary, &engine);
         report
     }
+}
 
+pub struct AdvancedEmulationRequest {
+    pub start_addr: u64,
+    pub end_addr: u64,
+    pub initial_registers: HashMap<String, u64>,
+    pub initial_memory: HashMap<u64, Vec<u8>>,
+    pub step_limit: usize,
+    pub watchpoints: Vec<crate::sandbox::WatchpointSpec>,
+    pub address_hooks: Vec<crate::sandbox::AddressHookSpec>,
+    pub record_pc_trace: bool,
+}
+
+impl AeonSession {
     pub fn emulate_snippet_il(
         &self,
         start_addr: u64,
@@ -895,8 +1086,29 @@ impl AeonSession {
             }
         }
 
-        // Execute IL snippet
-        let result = emulation::execute_snippet(&stmts, regs_map, step_limit);
+        // Create binary backing store
+        struct BinaryBacking<'a>(&'a LoadedBinary);
+        impl<'a> emulation::BackingStore for BinaryBacking<'a> {
+            fn load(&self, addr: u64, size: u8) -> Option<Vec<u8>> {
+                let off = self.0.vaddr_to_file_offset(addr)?;
+                let end = off + size as usize;
+                if end <= self.0.data.len() {
+                    Some(self.0.data[off..end].to_vec())
+                } else {
+                    None
+                }
+            }
+        }
+
+        // Execute IL snippet with BlockExecutor (tracks reads + writes)
+        let result = emulation::execute_block(
+            &stmts,
+            regs_map,
+            BTreeMap::new(),
+            &BinaryBacking(&self.binary),
+            emulation::MissingMemoryPolicy::ContinueAsUnknown,
+            step_limit,
+        );
 
         // Convert result to JSON
         let mut final_regs = std::collections::HashMap::new();
@@ -904,25 +1116,39 @@ impl AeonSession {
             final_regs.insert(reg_name(reg), value_to_hex_string(value));
         }
 
-        let memory_writes: Vec<Value> = result.touched_memory
+        let memory_writes: Vec<Value> = result.writes
             .iter()
-            .map(|cell| {
+            .map(|write| {
                 json!({
-                    "addr": format!("{:?}", cell.id.location),
-                    "size": cell.id.size,
-                    "value": value_to_hex_string(&cell.value),
+                    "addr": format!("{:?}", write.id.location),
+                    "size": write.id.size,
+                    "value": value_to_hex_string(&write.value),
                 })
             })
             .collect();
+
+        let memory_reads: Vec<Value> = result.reads
+            .iter()
+            .map(|read| {
+                json!({
+                    "addr": format!("{:?}", read.id.location),
+                    "size": read.id.size,
+                    "value": value_to_hex_string(&read.value),
+                })
+            })
+            .collect();
+
+        let budget_exhausted = matches!(result.stop, emulation::BlockStop::StepBudget);
 
         Ok(json!({
             "mode": "il",
             "start_addr": format!("0x{:x}", start_addr),
             "end_addr": format!("0x{:x}", end_addr),
             "steps_executed": result.steps_executed,
-            "budget_exhausted": result.budget_exhausted,
+            "budget_exhausted": budget_exhausted,
             "final_registers": final_regs,
             "memory_writes": memory_writes,
+            "memory_reads": memory_reads,
         }))
     }
 
@@ -937,6 +1163,19 @@ impl AeonSession {
         use crate::sandbox::{run_sandbox, SandboxConfig};
         let config = SandboxConfig { step_limit, ..Default::default() };
         let result = run_sandbox(&self.binary, start_addr, end_addr, &initial_registers, &initial_memory, &config)?;
+        serde_json::to_value(&result).map_err(|e| format!("serialize result: {}", e))
+    }
+
+    pub fn emulate_snippet_native_advanced(&self, req: AdvancedEmulationRequest) -> Result<Value, String> {
+        use crate::sandbox::{run_sandbox, SandboxConfig};
+        let config = SandboxConfig {
+            step_limit: req.step_limit,
+            watchpoints: req.watchpoints,
+            address_hooks: req.address_hooks,
+            record_pc_trace: req.record_pc_trace,
+            ..Default::default()
+        };
+        let result = run_sandbox(&self.binary, req.start_addr, req.end_addr, &req.initial_registers, &req.initial_memory, &config)?;
         serde_json::to_value(&result).map_err(|e| format!("serialize result: {}", e))
     }
 
@@ -973,7 +1212,7 @@ impl AeonSession {
 
 use aeonil::Reg;
 
-fn reg_name(r: &Reg) -> String {
+pub(crate) fn reg_name(r: &Reg) -> String {
     match r {
         Reg::X(n) => format!("x{}", n),
         Reg::W(n) => format!("w{}", n),
@@ -1039,7 +1278,7 @@ fn value_to_hex_string(value: &crate::emulation::Value) -> String {
     }
 }
 
-fn register_matches(reg: &Reg, target: &str) -> bool {
+pub(crate) fn register_matches(reg: &Reg, target: &str) -> bool {
     let reg_name = reg_name(reg);
     let target_lower = target.to_lowercase();
 
@@ -1060,7 +1299,7 @@ fn register_matches(reg: &Reg, target: &str) -> bool {
 
 
 
-fn expr_uses_register(expr: &Expr, register: &str) -> bool {
+pub(crate) fn expr_uses_register(expr: &Expr, register: &str) -> bool {
     match expr {
         Expr::Reg(r) => register_matches(r, register),
         // Binary operations that might use registers
@@ -1131,7 +1370,7 @@ fn expr_uses_register(expr: &Expr, register: &str) -> bool {
     }
 }
 
-fn branch_cond_uses_register(cond: &aeonil::BranchCond, register: &str) -> bool {
+pub(crate) fn branch_cond_uses_register(cond: &aeonil::BranchCond, register: &str) -> bool {
     use aeonil::BranchCond;
     match cond {
         BranchCond::Flag(_) => false,
