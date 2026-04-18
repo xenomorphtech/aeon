@@ -1,0 +1,4 @@
+{
+  "expr": "globalThis.__jitPostJitRenderTraceDump()",
+  "result": null
+}

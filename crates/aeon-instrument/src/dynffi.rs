@@ -13,7 +13,7 @@ use crate::dynruntime::{DynamicRuntime, DynamicRuntimeConfig, DynamicRuntimeStop
 fn dynffi_trace_path() -> &'static str {
     #[cfg(target_os = "android")]
     {
-        "/data/local/tmp/aeon_dyn_runtime.log"
+        "/data/user/0/com.netmarble.thered/files/aeon_dyn_runtime.log"
     }
     #[cfg(not(target_os = "android"))]
     {
@@ -588,8 +588,6 @@ pub unsafe extern "C" fn aeon_dyn_runtime_branch_bridge(
         dynffi_trace_bridge_probe(ctx_ref, target);
         aeon_dyn_branch_bridge_stage = 0xbb03;
 
-        let libart_off = dynamic_module_file_offset(target, "libart.so");
-        let nearby_ret = dynamic_has_nearby_ret(ctx_ref.pc);
         aeon_dyn_branch_bridge_stage = 0xbb04;
 
         if dynamic_should_bail_art_checkpoint_jni_start(ctx_ref, target) {
@@ -1019,40 +1017,7 @@ aeon_dyn_runtime_branch_bridge_impl:
     ldr  x15, [x30, #120]
     ldr  x16, [x30, #128]
     ldr  x18, [x30, #144]
-    ldr  x20, [x19, #AEON_SCRATCH_TAILMODE]
-    cbz  x20, 2f
-    ldr  x12, [x19, #AEON_SCRATCH_SAVED_X30]
-    str  x12, [x19, #AEON_SCRATCH_DBG_OUT_X30]
-    adrp x14, :got:aeon_dyn_branch_bridge_outgoing_x30
-    ldr  x14, [x14, #:got_lo12:aeon_dyn_branch_bridge_outgoing_x30]
-    str  x12, [x14]
-    mov  x12, #0x0
-    str  x12, [x19, #AEON_SCRATCH_DBG_POST_X30]
-    adrp x14, :got:aeon_dyn_branch_bridge_post_call_x30
-    ldr  x14, [x14, #:got_lo12:aeon_dyn_branch_bridge_post_call_x30]
-    str  x12, [x14]
-    ldr  x12, [x19, #AEON_SCRATCH_SAVED_X30]
-    str  x12, [x19, #AEON_SCRATCH_DBG_RESUME]
-    adrp x14, :got:aeon_dyn_branch_bridge_resume_target
-    ldr  x14, [x14, #:got_lo12:aeon_dyn_branch_bridge_resume_target]
-    str  x12, [x14]
-    ldr  x11, [x30, #248]
-    mov  sp, x11
-    ldr  x11, [x30, #88]
-    ldr  x20, [x30, #160]
-    ldr  x21, [x30, #168]
-    ldr  x22, [x30, #176]
-    ldr  x23, [x30, #184]
-    ldr  x24, [x30, #192]
-    ldr  x25, [x30, #200]
-    ldr  x26, [x30, #208]
-    ldr  x27, [x30, #216]
-    ldr  x28, [x30, #224]
-    ldr  x29, [x30, #232]
-    ldr  x12, [x30, #152]
-    ldr  x30, [x19, #AEON_SCRATCH_SAVED_X30]
-    mov  x19, x12
-    br   x17
+    b    2f
 2:
     adr  x12, 3f
     str  x12, [x19, #AEON_SCRATCH_DBG_OUT_X30]

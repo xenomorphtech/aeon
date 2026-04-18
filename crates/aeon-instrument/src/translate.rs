@@ -38,11 +38,25 @@ const FCMLA_8H_HELPER_CODE: &[u8] = &[
 pub struct TranslationConfig {
     pub base: u64,
     pub instructions: Option<usize>,
+    pub mode: TranslationMode,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum TranslationMode {
+    Full,
+    BranchOnly,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum TranslationArtifactKind {
+    RelocatableObject,
+    LinkedElf,
 }
 
 #[derive(Debug, Clone)]
 pub struct TranslationCompilation {
     pub object_bytes: Vec<u8>,
+    pub artifact_kind: TranslationArtifactKind,
     pub instruction_limit: usize,
     pub block_count: usize,
     pub trap_block_count: usize,
@@ -227,6 +241,16 @@ pub fn translate_blob(
     blob: &[u8],
     config: &TranslationConfig,
 ) -> Result<TranslationCompilation, String> {
+    match config.mode {
+        TranslationMode::Full => translate_blob_full(blob, config),
+        TranslationMode::BranchOnly => translate_blob_branch_only(blob, config),
+    }
+}
+
+fn translate_blob_full(
+    blob: &[u8],
+    config: &TranslationConfig,
+) -> Result<TranslationCompilation, String> {
     let available_instructions = blob.len() / 4;
     let instruction_limit = config
         .instructions
@@ -337,6 +361,7 @@ pub fn translate_blob(
 
     Ok(TranslationCompilation {
         object_bytes: artifact.bytes,
+        artifact_kind: TranslationArtifactKind::RelocatableObject,
         instruction_limit,
         block_count,
         trap_block_count: trap_blocks.len(),
@@ -352,6 +377,278 @@ pub fn translate_blob(
         blocks,
         block_ids,
     })
+}
+
+fn translate_blob_branch_only(
+    blob: &[u8],
+    config: &TranslationConfig,
+) -> Result<TranslationCompilation, String> {
+    let available_instructions = blob.len() / 4;
+    let instruction_limit = config
+        .instructions
+        .unwrap_or_else(|| last_nonzero_instruction_limit(blob))
+        .min(available_instructions);
+    let text_len = instruction_limit
+        .checked_mul(4)
+        .ok_or_else(|| "instruction limit overflow".to_string())?;
+    let mut text_bytes = blob[..text_len].to_vec();
+    let end_addr = config
+        .base
+        .checked_add(text_len as u64)
+        .ok_or_else(|| "translated range overflow".to_string())?;
+    let mut invalid_count = 0usize;
+    let mut patched_count = 0usize;
+    let mut veneers = Vec::<BranchOnlyVeneer>::new();
+    let mut veneer_by_target = BTreeMap::<u64, usize>::new();
+
+    for index in 0..instruction_limit {
+        let offset = index * 4;
+        let addr = config.base + offset as u64;
+        let word = u32::from_le_bytes(text_bytes[offset..offset + 4].try_into().unwrap());
+
+        let decoded = match decode_branch_patch(word, addr) {
+            Some(info) => info,
+            None => {
+                if bad64::decode(word, addr).is_err() {
+                    invalid_count += 1;
+                }
+                continue;
+            }
+        };
+
+        if (config.base..end_addr).contains(&decoded.target) {
+            continue;
+        }
+
+        let veneer_index = if let Some(existing) = veneer_by_target.get(&decoded.target) {
+            *existing
+        } else {
+            let veneer_offset = align_up(text_bytes.len() as u64, 8);
+            text_bytes.resize(veneer_offset as usize, 0);
+            append_branch_veneer(&mut text_bytes, decoded.target);
+            let symbol = format!("aeon_branch_veneer_{:016x}", decoded.target);
+            let record = BranchOnlyVeneer {
+                offset: veneer_offset,
+                symbol,
+            };
+            veneers.push(record);
+            let idx = veneers.len() - 1;
+            veneer_by_target.insert(decoded.target, idx);
+            idx
+        };
+
+        let veneer_addr = config.base + veneers[veneer_index].offset;
+        let patched = patch_branch_word(word, addr, veneer_addr, decoded.kind)
+            .ok_or_else(|| {
+                format!(
+                    "branch-only mode cannot rewrite {} at {} -> {} (out of range or unsupported)",
+                    decoded.kind.name(),
+                    format_hex(addr),
+                    format_hex(decoded.target),
+                )
+            })?;
+        text_bytes[offset..offset + 4].copy_from_slice(&patched.to_le_bytes());
+        patched_count += 1;
+    }
+
+    let mut exports = Vec::with_capacity(instruction_limit + veneers.len());
+    for index in 0..instruction_limit {
+        let offset = (index * 4) as u64;
+        let addr = config.base + offset;
+        exports.push(ExportedTextSymbol {
+            name: format!("aeon_branch_block_{addr:016x}"),
+            offset,
+            size: 4,
+        });
+    }
+    for veneer in &veneers {
+        exports.push(ExportedTextSymbol {
+            name: veneer.symbol.clone(),
+            offset: veneer.offset,
+            size: 16,
+        });
+    }
+
+    let linked = link_text_in_process(&text_bytes, &exports)?;
+    let blocks = (0..instruction_limit)
+        .map(|index| {
+            let addr = config.base + (index as u64 * 4);
+            BlockSymbolRecord {
+                source_block: addr,
+                symbol: format!("aeon_branch_block_{addr:016x}"),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    Ok(TranslationCompilation {
+        object_bytes: linked,
+        artifact_kind: TranslationArtifactKind::LinkedElf,
+        instruction_limit,
+        block_count: instruction_limit,
+        trap_block_count: 0,
+        skipped_unsupported_blocks: if patched_count == 0 {
+            Vec::new()
+        } else {
+            vec![SkippedBlockRecord {
+                source_block: "branch-only".to_string(),
+                reason: format!("patched {patched_count} external branch instructions"),
+            }]
+        },
+        invalid_instructions: invalid_count,
+        memory_read_hook_symbol: None,
+        trap_hook_symbol: None,
+        branch_translate_hook_symbol: None,
+        branch_bridge_hook_symbol: None,
+        unknown_block_hook_symbol: None,
+        block_enter_hook_symbol: None,
+        trap_blocks: Vec::new(),
+        blocks,
+        block_ids: Vec::new(),
+    })
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum BranchPatchKind {
+    B,
+    Bl,
+    BCond,
+    BcCond,
+    Cbz,
+    Cbnz,
+    Tbz,
+    Tbnz,
+}
+
+impl BranchPatchKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::B => "b",
+            Self::Bl => "bl",
+            Self::BCond => "b.cond",
+            Self::BcCond => "bc.cond",
+            Self::Cbz => "cbz",
+            Self::Cbnz => "cbnz",
+            Self::Tbz => "tbz",
+            Self::Tbnz => "tbnz",
+        }
+    }
+}
+
+struct DecodedBranchPatch {
+    kind: BranchPatchKind,
+    target: u64,
+}
+
+#[derive(Debug, Clone)]
+struct BranchOnlyVeneer {
+    offset: u64,
+    symbol: String,
+}
+
+fn decode_branch_patch(word: u32, addr: u64) -> Option<DecodedBranchPatch> {
+    if (word & 0x7c00_0000) == 0x1400_0000 {
+        let kind = if (word & 0x8000_0000) != 0 {
+            BranchPatchKind::Bl
+        } else {
+            BranchPatchKind::B
+        };
+        let imm26 = (word & 0x03ff_ffff) as u64;
+        let rel = sign_extend_i64(imm26, 26) << 2;
+        return Some(DecodedBranchPatch {
+            kind,
+            target: ((addr as i64) + rel) as u64,
+        });
+    }
+    if (word & 0xff00_0010) == 0x5400_0000 || (word & 0xff00_0010) == 0x5400_0010 {
+        let kind = if (word & 0x10) != 0 {
+            BranchPatchKind::BcCond
+        } else {
+            BranchPatchKind::BCond
+        };
+        let imm19 = ((word >> 5) & 0x7ffff) as u64;
+        let rel = sign_extend_i64(imm19, 19) << 2;
+        return Some(DecodedBranchPatch {
+            kind,
+            target: ((addr as i64) + rel) as u64,
+        });
+    }
+    if (word & 0x7e00_0000) == 0x3400_0000 {
+        let kind = if (word & 0x0100_0000) != 0 {
+            BranchPatchKind::Cbnz
+        } else {
+            BranchPatchKind::Cbz
+        };
+        let imm19 = ((word >> 5) & 0x7ffff) as u64;
+        let rel = sign_extend_i64(imm19, 19) << 2;
+        return Some(DecodedBranchPatch {
+            kind,
+            target: ((addr as i64) + rel) as u64,
+        });
+    }
+    if (word & 0x7e00_0000) == 0x3600_0000 {
+        let kind = if (word & 0x0100_0000) != 0 {
+            BranchPatchKind::Tbnz
+        } else {
+            BranchPatchKind::Tbz
+        };
+        let imm14 = ((word >> 5) & 0x3fff) as u64;
+        let rel = sign_extend_i64(imm14, 14) << 2;
+        return Some(DecodedBranchPatch {
+            kind,
+            target: ((addr as i64) + rel) as u64,
+        });
+    }
+    None
+}
+
+fn patch_branch_word(word: u32, addr: u64, target: u64, kind: BranchPatchKind) -> Option<u32> {
+    match kind {
+        BranchPatchKind::B | BranchPatchKind::Bl => {
+            let delta = target as i128 - addr as i128;
+            if delta % 4 != 0 {
+                return None;
+            }
+            let min = -(1i128 << 27);
+            let max = (1i128 << 27) - 4;
+            if !(min..=max).contains(&delta) {
+                return None;
+            }
+            let imm26 = (((delta >> 2) as i64) as u64) & 0x03ff_ffff;
+            Some((word & 0xfc00_0000) | (imm26 as u32))
+        }
+        BranchPatchKind::BCond | BranchPatchKind::BcCond | BranchPatchKind::Cbz | BranchPatchKind::Cbnz => {
+            let delta = target as i128 - addr as i128;
+            if delta % 4 != 0 {
+                return None;
+            }
+            let min = -(1i128 << 20);
+            let max = (1i128 << 20) - 4;
+            if !(min..=max).contains(&delta) {
+                return None;
+            }
+            let imm19 = ((((delta >> 2) as i64) as u64) & 0x7ffff) << 5;
+            Some((word & !0x00ff_ffe0) | (imm19 as u32))
+        }
+        BranchPatchKind::Tbz | BranchPatchKind::Tbnz => {
+            let delta = target as i128 - addr as i128;
+            if delta % 4 != 0 {
+                return None;
+            }
+            let min = -(1i128 << 15);
+            let max = (1i128 << 15) - 4;
+            if !(min..=max).contains(&delta) {
+                return None;
+            }
+            let imm14 = ((((delta >> 2) as i64) as u64) & 0x3fff) << 5;
+            Some((word & !0x0007_ffe0) | (imm14 as u32))
+        }
+    }
+}
+
+fn append_branch_veneer(out: &mut Vec<u8>, target: u64) {
+    out.extend_from_slice(&0x5800_0050u32.to_le_bytes()); // ldr x16, #8
+    out.extend_from_slice(&0xd61f_0200u32.to_le_bytes()); // br x16
+    out.extend_from_slice(&target.to_le_bytes());
 }
 
 impl TranslationCompilation {
@@ -724,6 +1021,12 @@ pub fn format_hex(value: u64) -> String {
     format!("0x{value:x}")
 }
 
+fn sign_extend_i64(value: u64, bits: u8) -> i64 {
+    debug_assert!(bits > 0 && bits <= 64);
+    let shift = 64 - bits;
+    ((value << shift) as i64) >> shift
+}
+
 fn link_object_in_process(input: &[u8]) -> Result<Vec<u8>, String> {
     let file =
         object::File::parse(input).map_err(|err| format!("parse relocatable object: {err}"))?;
@@ -748,6 +1051,23 @@ fn link_object_in_process(input: &[u8]) -> Result<Vec<u8>, String> {
         fcmla_helper_offset,
         &mut text_bytes,
     )?;
+
+    build_shared_text_elf(text_bytes, text_align, &exports)
+}
+
+fn link_text_in_process(
+    text_bytes: &[u8],
+    exports: &[ExportedTextSymbol],
+) -> Result<Vec<u8>, String> {
+    build_shared_text_elf(text_bytes.to_vec(), 16, exports)
+}
+
+fn build_shared_text_elf(
+    text_bytes: Vec<u8>,
+    text_align: u64,
+    exports: &[ExportedTextSymbol],
+) -> Result<Vec<u8>, String> {
+    let text_align = text_align.max(16);
 
     let mut builder = build::elf::Builder::new(object::Endianness::Little, true);
     builder.header.e_type = elf::ET_DYN;
@@ -818,7 +1138,7 @@ fn link_object_in_process(input: &[u8]) -> Result<Vec<u8>, String> {
     ]);
     let dynamic_id = section.id();
 
-    for export in &exports {
+    for export in exports {
         let symbol = builder.dynamic_symbols.add();
         symbol.name = export.name.as_bytes().to_vec().into();
         symbol.set_st_info(elf::STB_GLOBAL, elf::STT_FUNC);
@@ -1209,6 +1529,7 @@ mod tests {
     fn compact_map_uses_block_map_shape() {
         let compilation = TranslationCompilation {
             object_bytes: Vec::new(),
+            artifact_kind: TranslationArtifactKind::RelocatableObject,
             instruction_limit: 4,
             block_count: 2,
             trap_block_count: 1,
@@ -1285,6 +1606,7 @@ mod tests {
     fn compact_map_jsonl_emits_meta_blocks_and_ids() {
         let compilation = TranslationCompilation {
             object_bytes: Vec::new(),
+            artifact_kind: TranslationArtifactKind::RelocatableObject,
             instruction_limit: 4,
             block_count: 2,
             trap_block_count: 0,

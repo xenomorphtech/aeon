@@ -1,0 +1,10 @@
+{
+  "pid": 20823,
+  "timestamp": "2026-04-09T06:14:50.684Z",
+  "base": "0x9cf7a000",
+  "size": 327680,
+  "file": "/memfd:jit-cache (deleted)",
+  "sha256": "c5a68dc273715cf8f8b7fbcd82432f963325f051c37f05dfc0ad408e5187fe2f",
+  "bytes_written": 327680,
+  "path": "/data/local/tmp/aeon_capture/trap_windows/pid20823_base_9cf7a000_size_50000_seq_8_ts_20260409061449461.bin"
+}

@@ -230,16 +230,34 @@ impl AeonEngine {
     ) -> Result<Vec<AnalysisNameMatch>, regex::Error> {
         let regex = Regex::new(pattern)?;
         let mut matches = Vec::new();
+        let mut seen_addrs = std::collections::HashSet::new();
 
         for (&addr, context) in &self.semantic {
-            let Some(name) = context.symbol.as_deref() else {
+            if context.is_empty() {
                 continue;
-            };
+            }
 
-            if regex.is_match(name) {
+            let symbol = context.symbol.as_deref();
+            let matched = symbol.is_some_and(|s| regex.is_match(s))
+                || context
+                    .struct_definition
+                    .as_deref()
+                    .is_some_and(|s| regex.is_match(s))
+                || context.hypotheses.iter().any(|h| regex.is_match(h));
+
+            if matched && seen_addrs.insert(addr) {
+                let analysis_name = symbol
+                    .unwrap_or_else(|| {
+                        context
+                            .struct_definition
+                            .as_deref()
+                            .or_else(|| context.hypotheses.first().map(|h| h.as_str()))
+                            .unwrap_or("")
+                    })
+                    .to_string();
                 matches.push(AnalysisNameMatch {
                     address: addr,
-                    analysis_name: name.to_string(),
+                    analysis_name,
                 });
             }
         }

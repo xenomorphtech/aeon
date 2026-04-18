@@ -1,8 +1,8 @@
 use aeon_instrument::translate::{
     compact_map_jsonl_path, compact_map_path, format_compact_map_jsonl, format_trap_block_log,
     link_object_with, load_symbol_map, rebase_text_symbol_map, translate_blob, trap_log_path,
-    FullMapMetadata, TranslationConfig, DEFAULT_BASE, DEFAULT_DEST, DEFAULT_INPUT,
-    DEFAULT_OUTPUT_ELF, DEFAULT_OUTPUT_MAP, DEFAULT_OUTPUT_OBJ,
+    FullMapMetadata, TranslationArtifactKind, TranslationConfig, TranslationMode, DEFAULT_BASE,
+    DEFAULT_DEST, DEFAULT_INPUT, DEFAULT_OUTPUT_ELF, DEFAULT_OUTPUT_MAP, DEFAULT_OUTPUT_OBJ,
 };
 use std::env;
 use std::fs;
@@ -17,11 +17,9 @@ fn main() -> Result<(), String> {
         &TranslationConfig {
             base: config.base,
             instructions: config.instructions,
+            mode: config.mode,
         },
     )?;
-
-    fs::write(&config.output_obj, &compilation.object_bytes)
-        .map_err(|err| format!("write {}: {err}", config.output_obj.display()))?;
 
     let compact_map = compilation.compact_map(config.base);
     fs::write(
@@ -35,25 +33,43 @@ fn main() -> Result<(), String> {
     )
     .map_err(|err| format!("write {}: {err}", config.output_compact_map_jsonl.display()))?;
 
-    println!("wrote {}", config.output_obj.display());
     println!("compact map {}", config.output_compact_map.display());
     println!("compact map jsonl {}", config.output_compact_map_jsonl.display());
 
-    if config.skip_link {
-        println!(
-            "compiled {} blocks ({} trap-only emitted, {} invalid instructions)",
-            compilation.block_count, compilation.trap_block_count, compilation.invalid_instructions
-        );
-        println!("link step skipped");
-        return Ok(());
+    match compilation.artifact_kind {
+        TranslationArtifactKind::RelocatableObject => {
+            fs::write(&config.output_obj, &compilation.object_bytes)
+                .map_err(|err| format!("write {}: {err}", config.output_obj.display()))?;
+            println!("wrote {}", config.output_obj.display());
+
+            if config.skip_link {
+                println!(
+                    "compiled {} blocks ({} trap-only emitted, {} invalid instructions)",
+                    compilation.block_count,
+                    compilation.trap_block_count,
+                    compilation.invalid_instructions
+                );
+                println!("link step skipped");
+                return Ok(());
+            }
+
+            link_object_with(
+                &config.output_obj,
+                &config.output_elf,
+                config.dest,
+                config.linker.as_deref(),
+            )?;
+        }
+        TranslationArtifactKind::LinkedElf => {
+            fs::write(&config.output_elf, &compilation.object_bytes)
+                .map_err(|err| format!("write {}: {err}", config.output_elf.display()))?;
+            println!("linked {}", config.output_elf.display());
+            if config.skip_link {
+                println!("link step skipped (translator emitted linked ELF directly)");
+            }
+        }
     }
 
-    link_object_with(
-        &config.output_obj,
-        &config.output_elf,
-        config.dest,
-        config.linker.as_deref(),
-    )?;
     let symbol_map = rebase_text_symbol_map(
         &config.output_elf,
         &load_symbol_map(&config.output_elf)?,
@@ -81,7 +97,6 @@ fn main() -> Result<(), String> {
     )
     .map_err(|err| format!("write {}: {err}", config.output_map.display()))?;
 
-    println!("linked {}", config.output_elf.display());
     println!("map {}", config.output_map.display());
     println!("trap log {}", trap_block_log.display());
     println!(
@@ -101,6 +116,7 @@ struct Config {
     base: u64,
     dest: u64,
     instructions: Option<usize>,
+    mode: TranslationMode,
     linker: Option<PathBuf>,
     skip_link: bool,
 }
@@ -119,6 +135,7 @@ impl Config {
         let mut base = DEFAULT_BASE;
         let mut dest = DEFAULT_DEST;
         let mut instructions = None;
+        let mut mode = TranslationMode::Full;
         let mut linker = None;
         let mut skip_link = false;
 
@@ -141,6 +158,7 @@ impl Config {
                 "--instructions" => {
                     instructions = Some(parse_usize(&next_arg(&mut args, "--instructions")?)?)
                 }
+                "--mode" => mode = parse_mode(&next_arg(&mut args, "--mode")?)?,
                 "--linker" => linker = Some(PathBuf::from(next_arg(&mut args, "--linker")?)),
                 "--skip-link" => skip_link = true,
                 "--help" | "-h" => {
@@ -162,6 +180,7 @@ impl Config {
             base,
             dest,
             instructions,
+            mode,
             linker,
             skip_link,
         })
@@ -196,9 +215,17 @@ fn parse_usize(value: &str) -> Result<usize, String> {
     }
 }
 
+fn parse_mode(value: &str) -> Result<TranslationMode, String> {
+    match value {
+        "full" => Ok(TranslationMode::Full),
+        "branch-only" => Ok(TranslationMode::BranchOnly),
+        other => Err(format!("invalid mode {other}: expected full or branch-only")),
+    }
+}
+
 fn print_usage() {
     eprintln!(
-        "usage: jit_translate_object [--input BIN] [--base ADDR] [--dest ADDR] [--instructions N] [--output-obj PATH] [--output-elf PATH] [--output-map PATH] [--output-compact-map PATH] [--output-compact-map-jsonl PATH] [--linker PATH] [--skip-link]"
+        "usage: jit_translate_object [--input BIN] [--base ADDR] [--dest ADDR] [--instructions N] [--mode full|branch-only] [--output-obj PATH] [--output-elf PATH] [--output-map PATH] [--output-compact-map PATH] [--output-compact-map-jsonl PATH] [--linker PATH] [--skip-link]"
     );
 }
 

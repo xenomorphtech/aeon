@@ -178,6 +178,7 @@ Generated from `crates/aeon-frontend/src/service.rs` via `cargo run -p aeon-fron
 | `get_stack_frame` | Summarize the detected stack frame and visible stack-slot accesses for the function containing a given address. |
 | `get_function_cfg` | Get the Control Flow Graph for a function. Returns adjacency list, terminal blocks, and reachability from Datalog analysis. |
 | `get_function_skeleton` | Get a dense summary of function properties for efficient triage: argument count, calls, strings, loops, crypto constants, stack frame size, and suspicious patterns. |
+| `get_data_flow_slice` | Trace value flow for a register backward or forward through a function: backward shows where a value comes from, forward shows where it goes. Detects data dependencies through assignments and control flow. |
 | `get_xrefs` | Get cross-references for an address: outgoing calls from the function, and incoming calls from other functions. |
 | `scan_pointers` | Scan non-executable mapped sections for pointer-sized values that reference other locations in the binary, classifying data-to-data and data-to-code edges. |
 | `scan_vtables` | Detect candidate C++ vtables in .rodata/.data-style sections by finding arrays of function pointers and grouping related tables. |

@@ -1,0 +1,14 @@
+{
+  "input": "capture/manual/jit_exec_alias_0x9b5fe000.bin",
+  "output": "capture/manual/jit_exec_alias_0x9b5fe000.to_last_nonzero_blocks.il.jsonl",
+  "base": "0x9b5fe000",
+  "instruction_limit": 81903,
+  "available_instructions": 8388608,
+  "range_end": "0x9b64dfbc",
+  "decoded_instructions": 79866,
+  "invalid_instructions": 2037,
+  "block_count": 23884,
+  "unterminated_blocks": 328,
+  "roundtrip_ok_blocks": 23884,
+  "roundtrip_failed_blocks": 0
+}

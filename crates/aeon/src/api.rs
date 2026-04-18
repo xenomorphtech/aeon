@@ -224,17 +224,36 @@ impl AeonSession {
     }
 
     pub fn get_reduced_il(&self, addr: u64) -> Result<Value, String> {
-        self.with_function_artifacts(addr, |_, artifacts| {
-            Ok(serde_json::to_value(ReducedFunctionView::from_artifacts(addr, artifacts)).unwrap())
+        let engine = self.analysis_state.borrow();
+        self.with_function_artifacts(addr, |func, artifacts| {
+            let mut value =
+                serde_json::to_value(ReducedFunctionView::from_artifacts(addr, artifacts)).unwrap();
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("name".to_string(), option_str(func.name.as_deref()));
+                obj.insert(
+                    "resolved_name".to_string(),
+                    resolved_name_value(func.addr, func.name.as_deref(), &self.binary, &engine),
+                );
+                obj.insert("semantic".to_string(), semantic_value(&engine, func.addr));
+            }
+            Ok(value)
         })
     }
 
     pub fn get_ssa(&self, addr: u64, optimize: bool) -> Result<Value, String> {
-        self.with_function_artifacts(addr, |_, artifacts| {
-            Ok(
-                serde_json::to_value(SsaFunctionView::from_artifacts(addr, artifacts, optimize))
-                    .unwrap(),
-            )
+        let engine = self.analysis_state.borrow();
+        self.with_function_artifacts(addr, |func, artifacts| {
+            let mut value = serde_json::to_value(SsaFunctionView::from_artifacts(addr, artifacts, optimize))
+                .unwrap();
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("name".to_string(), option_str(func.name.as_deref()));
+                obj.insert(
+                    "resolved_name".to_string(),
+                    resolved_name_value(func.addr, func.name.as_deref(), &self.binary, &engine),
+                );
+                obj.insert("semantic".to_string(), semantic_value(&engine, func.addr));
+            }
+            Ok(value)
         })
     }
 
@@ -286,6 +305,15 @@ impl AeonSession {
 
     pub fn get_function_skeleton(&self, addr: u64) -> Result<Value, String> {
         let func = self.find_function(addr)?;
+
+        // Get stack frame size outside the closure to avoid borrow conflicts
+        let mut stack_frame_size = 0u64;
+        if let Ok(sf) = self.get_stack_frame(addr) {
+            if let Some(size) = sf.get("frame_size").and_then(|s| s.as_u64()) {
+                stack_frame_size = size;
+            }
+        }
+
         self.with_function_artifacts(addr, |_, artifacts| {
             let decoded = artifacts.decoded();
             let instructions = &decoded.instructions;
@@ -328,13 +356,6 @@ impl AeonSession {
                 }
             }
 
-            let mut stack_frame_size = 0u64;
-            if let Ok(sf) = self.get_stack_frame(addr) {
-                if let Some(size) = sf.get("frame_size").and_then(|s| s.as_u64()) {
-                    stack_frame_size = size;
-                }
-            }
-
             if instructions.len() > 100 {
                 suspicious_patterns.push("large_function".to_string());
             }
@@ -363,6 +384,155 @@ impl AeonSession {
             }))
         })
     }
+
+    pub fn get_data_flow_slice(&self, addr: u64, register: &str, direction: &str) -> Result<Value, String> {
+        let _func = self.find_function(addr)?;
+
+        let direction_lower = direction.to_lowercase();
+        if direction_lower != "backward" && direction_lower != "forward" {
+            return Err("Direction must be 'backward' or 'forward'".to_string());
+        }
+
+        self.with_function_artifacts(addr, |_, artifacts| {
+            let decoded = artifacts.decoded();
+            let instructions = &decoded.instructions;
+
+            let target_idx = instructions.iter().position(|instr| instr.addr == addr)
+                .ok_or_else(|| format!("No instruction at address 0x{:x}", addr))?;
+
+            let mut slice_instructions = Vec::new();
+            let mut complexity_flags = std::collections::HashSet::new();
+
+            if direction_lower == "backward" {
+                for i in (0..=target_idx).rev() {
+                    let instr = &instructions[i];
+                    let mut defines_reg = false;
+                    let mut uses_reg = false;
+
+                    match &instr.stmt {
+                        Stmt::Assign { dst, src } => {
+                            if register_matches(&dst, register) {
+                                defines_reg = true;
+                            }
+                            if expr_uses_register(src, register) {
+                                uses_reg = true;
+                            }
+                        }
+                        Stmt::Call { target } => {
+                            if expr_uses_register(target, register) {
+                                uses_reg = true;
+                            }
+                            complexity_flags.insert("calls".to_string());
+                        }
+                        Stmt::Branch { target } => {
+                            if expr_uses_register(target, register) {
+                                uses_reg = true;
+                            }
+                        }
+                        Stmt::CondBranch { target, cond, .. } => {
+                            if expr_uses_register(target, register) {
+                                uses_reg = true;
+                            }
+                            if branch_cond_uses_register(cond, register) {
+                                uses_reg = true;
+                            }
+                            complexity_flags.insert("branches".to_string());
+                        }
+                        Stmt::Store { addr: addr_expr, value, .. } => {
+                            if expr_uses_register(addr_expr, register) || expr_uses_register(value, register) {
+                                uses_reg = true;
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    if defines_reg || uses_reg {
+                        slice_instructions.push(json!({
+                            "addr": format!("0x{:x}", instr.addr),
+                            "role": if defines_reg { "defines" } else { "uses" },
+                        }));
+                    }
+
+                    if defines_reg && i < target_idx {
+                        break;
+                    }
+                }
+                slice_instructions.reverse();
+            } else {
+                for i in target_idx..instructions.len() {
+                    let instr = &instructions[i];
+                    let mut uses_reg = false;
+                    let mut defines_reg = false;
+
+                    match &instr.stmt {
+                        Stmt::Assign { dst, src } => {
+                            if expr_uses_register(src, register) {
+                                uses_reg = true;
+                            }
+                            if register_matches(&dst, register) {
+                                defines_reg = true;
+                            }
+                        }
+                        Stmt::Call { target } => {
+                            if expr_uses_register(target, register) {
+                                uses_reg = true;
+                            }
+                            complexity_flags.insert("calls".to_string());
+                        }
+                        Stmt::Branch { target } => {
+                            if expr_uses_register(target, register) {
+                                uses_reg = true;
+                            }
+                        }
+                        Stmt::CondBranch { target, cond, .. } => {
+                            if expr_uses_register(target, register) {
+                                uses_reg = true;
+                            }
+                            if branch_cond_uses_register(cond, register) {
+                                uses_reg = true;
+                            }
+                            complexity_flags.insert("branches".to_string());
+                        }
+                        Stmt::Store { addr: addr_expr, value, .. } => {
+                            if expr_uses_register(addr_expr, register) || expr_uses_register(value, register) {
+                                uses_reg = true;
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    if uses_reg || defines_reg {
+                        slice_instructions.push(json!({
+                            "addr": format!("0x{:x}", instr.addr),
+                            "role": if uses_reg { "uses" } else { "defines" },
+                        }));
+                    }
+
+                    if defines_reg && i > target_idx {
+                        break;
+                    }
+                }
+            }
+
+            let complexity = if complexity_flags.is_empty() {
+                "simple".to_string()
+            } else if complexity_flags.len() <= 1 {
+                "moderate".to_string()
+            } else {
+                "complex".to_string()
+            };
+
+            Ok(json!({
+                "slice_type": direction_lower,
+                "register": register,
+                "address": format!("0x{:x}", addr),
+                "instructions": slice_instructions,
+                "length": slice_instructions.len(),
+                "complexity": complexity,
+            }))
+        })
+    }
+
 
     pub fn get_function_cfg(&self, addr: u64) -> Result<Value, String> {
         let func = self.find_function(addr)?;
@@ -711,6 +881,130 @@ impl AeonSession {
     }
 }
 
+use aeonil::Reg;
+
+fn reg_name(r: &Reg) -> String {
+    match r {
+        Reg::X(n) => format!("x{}", n),
+        Reg::W(n) => format!("w{}", n),
+        Reg::SP => "sp".to_string(),
+        Reg::PC => "pc".to_string(),
+        Reg::XZR => "xzr".to_string(),
+        Reg::Flags => "flags".to_string(),
+        Reg::V(n) => format!("v{}", n),
+        Reg::Q(n) => format!("q{}", n),
+        Reg::D(n) => format!("d{}", n),
+        Reg::S(n) => format!("s{}", n),
+        Reg::H(n) => format!("h{}", n),
+        Reg::VByte(n) => format!("b{}", n),
+    }
+}
+
+fn register_matches(reg: &Reg, target: &str) -> bool {
+    let reg_name = reg_name(reg);
+    let target_lower = target.to_lowercase();
+
+    let reg_base = if reg_name.starts_with('w') {
+        &reg_name[1..]
+    } else {
+        &reg_name[..]
+    };
+
+    let target_base = if target_lower.starts_with('w') {
+        &target_lower[1..]
+    } else {
+        &target_lower[..]
+    };
+
+    reg_base == target_base
+}
+
+
+
+fn expr_uses_register(expr: &Expr, register: &str) -> bool {
+    match expr {
+        Expr::Reg(r) => register_matches(r, register),
+        // Binary operations that might use registers
+        Expr::Add(left, right)
+        | Expr::Sub(left, right)
+        | Expr::Mul(left, right)
+        | Expr::Div(left, right)
+        | Expr::UDiv(left, right)
+        | Expr::Xor(left, right)
+        | Expr::And(left, right)
+        | Expr::Or(left, right)
+        | Expr::Shl(left, right)
+        | Expr::Lsr(left, right)
+        | Expr::Asr(left, right)
+        | Expr::Ror(left, right)
+        | Expr::FAdd(left, right)
+        | Expr::FSub(left, right)
+        | Expr::FMul(left, right)
+        | Expr::FDiv(left, right)
+        | Expr::FMax(left, right)
+        | Expr::FMin(left, right) => {
+            expr_uses_register(left, register) || expr_uses_register(right, register)
+        }
+        // Unary operations that might use registers
+        Expr::Neg(e)
+        | Expr::Abs(e)
+        | Expr::Not(e)
+        | Expr::FNeg(e)
+        | Expr::FAbs(e)
+        | Expr::FSqrt(e)
+        | Expr::FCvt(e)
+        | Expr::IntToFloat(e)
+        | Expr::FloatToInt(e)
+        | Expr::Clz(e)
+        | Expr::Cls(e)
+        | Expr::Rev(e)
+        | Expr::Rbit(e) => {
+            expr_uses_register(e, register)
+        }
+        // Extension operations
+        Expr::SignExtend { src, .. } | Expr::ZeroExtend { src, .. } => {
+            expr_uses_register(src, register)
+        }
+        // Bitfield operations
+        Expr::Extract { src, .. } => expr_uses_register(src, register),
+        Expr::Insert { dst, src, .. } => {
+            expr_uses_register(dst, register) || expr_uses_register(src, register)
+        }
+        // Memory operations
+        Expr::Load { addr, .. } => expr_uses_register(addr, register),
+        // Conditional operations
+        Expr::CondSelect { if_true, if_false, .. } => {
+            expr_uses_register(if_true, register) || expr_uses_register(if_false, register)
+        }
+        Expr::Compare { lhs, rhs, .. } => {
+            expr_uses_register(lhs, register) || expr_uses_register(rhs, register)
+        }
+        // Constants and literals
+        Expr::Imm(_) | Expr::FImm(_) | Expr::AdrpImm(_) | Expr::AdrImm(_) => false,
+        // Stack slots don't directly use registers (the SP is implicit)
+        Expr::StackSlot { .. } => false,
+        // System register reads don't use GPRs
+        Expr::MrsRead(_) => false,
+        // Intrinsic operations might use registers
+        Expr::Intrinsic { operands, .. } => {
+            operands.iter().any(|op| expr_uses_register(op, register))
+        }
+    }
+}
+
+fn branch_cond_uses_register(cond: &aeonil::BranchCond, register: &str) -> bool {
+    use aeonil::BranchCond;
+    match cond {
+        BranchCond::Flag(_) => false,
+        BranchCond::Zero(e) | BranchCond::NotZero(e) | BranchCond::BitZero(e, _) | BranchCond::BitNotZero(e, _) => {
+            expr_uses_register(e, register)
+        }
+        BranchCond::Compare { lhs, rhs, .. } => {
+            expr_uses_register(lhs, register) || expr_uses_register(rhs, register)
+        }
+    }
+}
+
 fn function_matches_filter(func: &FunctionInfo, filter: &str, engine: &AeonEngine) -> bool {
     if filter.is_empty() {
         return true;
@@ -747,17 +1041,6 @@ fn semantic_to_value(value: Option<SemanticContext>) -> Value {
 
 fn semantic_value(engine: &AeonEngine, addr: u64) -> Value {
     semantic_to_value(engine.semantic_context(addr))
-}
-
-fn is_crypto_constant(imm: u64) -> bool {
-    // Common crypto constants: MD5, SHA1, SHA256, AES S-box values, etc.
-    matches!(
-        imm,
-        0x67452301 | 0xefcdab89 | 0x98badcfe | 0x10325476 // MD5
-        | 0xc3d2e1f0 // SHA1
-        | 0x6a09e667 | 0xbb67ae85 | 0x3c6ef372 | 0xa54ff53a // SHA256
-        | 0x428a2f98 | 0x71374491 | 0xb5c0fbcf | 0xe9b5dba5 // SHA256 K constants
-    )
 }
 
 fn exact_function_name<'a>(binary: &'a LoadedBinary, addr: u64) -> Option<&'a str> {
@@ -1124,6 +1407,7 @@ fn annotate_rc4_report(report: &mut Value, binary: &LoadedBinary, engine: &AeonE
         }
     }
 }
+
 
 fn annotate_listing(
     entries: &mut [Value],

@@ -38,6 +38,7 @@ impl AeonFrontend {
             "get_stack_frame" => self.tool_get_stack_frame(args),
             "get_function_cfg" => self.tool_get_function_cfg(args),
             "get_function_skeleton" => self.tool_get_function_skeleton(args),
+            "get_data_flow_slice" => self.tool_get_data_flow_slice(args),
             "get_xrefs" => self.tool_get_xrefs(args),
             "scan_pointers" => self.tool_scan_pointers(),
             "scan_vtables" => self.tool_scan_vtables(),
@@ -207,6 +208,21 @@ impl AeonFrontend {
         let session = self.require_session()?;
         let addr = parse_addr_arg(args)?;
         session.get_function_skeleton(addr)
+    }
+
+
+    fn tool_get_data_flow_slice(&self, args: &Value) -> Result<Value, String> {
+        let session = self.require_session()?;
+        let addr = parse_addr_arg(args)?;
+        let register = args
+            .get("register")
+            .and_then(|v| v.as_str())
+            .ok_or("register parameter required")?;
+        let direction = args
+            .get("direction")
+            .and_then(|v| v.as_str())
+            .ok_or("direction parameter required ('backward' or 'forward')")?;
+        session.get_data_flow_slice(addr, register, direction)
     }
 
     fn tool_get_xrefs(&self, args: &Value) -> Result<Value, String> {
@@ -459,6 +475,15 @@ pub fn tools_list() -> Value {
                 json!({"type": "object", "properties": {
                     "addr": {"type": "string", "description": "Function address in hex"}
                 }, "required": ["addr"]})),
+
+
+            tool_schema("get_data_flow_slice",
+                "Trace value flow for a register backward or forward through a function: backward shows where a value comes from, forward shows where it goes. Detects data dependencies through assignments and control flow.",
+                json!({"type": "object", "properties": {
+                    "addr": {"type": "string", "description": "Instruction address in hex, e.g. '0x5e611fc'"},
+                    "register": {"type": "string", "description": "Register name (e.g., 'x0', 'w1', 'sp')"},
+                    "direction": {"type": "string", "enum": ["backward", "forward"], "description": "Direction of data flow to trace"}
+                }, "required": ["addr", "register", "direction"]})),
 
             tool_schema("get_xrefs",
                 "Get cross-references for an address: outgoing calls from the function, and incoming calls from other functions.",

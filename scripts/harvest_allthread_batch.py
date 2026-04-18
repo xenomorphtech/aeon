@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -40,6 +41,8 @@ DEVICE_GATE_TRACE_LOG = "/data/local/tmp/aeon_capture/aeon_trace.log"
 TRANSLATED_DEVICE_ELF = "/data/local/tmp/jit_exec_alias_0x9b5fe000.translated.elf"
 TRANSLATED_DEVICE_MAP = "/data/local/tmp/jit_exec_alias_0x9b5fe000.translated.map.json.compact.blockmap.jsonl"
 RELAY_JS = "/home/sdancer/aeon/frida/jit_trace_gate_v2.js"
+ADB_SERIAL = os.environ.get("AEON_ADB_SERIAL", "localhost:5555")
+ADB = ["adb", "-s", ADB_SERIAL]
 
 
 def http_get(url: str, timeout: int | None) -> str:
@@ -73,10 +76,7 @@ def read_text_tail(path: Path, max_chars: int = 20000) -> str:
 def device_file_size(path: str, timeout: int = 3) -> int | None:
     try:
         proc = subprocess.run(
-            [
-                "adb",
-                "-s",
-                "localhost:5555",
+            ADB + [
                 "shell",
                 "sh",
                 "-c",
@@ -186,7 +186,7 @@ def kill_capture(port: int, proc: subprocess.Popen | None) -> None:
 def adb_run(args: list[str], timeout: int) -> dict:
     try:
         proc = subprocess.run(
-            ["adb", *args],
+            ADB + args,
             check=False,
             capture_output=True,
             text=True,

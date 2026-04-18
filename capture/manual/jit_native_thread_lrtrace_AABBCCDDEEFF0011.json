@@ -1,0 +1,277 @@
+{
+  "ok": true,
+  "challenge": "AABBCCDDEEFF0011",
+  "token": "3DBAB9F744F6B601E62D42B80212A8DFCD8E42847FE6C6D2",
+  "startedAt": "2026-04-05T23:46:19.841Z",
+  "traceStartedAt": "2026-04-05T23:46:19.953Z",
+  "endedAt": "2026-04-05T23:46:20.635Z",
+  "workerThreadId": 20630,
+  "startPc": "0x9be96880",
+  "targetLr": "0x9be8d6f8",
+  "stopReason": "call-complete",
+  "trapStart": {
+    "timestamp": "2026-04-05T23:46:19.953Z",
+    "threadId": 20630,
+    "pc": "0x9be96880",
+    "lr": "0x9be8d6f8",
+    "sp": "0x7bd9b64de0",
+    "x0": "0x70ac67e0",
+    "x1": "0x138c1be0",
+    "x8": "0x7ca1401e08",
+    "page": "0x9be96000",
+    "edge": "0x9be8d6f8->0x9be96880"
+  },
+  "returnHit": null,
+  "corridor": {
+    "base": "0x9be95000",
+    "size": 57344,
+    "file": "/memfd:jit-cache (deleted)"
+  },
+  "blockCount": 3,
+  "blockTraceDrops": 0,
+  "blockTrace": [
+    {
+      "seq": 1,
+      "threadId": 20630,
+      "pc": "0x9be96880",
+      "lr": "0x9be8d6f8",
+      "sp": "0x7bd9b64de0",
+      "x0": "0x70ac67e0",
+      "x1": "0x138c1be0",
+      "x8": "0x7ca1401e08",
+      "count": 1,
+      "returnedToLr": false,
+      "source": "trap"
+    },
+    {
+      "seq": 2,
+      "threadId": 20630,
+      "pc": "0x7f642a1888",
+      "lr": "0x7f642a1888",
+      "sp": "0x7f57d88da0",
+      "x0": "0x7f57d89000",
+      "x1": "0x7f57d88cb0",
+      "x8": "0x0",
+      "count": 1,
+      "returnedToLr": false
+    },
+    {
+      "seq": 3,
+      "threadId": 20630,
+      "pc": "0x7f642a188c",
+      "lr": "0x7f642a1888",
+      "sp": "0x7f57d88da0",
+      "x0": "0x7f57d89000",
+      "x1": "0x7f57d88cb0",
+      "x8": "0x8b",
+      "count": 1,
+      "returnedToLr": false
+    }
+  ],
+  "pcHits": {
+    "0x9be96880": 1,
+    "0x7f642a1888": 1,
+    "0x7f642a188c": 1
+  },
+  "top": [
+    {
+      "pc": "0x9be96880",
+      "hits": 1
+    },
+    {
+      "pc": "0x7f642a1888",
+      "hits": 1
+    },
+    {
+      "pc": "0x7f642a188c",
+      "hits": 1
+    }
+  ],
+  "exceptions": [
+    {
+      "type": "access-violation",
+      "address": "0x9be96880",
+      "memory": {
+        "operation": "execute",
+        "address": "0x9be96880"
+      },
+      "pc": "0x9be96880",
+      "lr": "0x9be8d6f8",
+      "matched_trap": true,
+      "page": "0x9be96000",
+      "edge": "0x9be8d6f8->0x9be96880",
+      "threadId": 20630,
+      "count": 1
+    }
+  ],
+  "protections": [
+    {
+      "base": "0x9be95000",
+      "size": "0xe000",
+      "file": "/memfd:jit-cache (deleted)",
+      "protection": "r--",
+      "ok": true,
+      "timestamp": "2026-04-05T23:46:19.948Z"
+    }
+  ],
+  "failures": [],
+  "ranges": [
+    {
+      "base": "0x97e83000",
+      "size": 33554432,
+      "protection": "r-x",
+      "file": "/memfd:jit-zygote-cache (deleted)"
+    },
+    {
+      "base": "0x9be83000",
+      "size": 33554432,
+      "protection": "r-x",
+      "file": "/memfd:jit-cache (deleted)"
+    },
+    {
+      "base": "0x7ba4d9c000",
+      "size": 4096,
+      "protection": "r-x",
+      "file": "/vendor/lib64/hw/vulkan.rk3588.so"
+    },
+    {
+      "base": "0x7bc5569000",
+      "size": 1077248,
+      "protection": "r-x",
+      "file": "/data/data/com.netmarble.thered/files/d091362d66127 (deleted)"
+    },
+    {
+      "base": "0x7bc5670000",
+      "size": 8192,
+      "protection": "rwx",
+      "file": "/data/data/com.netmarble.thered/files/d091362d66127 (deleted)"
+    },
+    {
+      "base": "0x7bc5672000",
+      "size": 3178496,
+      "protection": "r-x",
+      "file": "/data/data/com.netmarble.thered/files/d091362d66127 (deleted)"
+    },
+    {
+      "base": "0x7bcac1f000",
+      "size": 1302528,
+      "protection": "r-x",
+      "file": "/data/app/~~zAq_F_CRKzZ2_x32nRf43Q==/com.netmarble.thered-_mJHjvykfLuriFrv7QquhA==/lib/arm64/libnmsssa.so"
+    },
+    {
+      "base": "0x7bcad5d000",
+      "size": 4096,
+      "protection": "rwx",
+      "file": "/data/app/~~zAq_F_CRKzZ2_x32nRf43Q==/com.netmarble.thered-_mJHjvykfLuriFrv7QquhA==/lib/arm64/libnmsssa.so"
+    },
+    {
+      "base": "0x7bcad5e000",
+      "size": 2400256,
+      "protection": "r-x",
+      "file": "/data/app/~~zAq_F_CRKzZ2_x32nRf43Q==/com.netmarble.thered-_mJHjvykfLuriFrv7QquhA==/lib/arm64/libnmsssa.so"
+    },
+    {
+      "base": "0x7bfd093000",
+      "size": 880640,
+      "protection": "r-x",
+      "file": "/data/app/~~zAq_F_CRKzZ2_x32nRf43Q==/com.netmarble.thered-_mJHjvykfLuriFrv7QquhA==/lib/arm64/libCrashSight.so"
+    },
+    {
+      "base": "0x7bfea01000",
+      "size": 112451584,
+      "protection": "r-x",
+      "file": "/data/app/~~zAq_F_CRKzZ2_x32nRf43Q==/com.netmarble.thered-_mJHjvykfLuriFrv7QquhA==/lib/arm64/libUnreal.so"
+    },
+    {
+      "base": "0x7c0f72f000",
+      "size": 65536,
+      "protection": "rwx",
+      "file": null
+    },
+    {
+      "base": "0x7c23b54000",
+      "size": 26804224,
+      "protection": "r-x",
+      "file": "/data/app/~~TfPNExQ75RFro9q25zVXlg==/com.google.android.gms-0vTYdxI8o34Vo0Q4I3Al8Q==/oat/arm64/base.odex"
+    },
+    {
+      "base": "0x7c38e32000",
+      "size": 315392,
+      "protection": "rwx",
+      "file": null
+    },
+    {
+      "base": "0x7c8b661000",
+      "size": 33181696,
+      "protection": "r-x",
+      "file": "/vendor/lib64/egl/libGLES_mali.so"
+    },
+    {
+      "base": "0x7c93524000",
+      "size": 4096,
+      "protection": "r-x",
+      "file": "/vendor/lib64/arm.graphics-V3-ndk_platform.so"
+    },
+    {
+      "base": "0x7c93567000",
+      "size": 73728,
+      "protection": "r-x",
+      "file": "/vendor/lib64/hw/android.hardware.graphics.mapper@4.0-impl-bifrost.so"
+    },
+    {
+      "base": "0x7c93968000",
+      "size": 49152,
+      "protection": "r-x",
+      "file": "/vendor/lib64/libdrm.so"
+    },
+    {
+      "base": "0x7c9e6da000",
+      "size": 1552384,
+      "protection": "r-x",
+      "file": "/data/data/com.netmarble.thered/files/189015AA1FDCB3CC196 (deleted)"
+    },
+    {
+      "base": "0x7c9e855000",
+      "size": 12288,
+      "protection": "rwx",
+      "file": "/data/data/com.netmarble.thered/files/189015AA1FDCB3CC196 (deleted)"
+    },
+    {
+      "base": "0x7c9e858000",
+      "size": 4096,
+      "protection": "r-x",
+      "file": "/data/data/com.netmarble.thered/files/189015AA1FDCB3CC196 (deleted)"
+    },
+    {
+      "base": "0x7c9e859000",
+      "size": 4096,
+      "protection": "rwx",
+      "file": "/data/data/com.netmarble.thered/files/189015AA1FDCB3CC196 (deleted)"
+    },
+    {
+      "base": "0x7c9e85a000",
+      "size": 3342336,
+      "protection": "r-x",
+      "file": "/data/data/com.netmarble.thered/files/189015AA1FDCB3CC196 (deleted)"
+    },
+    {
+      "base": "0x7f5c438000",
+      "size": 73728,
+      "protection": "rwx",
+      "file": null
+    },
+    {
+      "base": "0x7f5c667000",
+      "size": 4096,
+      "protection": "rwx",
+      "file": null
+    },
+    {
+      "base": "0x7f642a1000",
+      "size": 4096,
+      "protection": "rwx",
+      "file": null
+    }
+  ],
+  "error": null
+}

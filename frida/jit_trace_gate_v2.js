@@ -175,8 +175,26 @@
             logBlocks: true,
             logWrites: false,
         },
+        directDispatch: {
+            installed: false,
+            hooks: {},
+            mode: 'observe_return',
+            hits: 0,
+            emulated: 0,
+            samples: 0,
+            last: null,
+            logBudget: 32,
+        },
         callDebug: {
             scopeMode: 'normal',
+        },
+        tpidr: {
+            byThread: {},
+            last: null,
+            lastThreadId: null,
+            exceptionDepth: 0,
+            suppressedReads: 0,
+            logBudget: 8,
         },
         bootstrap: {
             // v2 defaults to the validated-safe bootstrap subset:
@@ -185,6 +203,7 @@
             wrapMaybeAdoptJit: bootstrapEnabled('wrapMaybeAdoptJit', false),
             exportTracedCall: bootstrapEnabled('exportTracedCall', false),
             installNmssCoreHooks: bootstrapEnabled('installNmssCoreHooks', false),
+            installDirectDispatch: bootstrapEnabled('installDirectDispatch', true),
             delayMs: bootstrapNumber('bootstrapDelayMs', 8000),
         },
         traceFile: {
@@ -221,6 +240,15 @@
     var MEMDUMP_CHUNK = 0x10000;
     var originalCallCertExport = null;
     var READY_CHALLENGE = '6BA4D60738580083';
+    var LIBART_NTERP_COMMON_INVOKE_STATIC_RET_OFFSET = 0x21160c;
+    var LIBART_NTERP_COMMON_INVOKE_INSTANCE_RESUME_RET_OFFSET = 0x212524;
+    var LIBART_NTERP_COMMON_INVOKE_INSTANCE_RESUME_BRANCH_OFFSET =
+        LIBART_NTERP_COMMON_INVOKE_INSTANCE_RESUME_RET_OFFSET - 4;
+    var DIRECT_DISPATCH_TARGET_E600 = 0x9cf8e600;
+    var DIRECT_DISPATCH_TARGET_FEF0 = 0x9cf8fef0;
+    var DIRECT_DISPATCH_TARGET_FF10 = 0x9cf8ff10;
+    var DIRECT_DISPATCH_TARGET_FEB0 = 0x9cf8feb0;
+    var DIRECT_DISPATCH_TARGET_80D0 = 0x9cf980d0;
 
     function parseJsonMaybe(value) {
         if (typeof value !== 'string') return value;
@@ -261,6 +289,10 @@
 
     function threadKey(threadId) {
         return String(threadId);
+    }
+
+    function readU32Exact(addr) {
+        return ptr(addr).readU32() >>> 0;
     }
 
     function tidField(threadId) {
@@ -704,6 +736,72 @@
         return readTpidrEl0._fn();
     }
 
+    function rememberTpidrEl0(value, threadId) {
+        var p;
+        try {
+            p = normalizeWordPtr(value);
+        } catch (e) {
+            return ptr('0');
+        }
+        var t = state.tpidr;
+        t.last = p.toString();
+        t.lastThreadId = threadId === null || threadId === undefined ? null : threadId;
+        if (threadId !== null && threadId !== undefined) {
+            t.byThread[threadKey(threadId)] = p.toString();
+        }
+        return p;
+    }
+
+    function cachedTpidrEl0(threadId) {
+        var t = state.tpidr;
+        if (threadId !== null && threadId !== undefined) {
+            var key = threadKey(threadId);
+            if (Object.prototype.hasOwnProperty.call(t.byThread, key)) {
+                try {
+                    return normalizeWordPtr(t.byThread[key]);
+                } catch (e) {}
+            }
+        }
+        if (t.last !== null && t.last !== undefined) {
+            try {
+                return normalizeWordPtr(t.last);
+            } catch (e) {}
+        }
+        return ptr('0');
+    }
+
+    function refreshTpidrEl0Cache(threadId, reason) {
+        var tid = threadId;
+        if (tid === null || tid === undefined) tid = currentThreadIdMaybe();
+        var value = readTpidrEl0();
+        return rememberTpidrEl0(value, tid);
+    }
+
+    function safeReadTpidrEl0(threadId, reason) {
+        var tid = threadId;
+        if (tid === null || tid === undefined) tid = currentThreadIdMaybe();
+        var t = state.tpidr;
+        if (t.exceptionDepth > 0) {
+            t.suppressedReads++;
+            var cached = cachedTpidrEl0(tid);
+            if (t.logBudget > 0) {
+                t.logBudget--;
+                console.log('[CAPTURE] [GATE] tpidr cache hit' + tidField(tid) +
+                    ' reason=' + (reason || 'exception') +
+                    ' value=' + fmtPtr(cached) +
+                    ' suppressed=' + t.suppressedReads);
+            }
+            return cached;
+        }
+        try {
+            return refreshTpidrEl0Cache(tid, reason);
+        } catch (e) {
+            var fallback = cachedTpidrEl0(tid);
+            noteFailure('read tpidr_el0 ' + (reason || 'refresh'), e);
+            return fallback;
+        }
+    }
+
     function translatedParseMap(text) {
         text = String(text || '');
         var trimmed = text.trim();
@@ -869,7 +967,7 @@
         return true;
     }
 
-    function translatedSeedContext(ctxPtr, cpuCtx) {
+    function translatedSeedContext(ctxPtr, cpuCtx, threadId) {
         for (var i = 0; i <= 28; i++) {
             writeWordExact(ctxPtr.add(translatedOffsetX(i)), cpuCtx['x' + i]);
         }
@@ -896,7 +994,7 @@
             } catch (e) {}
             dst.writeByteArray(new Uint8Array(16));
         }
-        writeWordExact(ctxPtr.add(translatedOffsetTpidr()), readTpidrEl0());
+        writeWordExact(ctxPtr.add(translatedOffsetTpidr()), safeReadTpidrEl0(threadId, 'translated seed'));
     }
 
     function translatedApplyContext(ctxPtr, cpuCtx, nextPc) {
@@ -1026,10 +1124,10 @@
         };
     }
 
-    function translatedRunFromContext(cpuCtx) {
+    function translatedRunFromContext(cpuCtx, threadId) {
         var startPc = u64Number(cpuCtx.pc);
         var ctxPtr = Memory.alloc(translatedJitContextSize());
-        translatedSeedContext(ctxPtr, cpuCtx);
+        translatedSeedContext(ctxPtr, cpuCtx, threadId);
         var current = startPc;
         var steps = 0;
         var path = [];
@@ -1365,6 +1463,349 @@
         } catch (e) {
             return null;
         }
+    }
+
+    function translatedDirectDispatchActive() {
+        return !!(state.translated &&
+            state.translated.armed &&
+            state.translated.loaded &&
+            state.translated.activeCall);
+    }
+
+    function dynamicDirectDispatchActive() {
+        return !!(state.dynamic &&
+            state.dynamic.armed &&
+            state.dynamic.loaded &&
+            state.dynamic.activeCall);
+    }
+
+    function directDispatchShouldSample(hitCount) {
+        return hitCount <= 8 || (hitCount % 256) === 0;
+    }
+
+    function directDispatchMatchKnownTarget(value) {
+        var num = u64Number(value) >>> 0;
+        if (num === DIRECT_DISPATCH_TARGET_E600) return 'e600';
+        if (num === DIRECT_DISPATCH_TARGET_FEF0) return 'fef0';
+        if (num === DIRECT_DISPATCH_TARGET_FF10) return 'ff10';
+        if (num === DIRECT_DISPATCH_TARGET_FEB0) return 'feb0';
+        if (num === DIRECT_DISPATCH_TARGET_80D0) return '80d0';
+        return null;
+    }
+
+    function directDispatchMatchRegisters(context, names) {
+        var hits = [];
+        if (!context) return hits;
+        for (var i = 0; i < names.length; i++) {
+            var name = names[i];
+            if (!Object.prototype.hasOwnProperty.call(context, name)) continue;
+            try {
+                var tag = directDispatchMatchKnownTarget(context[name]);
+                if (tag !== null) {
+                    hits.push({
+                        reg: name,
+                        target: tag,
+                        value: fmtPtr(context[name]),
+                    });
+                }
+            } catch (e) {}
+        }
+        return hits;
+    }
+
+    function directDispatchFindTargetRegister(context, wantedTarget) {
+        if (!context) return null;
+        var wantedNum = Number(wantedTarget) >>> 0;
+        var regs = [];
+        for (var i = 0; i <= 28; i++) regs.push('x' + i);
+        regs.push('fp');
+        regs.push('lr');
+        for (var j = 0; j < regs.length; j++) {
+            var name = regs[j];
+            if (!Object.prototype.hasOwnProperty.call(context, name)) continue;
+            try {
+                if (u64Number(context[name]) === wantedNum) {
+                    return name;
+                }
+            } catch (e) {}
+        }
+        return null;
+    }
+
+    function directDispatchRecord(kind, fields) {
+        var d = state.directDispatch;
+        d.last = Object.assign({
+            kind: kind,
+            timestamp: (new Date()).toISOString(),
+        }, fields || {});
+        if (d.logBudget > 0) {
+            d.logBudget--;
+            console.log('[CAPTURE] [GATE] direct-dispatch ' + JSON.stringify(d.last));
+        }
+    }
+
+    function directDispatchRestoreRegisters(context, saved) {
+        if (!context || !saved) return;
+        Object.keys(saved).forEach(function (name) {
+            try {
+                context[name] = saved[name];
+            } catch (e) {}
+        });
+    }
+
+    function directDispatchArmDynamicHandoff(context, returnSite, startPc, patch, meta) {
+        if (!dynamicDirectDispatchActive()) return false;
+        var threadId = Process.getCurrentThreadId();
+        if (state.dynamic.pendingThreads &&
+            Object.prototype.hasOwnProperty.call(state.dynamic.pendingThreads, String(threadId))) {
+            return false;
+        }
+        var targetPc = normalizeWordPtr(startPc);
+        if (!dynamicPtrInCurrentCodeRange(targetPc)) return false;
+        var saved = {};
+        var patchRegs = patch || {};
+        Object.keys(patchRegs).forEach(function (name) {
+            try {
+                saved[name] = context[name];
+            } catch (e) {}
+        });
+        try {
+            Object.keys(patchRegs).forEach(function (name) {
+                context[name] = patchRegs[name];
+            });
+            context.pc = targetPc;
+            dynamicArmResumeFromContext(context, threadId);
+            state.directDispatch.emulated++;
+            directDispatchRecord('libart_dynamic_handoff', Object.assign({
+                thread_id: threadId,
+                site: returnSite.toString(),
+                start_pc: fmtPtr(targetPc),
+                pending_thread: String(threadId),
+            }, meta || {}));
+            return true;
+        } catch (e) {
+            directDispatchRestoreRegisters(context, saved);
+            noteFailure('direct dynamic handoff', e);
+            directDispatchRecord('libart_dynamic_handoff_error', {
+                thread_id: threadId,
+                site: returnSite.toString(),
+                start_pc: fmtPtr(targetPc),
+                error: String(e),
+            });
+            return false;
+        }
+    }
+
+    function directDispatchObserveReturn(context, returnSite) {
+        var x22 = normalizeWordPtr(context.x22);
+        var observation = {
+            thread_id: Process.getCurrentThreadId(),
+            site: returnSite.toString(),
+            pc: fmtPtr(context.pc),
+            x1: fmtPtr(context.x1),
+            x16: fmtPtr(context.x16),
+            x17: fmtPtr(context.x17),
+            x19: fmtPtr(context.x19),
+            x22: fmtPtr(context.x22),
+            x24: fmtPtr(context.x24),
+            x30: fmtPtr(context.x30),
+            x1_target: directDispatchMatchKnownTarget(context.x1),
+            x16_target: directDispatchMatchKnownTarget(context.x16),
+            x17_target: directDispatchMatchKnownTarget(context.x17),
+            x24_target: directDispatchMatchKnownTarget(context.x24),
+            x30_target: directDispatchMatchKnownTarget(context.x30),
+        };
+        try {
+            observation.nterp_word_6 = readU16Maybe(x22.add(6));
+            observation.nterp_word_8 = readU16Maybe(x22.add(8));
+        } catch (e) {}
+        directDispatchRecord('libart_nterp_resume_return', observation);
+    }
+
+    function directDispatchObserveStaticReturn(context, returnSite) {
+        var matchedRegs = directDispatchMatchRegisters(context, [
+            'x0', 'x1', 'x2', 'x3', 'x4', 'x8', 'x9', 'x15', 'x19', 'x20', 'x21', 'x22', 'x24', 'x30'
+        ]);
+        var observation = {
+            thread_id: Process.getCurrentThreadId(),
+            site: returnSite.toString(),
+            pc: fmtPtr(context.pc),
+            x0: fmtPtr(context.x0),
+            x1: fmtPtr(context.x1),
+            x2: fmtPtr(context.x2),
+            x3: fmtPtr(context.x3),
+            x4: fmtPtr(context.x4),
+            x8: fmtPtr(context.x8),
+            x9: fmtPtr(context.x9),
+            x15: fmtPtr(context.x15),
+            x19: fmtPtr(context.x19),
+            x20: fmtPtr(context.x20),
+            x21: fmtPtr(context.x21),
+            x22: fmtPtr(context.x22),
+            x24: fmtPtr(context.x24),
+            x30: fmtPtr(context.x30),
+            x0_target: directDispatchMatchKnownTarget(context.x0),
+            x1_target: directDispatchMatchKnownTarget(context.x1),
+            x2_target: directDispatchMatchKnownTarget(context.x2),
+            x3_target: directDispatchMatchKnownTarget(context.x3),
+            x4_target: directDispatchMatchKnownTarget(context.x4),
+            x8_target: directDispatchMatchKnownTarget(context.x8),
+            x9_target: directDispatchMatchKnownTarget(context.x9),
+            x15_target: directDispatchMatchKnownTarget(context.x15),
+            x19_target: directDispatchMatchKnownTarget(context.x19),
+            x20_target: directDispatchMatchKnownTarget(context.x20),
+            x21_target: directDispatchMatchKnownTarget(context.x21),
+            x22_target: directDispatchMatchKnownTarget(context.x22),
+            x24_target: directDispatchMatchKnownTarget(context.x24),
+            x30_target: directDispatchMatchKnownTarget(context.x30),
+        };
+        if (matchedRegs.length > 0) {
+            observation.matched_targets = matchedRegs;
+            observation.matched_target_reg = matchedRegs[0].reg;
+            observation.matched_target = matchedRegs[0].target;
+        }
+        directDispatchRecord('libart_nterp_static_return', observation);
+    }
+
+    function emulateDispatchStubE600(context) {
+        var x1 = normalizeWordPtr(context.x1);
+        var x19 = normalizeWordPtr(context.x19);
+        var x30 = normalizeWordPtr(context.x30);
+        var x16Initial = normalizeWordPtr(context.x16);
+        var w1 = u64Number(context.x1) >>> 0;
+        var loadedW16 = null;
+        if (w1 !== 0) {
+            loadedW16 = readU32Exact(x1.add(4));
+            context.x16 = ptr(loadedW16 >>> 0);
+            if ((loadedW16 & 0x10000000) !== 0) {
+                var branchInsn = readU32Exact(x30.sub(4));
+                var tableIndex = (branchInsn >>> 10) & 0xfff;
+                var x17 = readWordExact(x19.add(0x690));
+                var tableWord = readU32Exact(x1.add(tableIndex << 2));
+                context.x16 = ptr(tableWord >>> 0);
+                context.x17 = x17;
+                context.pc = x17;
+                return {
+                    kind: 'e600_indirect',
+                    branch_insn: '0x' + branchInsn.toString(16),
+                    table_index: tableIndex,
+                    next_pc: x17.toString(),
+                    loaded_w16: '0x' + loadedW16.toString(16),
+                    table_w16: '0x' + tableWord.toString(16),
+                };
+            }
+        }
+        var addend = Math.floor(u64Number(x16Initial) / 0x100000000);
+        var nextPc = x30.sub(4);
+        context.x30 = nextPc;
+        context.x1 = x1.add(addend);
+        context.pc = nextPc;
+        return {
+            kind: 'e600_tail',
+            next_pc: nextPc.toString(),
+            addend: '0x' + addend.toString(16),
+            loaded_w16: loadedW16 === null ? null : ('0x' + loadedW16.toString(16)),
+        };
+    }
+
+    function directDispatchMaybeBypassInstanceResume(context, returnSite) {
+        if (!dynamicDirectDispatchActive()) return false;
+        var temp = {
+            x1: context.x1,
+            x16: context.x16,
+            x17: context.x17,
+            x19: context.x19,
+            x30: context.x30,
+            pc: context.pc,
+        };
+        var emulated = emulateDispatchStubE600(temp);
+        var targetPc = normalizeWordPtr(temp.pc);
+        if (!dynamicPtrInCurrentCodeRange(targetPc)) {
+            return false;
+        }
+        return directDispatchArmDynamicHandoff(context, returnSite, targetPc, {
+            x1: temp.x1,
+            x16: temp.x16,
+            x17: temp.x17,
+            x30: temp.x30,
+            pc: targetPc,
+        }, {
+            hook: 'nterp_instance_resume',
+            bypass: 'e600_stub',
+            stub_kind: emulated.kind || null,
+            stub_next_pc: emulated.next_pc || fmtPtr(targetPc),
+            stub_table_index: emulated.table_index !== undefined ? emulated.table_index : null,
+            stub_loaded_w16: emulated.loaded_w16 || null,
+            stub_table_w16: emulated.table_w16 || null,
+            stub_addend: emulated.addend || null,
+        });
+    }
+
+    function installDirectDispatchHooks() {
+        if (state.directDispatch.installed) return;
+        if (Process.arch !== 'arm64') {
+            console.log('[CAPTURE] [GATE] direct-dispatch skip reason=arch-' + Process.arch);
+            return;
+        }
+        var libart = Process.findModuleByName('libart.so');
+        if (!libart) {
+            console.log('[CAPTURE] [GATE] direct-dispatch skip reason=no-libart');
+            return;
+        }
+        var staticReturnSite = libart.base.add(LIBART_NTERP_COMMON_INVOKE_STATIC_RET_OFFSET);
+        var branchSite = libart.base.add(LIBART_NTERP_COMMON_INVOKE_INSTANCE_RESUME_BRANCH_OFFSET);
+        var returnSite = libart.base.add(LIBART_NTERP_COMMON_INVOKE_INSTANCE_RESUME_RET_OFFSET);
+        state.directDispatch.hooks.nterpCommonInvokeStaticRet = Interceptor.attach(staticReturnSite, {
+            onEnter: function () {
+                if (!translatedDirectDispatchActive()) return;
+                state.directDispatch.hits++;
+                if (!directDispatchShouldSample(state.directDispatch.hits)) return;
+                state.directDispatch.samples++;
+                try {
+                    directDispatchObserveStaticReturn(this.context, staticReturnSite);
+                } catch (e) {
+                    noteFailure('direct dispatch observe static return', e);
+                    directDispatchRecord('libart_nterp_static_return_error', {
+                        thread_id: Process.getCurrentThreadId(),
+                        site: staticReturnSite.toString(),
+                        error: String(e),
+                    });
+                }
+            }
+        });
+        state.directDispatch.hooks.nterpCommonInvokeInstanceResumeRet = Interceptor.attach(returnSite, {
+            onEnter: function () {
+                if (dynamicDirectDispatchActive()) {
+                    try {
+                        if (directDispatchMaybeBypassInstanceResume(this.context, returnSite)) {
+                            return;
+                        }
+                    } catch (e) {
+                        noteFailure('direct dispatch dynamic resume handoff', e);
+                    }
+                }
+                if (!translatedDirectDispatchActive() && !dynamicDirectDispatchActive()) return;
+                state.directDispatch.hits++;
+                if (!directDispatchShouldSample(state.directDispatch.hits)) return;
+                state.directDispatch.samples++;
+                try {
+                    directDispatchObserveReturn(this.context, returnSite);
+                } catch (e) {
+                    noteFailure('direct dispatch observe return', e);
+                    directDispatchRecord('libart_nterp_resume_return_error', {
+                        thread_id: Process.getCurrentThreadId(),
+                        site: returnSite.toString(),
+                        error: String(e),
+                    });
+                }
+            }
+        });
+        state.directDispatch.installed = true;
+        console.log('[CAPTURE] [GATE] direct-dispatch installed mode=' + state.directDispatch.mode +
+            ' static_return_site=' + staticReturnSite +
+            ' branch_site=' + branchSite +
+            ' return_site=' + returnSite +
+            ' module_offset=0x' + LIBART_NTERP_COMMON_INVOKE_INSTANCE_RESUME_RET_OFFSET.toString(16));
     }
 
     function dynamicIsArtInvokeStubResume(finalPc) {
@@ -4804,6 +5245,7 @@
     function runBootstrapActions() {
     if (state.bootstrap.installExceptionHandler && !globalThis.__jitGateTraceExceptionHandlerInstalled) {
         Process.setExceptionHandler(function (details) {
+            state.tpidr.exceptionDepth++;
             var event = {
                 type: details.type || null,
                 address: details.address ? fmtPtr(details.address) : null,
@@ -4815,262 +5257,266 @@
                 lr: details.context ? fmtPtr(details.context.lr) : null,
                 matched_trap: false,
             };
-            var threadId = details.threadId;
-            if (threadId === null || threadId === undefined) {
-                threadId = currentThreadIdMaybe();
-            }
-            var dynamicResumeTrap = dynamicFindResumeTrap(details);
-            if (dynamicResumeTrap) {
-                event.matched_trap = true;
-                event.dynamic_resume = true;
-                event.threadId = dynamicResumeTrap.threadId;
-                pushException(event);
-                console.log('[CAPTURE] [GATE] dynamic resume trap type=' + event.type +
-                            ' pc=' + event.pc +
-                            ' lr=' + event.lr +
-                            tidField(dynamicResumeTrap.threadId));
-                try {
-                    dynamicFinishResumeTrap(details, dynamicResumeTrap);
-                    return true;
-                } catch (e) {
-                    noteFailure('dynamic resume trap', e);
-                    console.log('[CAPTURE] [GATE] dynamic resume trap ERROR pc=' + event.pc +
-                                ' err=' + String(e));
-                    return false;
+            try {
+                var threadId = details.threadId;
+                if (threadId === null || threadId === undefined) {
+                    threadId = currentThreadIdMaybe();
                 }
-            }
-            if (!isTargetTrapException(details)) {
-                if (state.dynamic && state.dynamic.armed && details.context &&
-                    event.type === 'access-violation' &&
-                    event.memory && event.memory.operation === 'execute') {
+                var dynamicResumeTrap = dynamicFindResumeTrap(details);
+                if (dynamicResumeTrap) {
+                    event.matched_trap = true;
+                    event.dynamic_resume = true;
+                    event.threadId = dynamicResumeTrap.threadId;
+                    pushException(event);
+                    console.log('[CAPTURE] [GATE] dynamic resume trap type=' + event.type +
+                                ' pc=' + event.pc +
+                                ' lr=' + event.lr +
+                                tidField(dynamicResumeTrap.threadId));
                     try {
-                        var bailoutBridge = dynamicBridgeState(threadId);
-                        if (dynamicMaybeBailNonCallableExecute(details, threadId, bailoutBridge)) {
-                            event.matched_trap = true;
-                            event.dynamic_bailout = true;
-                            event.threadId = threadId;
-                            pushException(event);
-                            return true;
-                        }
+                        dynamicFinishResumeTrap(details, dynamicResumeTrap);
+                        return true;
                     } catch (e) {
-                        noteFailure('dynamic bailout', e);
+                        noteFailure('dynamic resume trap', e);
+                        console.log('[CAPTURE] [GATE] dynamic resume trap ERROR pc=' + event.pc +
+                                    ' err=' + String(e));
+                        return false;
                     }
                 }
-                event.matched_trap = false;
-                pushException(event);
-                var passLine = '[CAPTURE] [GATE] pass exception type=' + event.type +
-                    ' address=' + event.address +
-                    ' pc=' + event.pc +
-                    ' lr=' + event.lr;
-                if (event.memory) {
-                    passLine += ' memop=' + (event.memory.operation || '<none>') +
-                        ' memaddr=' + (event.memory.address || '<none>');
-                }
-                if (state.dynamic && state.dynamic.armed) {
-                    passLine += ' bridge=' + JSON.stringify(dynamicBridgeState(threadId));
-                }
-                if (state.postResume && state.postResume.active && state.postResume.threadId === threadId) {
-                    passLine += ' post_resume=' + JSON.stringify({
-                        start_pc: state.postResume.startPc,
-                        block_count: state.postResume.blockCount,
-                        drops: state.postResume.drops,
-                        events: state.postResume.events.slice(-12),
-                    });
-                    stopPostResumeTrace('fault');
-                }
-                if (details.context && event.type === 'access-violation') {
-                    passLine += ' bt=' + JSON.stringify(exceptionBacktrace(details.context, 10));
-                }
-                console.log(passLine);
-                return false;
-            }
-            event.matched_trap = true;
-            var pageBase = details.context ? pageBaseFor(details.context.pc) : pageBaseFor(details.address);
-            var pageKey = pageBase ? pageBase.toString() : '0x0';
-            var pcKey = event.pc || '0x0';
-            var lrKey = event.lr || '0x0';
-            var edgeKey = lrKey + '->' + pcKey;
-            var trapCount = bumpTrapCount(pcKey);
-            state.pageHits[pageKey] = bumpMapCount(state.pageHits, pageKey);
-            state.pcHits[pcKey] = bumpMapCount(state.pcHits, pcKey);
-            state.edgeHits[edgeKey] = bumpMapCount(state.edgeHits, edgeKey);
-            if (threadId !== null && threadId !== undefined) {
-                state.threadHits[String(threadId)] = bumpMapCount(state.threadHits, String(threadId));
-                event.threadId = threadId;
-                scheduleStalkerForThread(threadId, pcKey);
-            }
-            event.page = pageKey;
-            event.edge = edgeKey;
-            event.count = trapCount;
-            pushException(event);
-            if (trapCount <= 4 || (trapCount % 256) === 0) {
-                traceFileWriteLine('[CAPTURE] [GATE] corridor exception hit type=' + event.type +
-                    ' address=' + event.address +
-                    ' pc=' + event.pc +
-                    ' lr=' + event.lr +
-                    ' thread=' + (threadId === null || threadId === undefined ? 'unknown' : threadId) +
-                    ' page=' + event.page +
-                    ' edge=' + event.edge +
-                    ' count=' + trapCount +
-                    ' translated=' + (state.translated.armed ? 'true' : 'false') +
-                    ' dynamic=' + (state.dynamic.armed ? 'true' : 'false'));
-            }
-            if (!(state.dynamic.armed || state.translated.armed) &&
-                (trapCount <= 4 || (trapCount % 1024) === 0)) {
-                console.log('[CAPTURE] [GATE] trapped execute fault type=' + event.type +
-                            ' address=' + event.address +
-                            ' pc=' + event.pc +
-                            ' lr=' + event.lr +
-                            ' thread=' + (threadId === null || threadId === undefined ? 'unknown' : threadId) +
-                            ' page=' + event.page +
-                            ' edge=' + event.edge +
-                            ' count=' + trapCount);
-            }
-            if (state.memdump.armed && !state.memdump.captured) {
-                state.memdump.captured = true;
-                state.memdump.armed = false;
-                console.log('[CAPTURE] [GATE] memdump TRIGGERED on fault pc=' + event.pc + ' thread=' + threadId);
-                try {
-                    state.memdump.before = doFullProcessSnapshot('before', details.context, threadId);
-                } catch (e) {
-                    noteFailure('memdump before snapshot', e);
-                    state.memdump.before = { error: String(e) };
-                }
-            }
-            if (state.dynamic.armed && state.dynamic.loaded && state.dynamic.activeCall &&
-                (!state.dynamic.minPc || (details.context && ptr(details.context.pc).compare(state.dynamic.minPc) >= 0))) {
-                try {
-                    var dynThreadName = threadNameMaybe(threadId);
-                    if (dynamicIsZeroTrapCandidate(details.context)) {
-                        console.log('[CAPTURE] [GATE] dynamic ignore zero/trap candidate pc=' + event.pc +
-                                    tidField(threadId));
-                        if (!activatePage(pageBase)) {
-                            return false;
+                if (!isTargetTrapException(details)) {
+                    if (state.dynamic && state.dynamic.armed && details.context &&
+                        event.type === 'access-violation' &&
+                        event.memory && event.memory.operation === 'execute') {
+                        try {
+                            var bailoutBridge = dynamicBridgeState(threadId);
+                            if (dynamicMaybeBailNonCallableExecute(details, threadId, bailoutBridge)) {
+                                event.matched_trap = true;
+                                event.dynamic_bailout = true;
+                                event.threadId = threadId;
+                                pushException(event);
+                                return true;
+                            }
+                        } catch (e) {
+                            noteFailure('dynamic bailout', e);
                         }
-                        return true;
                     }
-                    if (!hasClaim(state.dynamic.threadClaims, threadId)) {
-                        ensureClaim(state.dynamic.threadClaims, threadId, {
-                            first_pc: event.pc,
-                            challenge: state.dynamic.activeCall ? (state.dynamic.activeCall.challenge || null) : null,
-                            thread_name: dynThreadName,
+                    event.matched_trap = false;
+                    pushException(event);
+                    var passLine = '[CAPTURE] [GATE] pass exception type=' + event.type +
+                        ' address=' + event.address +
+                        ' pc=' + event.pc +
+                        ' lr=' + event.lr;
+                    if (event.memory) {
+                        passLine += ' memop=' + (event.memory.operation || '<none>') +
+                            ' memaddr=' + (event.memory.address || '<none>');
+                    }
+                    if (state.dynamic && state.dynamic.armed) {
+                        passLine += ' bridge=' + JSON.stringify(dynamicBridgeState(threadId));
+                    }
+                    if (state.postResume && state.postResume.active && state.postResume.threadId === threadId) {
+                        passLine += ' post_resume=' + JSON.stringify({
+                            start_pc: state.postResume.startPc,
+                            block_count: state.postResume.blockCount,
+                            drops: state.postResume.drops,
+                            events: state.postResume.events.slice(-12),
                         });
-                        console.log('[CAPTURE] [GATE] dynamic thread start' + tidField(threadId) +
-                            ' name=' + (dynThreadName || '<unknown>') +
-                            ' pc=' + event.pc +
-                            ' challenge=' + (state.dynamic.activeCall ? (state.dynamic.activeCall.challenge || '<none>') : '<none>'));
+                        stopPostResumeTrace('fault');
                     }
-                    if (state.dynamic.pendingThreads &&
-                        Object.prototype.hasOwnProperty.call(state.dynamic.pendingThreads, String(threadId))) {
-                        var pendingBridgeState = dynamicBridgeState(threadId);
-                        if (dynamicMaybeContinuePendingReentry(details, threadId, pendingBridgeState)) {
+                    if (details.context && event.type === 'access-violation') {
+                        passLine += ' bt=' + JSON.stringify(exceptionBacktrace(details.context, 10));
+                    }
+                    console.log(passLine);
+                    return false;
+                }
+                event.matched_trap = true;
+                var pageBase = details.context ? pageBaseFor(details.context.pc) : pageBaseFor(details.address);
+                var pageKey = pageBase ? pageBase.toString() : '0x0';
+                var pcKey = event.pc || '0x0';
+                var lrKey = event.lr || '0x0';
+                var edgeKey = lrKey + '->' + pcKey;
+                var trapCount = bumpTrapCount(pcKey);
+                state.pageHits[pageKey] = bumpMapCount(state.pageHits, pageKey);
+                state.pcHits[pcKey] = bumpMapCount(state.pcHits, pcKey);
+                state.edgeHits[edgeKey] = bumpMapCount(state.edgeHits, edgeKey);
+                if (threadId !== null && threadId !== undefined) {
+                    state.threadHits[String(threadId)] = bumpMapCount(state.threadHits, String(threadId));
+                    event.threadId = threadId;
+                    scheduleStalkerForThread(threadId, pcKey);
+                }
+                event.page = pageKey;
+                event.edge = edgeKey;
+                event.count = trapCount;
+                pushException(event);
+                if (trapCount <= 4 || (trapCount % 256) === 0) {
+                    traceFileWriteLine('[CAPTURE] [GATE] corridor exception hit type=' + event.type +
+                        ' address=' + event.address +
+                        ' pc=' + event.pc +
+                        ' lr=' + event.lr +
+                        ' thread=' + (threadId === null || threadId === undefined ? 'unknown' : threadId) +
+                        ' page=' + event.page +
+                        ' edge=' + event.edge +
+                        ' count=' + trapCount +
+                        ' translated=' + (state.translated.armed ? 'true' : 'false') +
+                        ' dynamic=' + (state.dynamic.armed ? 'true' : 'false'));
+                }
+                if (!(state.dynamic.armed || state.translated.armed) &&
+                    (trapCount <= 4 || (trapCount % 1024) === 0)) {
+                    console.log('[CAPTURE] [GATE] trapped execute fault type=' + event.type +
+                                ' address=' + event.address +
+                                ' pc=' + event.pc +
+                                ' lr=' + event.lr +
+                                ' thread=' + (threadId === null || threadId === undefined ? 'unknown' : threadId) +
+                                ' page=' + event.page +
+                                ' edge=' + event.edge +
+                                ' count=' + trapCount);
+                }
+                if (state.memdump.armed && !state.memdump.captured) {
+                    state.memdump.captured = true;
+                    state.memdump.armed = false;
+                    console.log('[CAPTURE] [GATE] memdump TRIGGERED on fault pc=' + event.pc + ' thread=' + threadId);
+                    try {
+                        state.memdump.before = doFullProcessSnapshot('before', details.context, threadId);
+                    } catch (e) {
+                        noteFailure('memdump before snapshot', e);
+                        state.memdump.before = { error: String(e) };
+                    }
+                }
+                if (state.dynamic.armed && state.dynamic.loaded && state.dynamic.activeCall &&
+                    (!state.dynamic.minPc || (details.context && ptr(details.context.pc).compare(state.dynamic.minPc) >= 0))) {
+                    try {
+                        var dynThreadName = threadNameMaybe(threadId);
+                        if (dynamicIsZeroTrapCandidate(details.context)) {
+                            console.log('[CAPTURE] [GATE] dynamic ignore zero/trap candidate pc=' + event.pc +
+                                        tidField(threadId));
+                            if (!activatePage(pageBase)) {
+                                return false;
+                            }
                             return true;
                         }
-                        console.log('[CAPTURE] [GATE] dynamic skip pending' + tidField(threadId) +
-                            ' pc=' + event.pc +
-                            ' stage=' + (pendingBridgeState.stage || '<null>') +
-                            ' target=' + (pendingBridgeState.thread_last_target || pendingBridgeState.last_target || '<null>') +
-                            ' saved_x30=' + (pendingBridgeState.thread_saved_x30 || pendingBridgeState.saved_x30 || '<null>') +
-                            ' resume=' + (pendingBridgeState.thread_resume_target || pendingBridgeState.resume_target || '<null>') +
-                            ' ctx_pc=' + (pendingBridgeState.thread_ctx_pc || pendingBridgeState.ctx_pc || '<null>'));
-                        if (!activatePage(pageBase)) {
-                            return false;
+                        if (!hasClaim(state.dynamic.threadClaims, threadId)) {
+                            ensureClaim(state.dynamic.threadClaims, threadId, {
+                                first_pc: event.pc,
+                                challenge: state.dynamic.activeCall ? (state.dynamic.activeCall.challenge || null) : null,
+                                thread_name: dynThreadName,
+                            });
+                            console.log('[CAPTURE] [GATE] dynamic thread start' + tidField(threadId) +
+                                ' name=' + (dynThreadName || '<unknown>') +
+                                ' pc=' + event.pc +
+                                ' challenge=' + (state.dynamic.activeCall ? (state.dynamic.activeCall.challenge || '<none>') : '<none>'));
+                        }
+                        if (state.dynamic.pendingThreads &&
+                            Object.prototype.hasOwnProperty.call(state.dynamic.pendingThreads, String(threadId))) {
+                            var pendingBridgeState = dynamicBridgeState(threadId);
+                            if (dynamicMaybeContinuePendingReentry(details, threadId, pendingBridgeState)) {
+                                return true;
+                            }
+                            console.log('[CAPTURE] [GATE] dynamic skip pending' + tidField(threadId) +
+                                ' pc=' + event.pc +
+                                ' stage=' + (pendingBridgeState.stage || '<null>') +
+                                ' target=' + (pendingBridgeState.thread_last_target || pendingBridgeState.last_target || '<null>') +
+                                ' saved_x30=' + (pendingBridgeState.thread_saved_x30 || pendingBridgeState.saved_x30 || '<null>') +
+                                ' resume=' + (pendingBridgeState.thread_resume_target || pendingBridgeState.resume_target || '<null>') +
+                                ' ctx_pc=' + (pendingBridgeState.thread_ctx_pc || pendingBridgeState.ctx_pc || '<null>'));
+                            if (!activatePage(pageBase)) {
+                                return false;
+                            }
+                            return true;
+                        }
+                        dynamicArmResumeFromContext(details.context, threadId);
+                        return true;
+                    } catch (e) {
+                        noteFailure('dynamic dispatch', e);
+                        console.log('[CAPTURE] [GATE] dynamic dispatch ERROR pc=' + event.pc + ' err=' + String(e));
+                        return false;
+                    }
+                }
+                if (state.translated.armed && state.translated.loaded &&
+                    state.translated.activeCall &&
+                    (!state.translated.minPc || (details.context && ptr(details.context.pc).compare(state.translated.minPc) >= 0))) {
+                    try {
+                        if (!hasClaim(state.translated.claimedThreads, threadId)) {
+                            ensureClaim(state.translated.claimedThreads, threadId, {
+                                first_pc: event.pc,
+                                challenge: state.translated.activeCall.challenge || null,
+                            });
+                            console.log('[CAPTURE] [GATE] translated claimed thread=' + threadId +
+                                ' pc=' + event.pc +
+                                ' challenge=' + (state.translated.activeCall.challenge || '<none>'));
+                        }
+                        var translatedResult = translatedRunFromContext(details.context, threadId);
+                        var translatedPage = details.context ? pageBaseFor(details.context.pc) : null;
+                        var shouldResumeOriginal = false;
+                        if (translatedResult && translatedResult.trap_exit) {
+                            shouldResumeOriginal = true;
+                        } else if (translatedResult && translatedResult.unresolved && details.context) {
+                            var currentPcNum = u64Number(details.context.pc);
+                            var currentBaseNum = state.currentBase ? u64Number(state.currentBase) : 0;
+                            var currentSizeNum = state.currentSize || 0;
+                            shouldResumeOriginal = !!currentBaseNum &&
+                                currentPcNum >= currentBaseNum &&
+                                currentPcNum < (currentBaseNum + currentSizeNum);
+                        }
+                        if (shouldResumeOriginal && translatedPage) {
+                            activatePage(translatedPage);
                         }
                         return true;
+                    } catch (e) {
+                        noteFailure('translated dispatch', e);
+                        console.log('[CAPTURE] [GATE] translated dispatch ERROR pc=' + event.pc + ' err=' + String(e));
+                        return false;
                     }
-                    dynamicArmResumeFromContext(details.context, threadId);
-                    return true;
-                } catch (e) {
-                    noteFailure('dynamic dispatch', e);
-                    console.log('[CAPTURE] [GATE] dynamic dispatch ERROR pc=' + event.pc + ' err=' + String(e));
-                    return false;
                 }
-            }
-            if (state.translated.armed && state.translated.loaded &&
-                state.translated.activeCall &&
-                (!state.translated.minPc || (details.context && ptr(details.context.pc).compare(state.translated.minPc) >= 0))) {
-                try {
-                    if (!hasClaim(state.translated.claimedThreads, threadId)) {
-                        ensureClaim(state.translated.claimedThreads, threadId, {
-                            first_pc: event.pc,
-                            challenge: state.translated.activeCall.challenge || null,
-                        });
-                        console.log('[CAPTURE] [GATE] translated claimed thread=' + threadId +
-                            ' pc=' + event.pc +
-                            ' challenge=' + (state.translated.activeCall.challenge || '<none>'));
-                    }
-                    var translatedResult = translatedRunFromContext(details.context);
-                    var translatedPage = details.context ? pageBaseFor(details.context.pc) : null;
-                    var shouldResumeOriginal = false;
-                    if (translatedResult && translatedResult.trap_exit) {
-                        shouldResumeOriginal = true;
-                    } else if (translatedResult && translatedResult.unresolved && details.context) {
-                        var currentPcNum = u64Number(details.context.pc);
-                        var currentBaseNum = state.currentBase ? u64Number(state.currentBase) : 0;
-                        var currentSizeNum = state.currentSize || 0;
-                        shouldResumeOriginal = !!currentBaseNum &&
-                            currentPcNum >= currentBaseNum &&
-                            currentPcNum < (currentBaseNum + currentSizeNum);
-                    }
-                    if (shouldResumeOriginal && translatedPage) {
-                        activatePage(translatedPage);
-                    }
-                    return true;
-                } catch (e) {
-                    noteFailure('translated dispatch', e);
-                    console.log('[CAPTURE] [GATE] translated dispatch ERROR pc=' + event.pc + ' err=' + String(e));
-                    return false;
-                }
-            }
-            if (state.freeze.armed && !state.freeze.triggered &&
-                (!state.freeze.minPc || (details.context && ptr(details.context.pc).compare(state.freeze.minPc) >= 0))) {
-                state.freeze.armed = false;
-                state.freeze.triggered = true;
-                state.freeze.info = {
-                    status: 'triggered',
-                    timestamp: (new Date()).toISOString(),
-                    pid: Process.id,
-                    thread_id: threadId || null,
-                    challenge: state.freeze.challenge,
-                    type: event.type,
-                    address: event.address,
-                    pc: event.pc,
-                    lr: event.lr,
-                    registers: details.context ? captureRegs(details.context) : null,
-                    page: event.page,
-                    edge: event.edge,
-                    trap_count: trapCount,
-                    freeze_status_path: FREEZE_STATUS_PATH,
-                };
-                writeFreezeStatus(state.freeze.info);
-                console.log('[CAPTURE] [GATE] FREEZE TRIGGERED pid=' + Process.id +
-                            ' thread=' + (threadId === null || threadId === undefined ? 'unknown' : threadId) +
-                            ' pc=' + event.pc +
-                            ' challenge=' + (state.freeze.challenge || '<none>') +
-                            ' status=' + FREEZE_STATUS_PATH);
-                try {
-                    memdumpGetLibc().kill(Process.id, 19);
-                } catch (e) {
-                    noteFailure('freeze SIGSTOP', e);
-                    state.freeze.triggered = false;
-                    state.freeze.armed = true;
+                if (state.freeze.armed && !state.freeze.triggered &&
+                    (!state.freeze.minPc || (details.context && ptr(details.context.pc).compare(state.freeze.minPc) >= 0))) {
+                    state.freeze.armed = false;
+                    state.freeze.triggered = true;
                     state.freeze.info = {
-                        status: 'error',
+                        status: 'triggered',
                         timestamp: (new Date()).toISOString(),
                         pid: Process.id,
                         thread_id: threadId || null,
+                        challenge: state.freeze.challenge,
+                        type: event.type,
+                        address: event.address,
                         pc: event.pc,
-                        error: String(e),
+                        lr: event.lr,
+                        registers: details.context ? captureRegs(details.context) : null,
+                        page: event.page,
+                        edge: event.edge,
+                        trap_count: trapCount,
                         freeze_status_path: FREEZE_STATUS_PATH,
                     };
                     writeFreezeStatus(state.freeze.info);
+                    console.log('[CAPTURE] [GATE] FREEZE TRIGGERED pid=' + Process.id +
+                                ' thread=' + (threadId === null || threadId === undefined ? 'unknown' : threadId) +
+                                ' pc=' + event.pc +
+                                ' challenge=' + (state.freeze.challenge || '<none>') +
+                                ' status=' + FREEZE_STATUS_PATH);
+                    try {
+                        memdumpGetLibc().kill(Process.id, 19);
+                    } catch (e) {
+                        noteFailure('freeze SIGSTOP', e);
+                        state.freeze.triggered = false;
+                        state.freeze.armed = true;
+                        state.freeze.info = {
+                            status: 'error',
+                            timestamp: (new Date()).toISOString(),
+                            pid: Process.id,
+                            thread_id: threadId || null,
+                            pc: event.pc,
+                            error: String(e),
+                            freeze_status_path: FREEZE_STATUS_PATH,
+                        };
+                        writeFreezeStatus(state.freeze.info);
+                    }
+                    return true;
+                }
+                if (!activatePage(pageBase)) {
+                    return false;
                 }
                 return true;
+            } finally {
+                state.tpidr.exceptionDepth = Math.max(0, state.tpidr.exceptionDepth - 1);
             }
-            if (!activatePage(pageBase)) {
-                return false;
-            }
-            return true;
         });
         globalThis.__jitGateTraceExceptionHandlerInstalled = true;
         console.log('[CAPTURE] [GATE] installed exception handler');
@@ -5093,6 +5539,16 @@
         console.log('[CAPTURE] [GATE] wrapped maybeAdoptJit');
     } else if (!state.bootstrap.wrapMaybeAdoptJit) {
         console.log('[CAPTURE] [GATE] bootstrap skip maybeAdoptJit wrap');
+    }
+
+    if (state.bootstrap.installDirectDispatch) {
+        try {
+            installDirectDispatchHooks();
+        } catch (e) {
+            noteFailure('install direct dispatch hooks bootstrap', e);
+        }
+    } else {
+        console.log('[CAPTURE] [GATE] bootstrap skip direct dispatch');
     }
 
     if (state.bootstrap.exportTracedCall &&
@@ -5180,6 +5636,11 @@
                             (rootThreadId === null || rootThreadId === undefined ? 'unknown' : rootThreadId) +
                             ' mode=all-threads' +
                             ' challenge=' + (challenge || '<none>'));
+            }
+            try {
+                refreshTpidrEl0Cache(rootThreadId, 'call scope enter');
+            } catch (e) {
+                noteFailure('prime tpidr_el0 cache', e);
             }
             try {
                 console.log('[CAPTURE] [GATE] call scope stage=before-fn challenge=' + (challenge || '<none>'));

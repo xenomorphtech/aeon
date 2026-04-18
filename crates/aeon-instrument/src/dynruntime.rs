@@ -9,12 +9,36 @@ use aeon_jit::{JitCompiler, JitContext};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use crate::context::MemoryProvider;
 use crate::dyncfg::DynCfg;
 use crate::dynffi::AEON_DYN_BAIL_SENTINEL;
+#[cfg(target_arch = "aarch64")]
+use crate::dynffi::{
+    aeon_dyn_branch_bridge_ctx_pc, aeon_dyn_branch_bridge_last_target,
+    aeon_dyn_branch_bridge_resume_target, aeon_dyn_branch_bridge_saved_x30,
+    aeon_dyn_branch_bridge_stage,
+};
 
 static DYN_TRACE_RUN_ID: AtomicU64 = AtomicU64::new(1);
+static DYN_TRACE_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn dyn_trace_write_lock() -> &'static Mutex<()> {
+    DYN_TRACE_WRITE_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn dyn_current_tid() -> u64 {
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    unsafe {
+        libc::syscall(libc::SYS_gettid) as u64
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "linux")))]
+    {
+        0
+    }
+}
 
 fn dyn_trace_path() -> &'static str {
     #[cfg(target_os = "android")]
@@ -29,6 +53,7 @@ fn dyn_trace_path() -> &'static str {
 
 fn dyn_trace_line(message: &str) {
     use std::io::Write;
+    let _guard = dyn_trace_write_lock().lock().ok();
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -41,7 +66,7 @@ fn dyn_trace_line(message: &str) {
                 std::fs::Permissions::from_mode(0o644),
             );
         }
-        let _ = writeln!(file, "{message}");
+        let _ = writeln!(file, "tid={} {message}", dyn_current_tid());
     }
 }
 
@@ -73,6 +98,7 @@ fn json_escape(value: &str) -> String {
 
 fn dyn_trace_json_line(message: &str) {
     use std::io::Write;
+    let _guard = dyn_trace_write_lock().lock().ok();
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -85,7 +111,12 @@ fn dyn_trace_json_line(message: &str) {
                 std::fs::Permissions::from_mode(0o644),
             );
         }
-        let _ = writeln!(file, "{message}");
+        let tid = dyn_current_tid();
+        if let Some(rest) = message.strip_prefix('{') {
+            let _ = writeln!(file, "{{\"tid\":{tid},{rest}");
+        } else {
+            let _ = writeln!(file, "{message}");
+        }
     }
 }
 
@@ -107,6 +138,139 @@ fn dyn_trace_step_json(
         "{{\"kind\":\"{kind}\",\"run_id\":{run_id},\"step\":{step},\"pc\":\"0x{pc:x}\",\"x0\":\"0x{:x}\",\"x1\":\"0x{:x}\",\"x2\":\"0x{:x}\",\"x3\":\"0x{:x}\",\"x19\":\"0x{:x}\",\"x20\":\"0x{:x}\",\"x21\":\"0x{:x}\",\"sp\":\"0x{:x}\",\"lr\":\"0x{:x}\"}}",
         ctx.x[0], ctx.x[1], ctx.x[2], ctx.x[3], ctx.x[19], ctx.x[20], ctx.x[21], ctx.sp, ctx.x[30],
     ));
+}
+
+fn read_u32_maybe(addr: u64) -> Option<u32> {
+    if addr == 0 {
+        return None;
+    }
+    unsafe { Some((addr as *const u32).read_unaligned()) }
+}
+
+fn decode_ldr_unsigned_x(insn: u32) -> Option<(usize, usize, u64)> {
+    if (insn & 0xffc0_0000) != 0xf940_0000 {
+        return None;
+    }
+    let rt = (insn & 0x1f) as usize;
+    let rn = ((insn >> 5) & 0x1f) as usize;
+    let imm12 = ((insn >> 10) & 0x0fff) as u64;
+    let size = (insn >> 30) & 0x3;
+    let scale = match size {
+        0 => 1,
+        1 => 2,
+        2 => 4,
+        3 => 8,
+        _ => return None,
+    };
+    Some((rt, rn, imm12 * scale))
+}
+
+fn decode_ldr_literal_x(insn: u32) -> Option<(usize, i64)> {
+    if (insn & 0xff00_0000) != 0x5800_0000 {
+        return None;
+    }
+    let rt = (insn & 0x1f) as usize;
+    let imm19 = ((insn >> 5) & 0x7ffff) as i32;
+    let signed = ((imm19 << 13) >> 13) as i64;
+    Some((rt, signed * 4))
+}
+
+fn decode_blr_reg(insn: u32) -> Option<usize> {
+    if (insn & 0xffff_fc1f) != 0xd63f_0000 {
+        return None;
+    }
+    Some(((insn >> 5) & 0x1f) as usize)
+}
+
+fn dyn_trace_dynamic_call_target(run_id: u64, step: usize, addr: u64, ctx: &JitContext) {
+    let Some(insn0) = read_u32_maybe(addr) else { return; };
+    let Some(insn1) = read_u32_maybe(addr.wrapping_add(4)) else { return; };
+    if let (Some((rt, rn, offset)), Some(blr_reg)) =
+        (decode_ldr_unsigned_x(insn0), decode_blr_reg(insn1))
+    {
+        if rt != blr_reg || rn >= 31 || rt >= 31 {
+            return;
+        }
+        let base = ctx.x[rn];
+        let target_addr = base.wrapping_add(offset);
+        let target_u64 = unsafe { (target_addr as *const u64).read_unaligned() };
+        dyn_trace_line(&format!(
+            "calltarget addr=0x{addr:x} reg=x{rt} base_reg=x{rn} base=0x{base:x} offset=0x{offset:x} slot=0x{target_addr:x} target=0x{target_u64:x}"
+        ));
+        dyn_trace_json_line(&format!(
+            "{{\"kind\":\"dynamic_call_target\",\"run_id\":{run_id},\"step\":{step},\"addr\":\"0x{addr:x}\",\"target_reg\":\"x{rt}\",\"base_reg\":\"x{rn}\",\"base\":\"0x{base:x}\",\"offset\":\"0x{offset:x}\",\"slot\":\"0x{target_addr:x}\",\"target\":\"0x{target_u64:x}\"}}"
+        ));
+        return;
+    }
+
+    let Some(insn2) = read_u32_maybe(addr.wrapping_add(8)) else { return; };
+    if let (Some((mid_reg, base_reg, base_off)), Some((target_reg, mid_base_reg, slot_off)), Some(blr_reg)) = (
+        decode_ldr_unsigned_x(insn0),
+        decode_ldr_unsigned_x(insn1),
+        decode_blr_reg(insn2),
+    ) {
+        if mid_reg == mid_base_reg
+            && target_reg == blr_reg
+            && base_reg < 31
+            && mid_reg < 31
+            && target_reg < 31
+        {
+            let base = ctx.x[base_reg];
+            let mid_slot_addr = base.wrapping_add(base_off);
+            let mid_base = unsafe { (mid_slot_addr as *const u64).read_unaligned() };
+            let target_addr = mid_base.wrapping_add(slot_off);
+            let target_u64 = unsafe { (target_addr as *const u64).read_unaligned() };
+            dyn_trace_line(&format!(
+                "calltarget addr=0x{addr:x} base_reg=x{base_reg} base=0x{base:x} mid_reg=x{mid_reg} mid_slot=0x{mid_slot_addr:x} mid_base=0x{mid_base:x} target_reg=x{target_reg} slot=0x{target_addr:x} target=0x{target_u64:x}"
+            ));
+            dyn_trace_json_line(&format!(
+                "{{\"kind\":\"dynamic_call_target\",\"run_id\":{run_id},\"step\":{step},\"addr\":\"0x{addr:x}\",\"base_reg\":\"x{base_reg}\",\"base\":\"0x{base:x}\",\"mid_reg\":\"x{mid_reg}\",\"mid_slot\":\"0x{mid_slot_addr:x}\",\"mid_base\":\"0x{mid_base:x}\",\"target_reg\":\"x{target_reg}\",\"slot\":\"0x{target_addr:x}\",\"target\":\"0x{target_u64:x}\"}}"
+            ));
+            return;
+        }
+    }
+
+    let Some(insn3) = read_u32_maybe(addr.wrapping_add(12)) else { return; };
+    let Some((literal_reg, literal_off)) = decode_ldr_literal_x(insn1) else { return; };
+    let Some((target_reg, base_reg, slot_off)) = decode_ldr_unsigned_x(insn2) else { return; };
+    let Some(blr_reg) = decode_blr_reg(insn3) else { return; };
+    if literal_reg != base_reg || target_reg != blr_reg || literal_reg >= 31 || target_reg >= 31 {
+        return;
+    }
+    let literal_addr = if literal_off >= 0 {
+        addr.wrapping_add(4).wrapping_add(literal_off as u64)
+    } else {
+        addr.wrapping_add(4).wrapping_sub((-literal_off) as u64)
+    };
+    let base = unsafe { (literal_addr as *const u64).read_unaligned() };
+    let target_addr = base.wrapping_add(slot_off);
+    let target_u64 = unsafe { (target_addr as *const u64).read_unaligned() };
+    dyn_trace_line(&format!(
+        "calltarget addr=0x{addr:x} literal_reg=x{literal_reg} literal_addr=0x{literal_addr:x} base=0x{base:x} target_reg=x{target_reg} slot=0x{target_addr:x} target=0x{target_u64:x}"
+    ));
+    dyn_trace_json_line(&format!(
+        "{{\"kind\":\"dynamic_call_target\",\"run_id\":{run_id},\"step\":{step},\"addr\":\"0x{addr:x}\",\"literal_reg\":\"x{literal_reg}\",\"literal_addr\":\"0x{literal_addr:x}\",\"base\":\"0x{base:x}\",\"target_reg\":\"x{target_reg}\",\"slot\":\"0x{target_addr:x}\",\"target\":\"0x{target_u64:x}\"}}"
+    ));
+}
+
+fn dyn_trace_bridge_bail_json(run_id: u64, steps: usize, final_pc: u64) {
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        dyn_trace_json_line(&format!(
+            "{{\"kind\":\"stop\",\"run_id\":{run_id},\"reason\":\"bridge_bail\",\"step\":{steps},\"final_pc\":\"0x{final_pc:x}\",\"bridge_stage\":\"0x{:x}\",\"bridge_target\":\"0x{:x}\",\"bridge_resume\":\"0x{:x}\",\"bridge_saved_x30\":\"0x{:x}\",\"bridge_ctx_pc\":\"0x{:x}\"}}",
+            aeon_dyn_branch_bridge_stage,
+            aeon_dyn_branch_bridge_last_target,
+            aeon_dyn_branch_bridge_resume_target,
+            aeon_dyn_branch_bridge_saved_x30,
+            aeon_dyn_branch_bridge_ctx_pc,
+        ));
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        dyn_trace_json_line(&format!(
+            "{{\"kind\":\"stop\",\"run_id\":{run_id},\"reason\":\"bridge_bail\",\"step\":{steps},\"final_pc\":\"0x{final_pc:x}\"}}"
+        ));
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -283,6 +447,7 @@ impl DynamicRuntime {
                     ctx.sp,
                     ctx.x[30],
                 ));
+                dyn_trace_dynamic_call_target(run_id, steps, block.addr, ctx);
                 dyn_trace_json_line(&format!(
                     "{{\"kind\":\"dynamic_call\",\"run_id\":{run_id},\"step\":{steps},\"addr\":\"0x{:x}\",\"x0\":\"0x{:x}\",\"x1\":\"0x{:x}\",\"x2\":\"0x{:x}\",\"x3\":\"0x{:x}\",\"x19\":\"0x{:x}\",\"x20\":\"0x{:x}\",\"x21\":\"0x{:x}\",\"sp\":\"0x{:x}\",\"lr\":\"0x{:x}\"}}",
                     block.addr,
@@ -313,9 +478,7 @@ impl DynamicRuntime {
             if next_pc == AEON_DYN_BAIL_SENTINEL {
                 let bail_pc = ctx.pc;
                 dyn_trace_line(&format!("stop=bridge_bail pc=0x{bail_pc:x}"));
-                dyn_trace_json_line(&format!(
-                    "{{\"kind\":\"stop\",\"run_id\":{run_id},\"reason\":\"bridge_bail\",\"step\":{steps},\"final_pc\":\"0x{bail_pc:x}\"}}"
-                ));
+                dyn_trace_bridge_bail_json(run_id, steps, bail_pc);
                 return DynamicRuntimeResult {
                     start_pc,
                     final_pc: bail_pc,

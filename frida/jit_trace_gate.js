@@ -10,6 +10,14 @@
         return;
     }
 
+    var bootstrapConfig = globalThis.__jitGateBootstrapConfig || {};
+    function bootstrapEnabled(name, defaultValue) {
+        if (!Object.prototype.hasOwnProperty.call(bootstrapConfig, name)) {
+            return defaultValue;
+        }
+        return !!bootstrapConfig[name];
+    }
+
     var state = globalThis.__jitGateTrace = {
         installed: true,
         maxEvents: 256,
@@ -160,6 +168,15 @@
             logBlocks: true,
             logWrites: false,
         },
+        callDebug: {
+            scopeMode: 'normal',
+        },
+        bootstrap: {
+            installExceptionHandler: bootstrapEnabled('installExceptionHandler', true),
+            wrapMaybeAdoptJit: bootstrapEnabled('wrapMaybeAdoptJit', true),
+            exportTracedCall: bootstrapEnabled('exportTracedCall', true),
+            installNmssCoreHooks: bootstrapEnabled('installNmssCoreHooks', true),
+        },
     };
 
     var PTR_MASK = ptr('0x00FFFFFFFFFFFFFF');
@@ -225,6 +242,16 @@
 
     function threadKey(threadId) {
         return String(threadId);
+    }
+
+    function tidField(threadId) {
+        return ' tid=' + (threadId === null || threadId === undefined ? 'unknown' : String(threadId));
+    }
+
+    function callScopeMode() {
+        var mode = state.callDebug && state.callDebug.scopeMode;
+        if (mode === 'no_scope' || mode === 'no_protect') return mode;
+        return 'normal';
     }
 
     function claimedThreadIds(map) {
@@ -1537,7 +1564,7 @@
         if (!target || !dynamicIsNonCallableExternalTarget(target)) return false;
         var resumePc = dynamicResolveBailResumePc(bridgeState);
         if (!resumePc || resumePc.isNull()) return false;
-        console.log('[CAPTURE] [GATE] dynamic bailout thread=' + threadId +
+        console.log('[CAPTURE] [GATE] dynamic bailout' + tidField(threadId) +
             ' target=' + target +
             ' resume=' + resumePc +
             ' ctx_pc=' + (bridgeState.thread_ctx_pc || bridgeState.ctx_pc || '<none>'));
@@ -1553,7 +1580,7 @@
                 keepClaim.last_bail_target = target || null;
                 keepClaim.last_bail_resume = fmtPtr(resumePc);
             }
-            console.log('[CAPTURE] [GATE] dynamic bailout keep-claim thread=' + threadId +
+            console.log('[CAPTURE] [GATE] dynamic bailout keep-claim' + tidField(threadId) +
                 ' resume=' + fmtPtr(resumePc));
         } else {
             dynamicDisableClaim(threadId, 'non-callable-target', target, resumePc);
@@ -1602,7 +1629,7 @@
         if (stage !== 0x4) return false;
         var reentryPc = details.context.pc;
         if (!dynamicPtrInCurrentCodeRange(reentryPc)) return false;
-        console.log('[CAPTURE] [GATE] dynamic continue pending thread=' + threadId +
+        console.log('[CAPTURE] [GATE] dynamic continue pending' + tidField(threadId) +
             ' pc=' + fmtPtr(reentryPc) +
             ' stage=0x4' +
             ' target=' + (bridgeState.thread_last_target || bridgeState.last_target || '<null>') +
@@ -1700,7 +1727,7 @@
             d.runtime = claim.runtime;
             d.sourceBase = base;
             d.sourceSize = size;
-            console.log('[CAPTURE] [GATE] dynamic runtime reuse thread=' + key +
+            console.log('[CAPTURE] [GATE] dynamic runtime reuse' + tidField(key) +
                 ' base=0x' + base.toString(16) +
                 ' size=0x' + size.toString(16) +
                 ' maxSteps=' + d.maxSteps);
@@ -1716,7 +1743,7 @@
             }
             claim.runtime = null;
         }
-        console.log('[CAPTURE] [GATE] dynamic runtime create begin thread=' + key +
+        console.log('[CAPTURE] [GATE] dynamic runtime create begin' + tidField(key) +
             ' base=0x' + base.toString(16) +
             ' size=0x' + size.toString(16) +
             ' maxSteps=' + d.maxSteps);
@@ -1804,28 +1831,39 @@
     function dynamicArmResumeFromContext(cpuCtx, threadId) {
         var d = state.dynamic;
         var startPc = u64Number(cpuCtx.pc);
-        console.log('[CAPTURE] [GATE] dynamic dispatch enter start=0x' + startPc.toString(16));
+        console.log('[CAPTURE] [GATE] dynamic dispatch enter' + tidField(threadId) +
+            ' start=0x' + startPc.toString(16));
         var claim = dynamicEnsureRuntime(threadId);
         claim.first_pc = claim.first_pc || ('0x' + startPc.toString(16));
-        console.log('[CAPTURE] [GATE] dynamic dispatch runtime-ready thread=' + threadKey(threadId) +
+        console.log('[CAPTURE] [GATE] dynamic dispatch runtime-ready' + tidField(threadId) +
             ' ptr=' + claim.runtime);
         var scratchSize = dynamicBridgeScratchSize();
-        var allocSize = scratchSize + translatedJitContextSize();
+        var ctxSize = translatedJitContextSize();
+        var allocSize = scratchSize + ctxSize;
+        console.log('[CAPTURE] [GATE] dynamic dispatch sizes scratch=0x' + scratchSize.toString(16) +
+            ' ctx=0x' + ctxSize.toString(16) +
+            ' alloc=0x' + allocSize.toString(16));
         var ctxAlloc = nativeAllocZero(allocSize);
+        console.log('[CAPTURE] [GATE] dynamic dispatch alloc ctx base=' + ctxAlloc);
         var ctxPtr = ctxAlloc.add(scratchSize);
         console.log('[CAPTURE] [GATE] dynamic dispatch alloc ctx alloc=0x' +
             allocSize.toString(16) + ' scratch=0x' + scratchSize.toString(16) +
             ' ctx=' + ctxPtr + ' base=' + ctxAlloc);
         var resultSize = d.exports.resultSize ? u64Number(d.exports.resultSize()) : 48;
+        console.log('[CAPTURE] [GATE] dynamic dispatch result size=0x' + resultSize.toString(16));
         var resultPtr = nativeAllocZero(resultSize);
+        console.log('[CAPTURE] [GATE] dynamic dispatch alloc result ptr=' + resultPtr);
         var handoffSize = dynamicResumeHandoffSize();
+        console.log('[CAPTURE] [GATE] dynamic dispatch handoff size=0x' + handoffSize.toString(16));
         var handoffPtr = nativeAllocZero(handoffSize);
+        console.log('[CAPTURE] [GATE] dynamic dispatch alloc handoff ptr=' + handoffPtr);
         writeWordExact(handoffPtr.add(0x00), claim.runtime);
         writeWordExact(handoffPtr.add(0x08), ctxPtr);
         writeWordExact(handoffPtr.add(0x10), resultPtr);
         writeWordExact(handoffPtr.add(0x18), cpuCtx.x0);
         writeWordExact(handoffPtr.add(0x20), cpuCtx.pc);
         writeWordExact(handoffPtr.add(0x28), cpuCtx.lr);
+        console.log('[CAPTURE] [GATE] dynamic dispatch handoff populated' + tidField(threadId));
         d.pendingThreads[String(threadId)] = {
             startPc: startPc,
             ctxAlloc: ctxAlloc,
@@ -1853,7 +1891,7 @@
         console.log('[CAPTURE] [GATE] dynamic dispatch set pc ok');
         console.log('[CAPTURE] [GATE] dynamic dispatch armed trampoline=' + d.resumeTrampoline +
             ' brkImm=0x' + d.resumeBrkImm.toString(16) +
-            ' thread=' + threadId +
+            tidField(threadId) +
             ' resultSize=0x' + resultSize.toString(16) +
             ' bridgeStage=' + (dynamicBridgeState().stage || '<null>'));
         return {
@@ -1904,7 +1942,7 @@
                 start_pc: '0x' + trap.pending.startPc.toString(16),
                 stop_code: Number(raw.stop_code),
             });
-            console.log('[CAPTURE] [GATE] dynamic prepare native resume thread=' + trap.threadId +
+            console.log('[CAPTURE] [GATE] dynamic prepare native resume' + tidField(trap.threadId) +
                 ' final=' + fmtPtr(finalPcPtr));
             rememberNativeResume(trap.threadId, finalPcPtr, {
                 start_pc: '0x' + trap.pending.startPc.toString(16),
@@ -1940,6 +1978,7 @@
                     final_pc: fmtPtr(finalPcPtr),
                 });
             }
+            dynamicMarkOwnerNativeTail(finalPcPtr, trap);
         }
         translatedApplyContext(trap.pending.ctxPtr, details.context, finalPcPtr);
         var stopCode = raw.stop_code;
@@ -1970,10 +2009,16 @@
         if (currentRange) {
             ensureTrapProtection(currentRange);
         }
+        var continueInCode = !!(stopCode === 2 && finalPcNum && currentBaseNum &&
+            finalPcNum >= currentBaseNum &&
+            finalPcNum < (currentBaseNum + currentSizeNum));
+        var continueArm = null;
         if (finalPcNum && currentBaseNum &&
             finalPcNum >= currentBaseNum &&
             finalPcNum < (currentBaseNum + currentSizeNum)) {
-            activatePage(pageBaseFor(finalPcPtr));
+            console.log('[CAPTURE] [GATE] dynamic continue in-corridor' + tidField(trap.threadId) +
+                ' final=' + fmtPtr(finalPcPtr) +
+                ' steps=' + result.steps);
         } else if (stopCode === 2 && finalPcNum) {
             try {
                 dynamicInspectResumeFrame(trap.pending.ctxPtr, finalPcPtr, trap.threadId);
@@ -1983,6 +2028,21 @@
         }
         dynamicFreePending(trap.pending);
         delete d.pendingThreads[String(trap.threadId)];
+        if (continueInCode) {
+            try {
+                continueArm = dynamicArmResumeFromContext(details.context, trap.threadId);
+                result.continued_in_code = !!(continueArm && continueArm.armed);
+                result.continue_start_pc = continueArm && continueArm.startPc ? continueArm.startPc : finalPcPtr.toString();
+                console.log('[CAPTURE] [GATE] dynamic continue rearm' + tidField(trap.threadId) +
+                    ' start=' + (result.continue_start_pc || fmtPtr(finalPcPtr)) +
+                    ' ok=' + result.continued_in_code);
+            } catch (e) {
+                noteFailure('dynamic continue in-corridor', e);
+                console.log('[CAPTURE] [GATE] dynamic continue rearm ERROR' + tidField(trap.threadId) +
+                    ' final=' + fmtPtr(finalPcPtr) + ' err=' + String(e));
+                activatePage(pageBaseFor(finalPcPtr));
+            }
+        }
         dynamicFinalizeDeferredCleanup('resume trap');
         console.log('[CAPTURE] [GATE] dynamic resume trap final=' + result.finalPc +
             ' steps=' + result.steps +
@@ -2605,6 +2665,11 @@
         return /^pool-\d+-thread-/i.test(name);
     }
 
+    function dynamicIsQueueThreadName(name) {
+        if (!name) return false;
+        return /^queue-\d+-\d+$/i.test(name);
+    }
+
     function dynamicHasNearbyRetAt(value) {
         try {
             var p = normalizeWordPtr(value);
@@ -2641,8 +2706,64 @@
         if (state.dynamic && state.dynamic.traceAllThreads) return true;
         var rootThreadId = dynamicEffectiveRootThreadId(activeCall);
         if (threadId === rootThreadId) return true;
+        if (activeCall.admission_frozen_to_root) {
+            return false;
+        }
         if (dynamicShouldSkipNonRootMainThread(threadId)) return false;
         return dynamicIsLikelyWorkerThreadName(name);
+    }
+
+    function dynamicRootHasClaimedCorridor(activeCall) {
+        if (!activeCall) return false;
+        var rootThreadId = dynamicEffectiveRootThreadId(activeCall);
+        if (rootThreadId === null || rootThreadId === undefined) return false;
+        var claim = getClaim(state.dynamic.threadClaims, rootThreadId);
+        if (!claim) return false;
+        if (claim.runtime) return true;
+        if (claim.first_pc) return true;
+        return false;
+    }
+
+    function dynamicMaybePromoteInitialOwner(threadId, name, firstPc) {
+        var activeCall = state.dynamic && state.dynamic.activeCall;
+        if (!activeCall) return false;
+        if (state.dynamic && state.dynamic.traceAllThreads) return false;
+        if (threadId === null || threadId === undefined) return false;
+        if (isBackgroundArtThreadName(name)) return false;
+        var currentRoot = dynamicEffectiveRootThreadId(activeCall);
+        if (currentRoot === threadId) return false;
+        if (activeCall.admission_frozen_to_root) return false;
+        if (dynamicRootHasClaimedCorridor(activeCall)) return false;
+        activeCall.native_root_thread_id = threadId;
+        activeCall.native_root_thread_name = name || null;
+        activeCall.admission_frozen_to_root = true;
+        activeCall.promoted_root_from = currentRoot !== null && currentRoot !== undefined ? String(currentRoot) : null;
+        activeCall.promoted_root_at = (new Date()).toISOString();
+        ensureClaim(state.dynamic.threadClaims, threadId, {
+            first_pc: firstPc || null,
+            challenge: activeCall.challenge || null,
+            thread_name: name || null,
+            seeded_by: 'corridor_promote',
+            runtime: null,
+            sourceBase: 0,
+            sourceSize: 0,
+        });
+        console.log('[CAPTURE] [GATE] dynamic promote root' + tidField(threadId) +
+            ' name=' + (name || '<unknown>') +
+            ' from=' + (currentRoot === null || currentRoot === undefined ? '<none>' : currentRoot) +
+            ' pc=' + (firstPc || '<none>'));
+        return true;
+    }
+
+    function dynamicShouldRejectOwnerPromotion(threadId, name, cpuCtx) {
+        if (isBackgroundArtThreadName(name)) return true;
+        if (!state.dynamic || state.dynamic.traceAllThreads) return false;
+        if (!cpuCtx) return false;
+        if (dynamicShouldSkipNonRootMainThread(threadId)) return true;
+        if (dynamicIsQueueThreadName(name)) return true;
+        if (dynamicIsLikelyWorkerThreadName(name)) return true;
+        if (dynamicShouldSkipSelfReturnWorker(threadId, cpuCtx)) return true;
+        return false;
     }
 
     function dynamicEffectiveRootThreadId(activeCall) {
@@ -2654,6 +2775,24 @@
             return activeCall.root_thread_id;
         }
         return null;
+    }
+
+    function dynamicShouldLogAdmissionEvent(activeCall, threadId, resumePc, why, trapPc) {
+        if (!activeCall) return true;
+        if (!activeCall.foreign_admission_seen) activeCall.foreign_admission_seen = {};
+        var key = String(threadId) + '|' + fmtPtr(resumePc) + '|' + String(why || '');
+        var seen = activeCall.foreign_admission_seen[key];
+        if (!seen) {
+            activeCall.foreign_admission_seen[key] = {
+                count: 1,
+                first_pc: trapPc ? fmtPtr(trapPc) : null,
+                last_pc: trapPc ? fmtPtr(trapPc) : null,
+            };
+            return true;
+        }
+        seen.count += 1;
+        seen.last_pc = trapPc ? fmtPtr(trapPc) : seen.last_pc;
+        return (seen.count & (seen.count - 1)) === 0;
     }
 
     function dynamicActiveRootNativeResume() {
@@ -2683,12 +2822,67 @@
         return null;
     }
 
+    function dynamicMarkOwnerNativeTail(finalPc, trap) {
+        var activeCall = state.dynamic && state.dynamic.activeCall;
+        if (!activeCall || !trap) return false;
+        var rootThreadId = dynamicEffectiveRootThreadId(activeCall);
+        if (rootThreadId === null || rootThreadId === undefined) return false;
+        if (trap.threadId !== rootThreadId) return false;
+        activeCall.owner_native_tail = {
+            thread_id: trap.threadId,
+            final_pc: fmtPtr(finalPc),
+            started_at: (new Date()).toISOString(),
+        };
+        console.log('[CAPTURE] [GATE] dynamic owner native tail' + tidField(trap.threadId) +
+            ' final=' + fmtPtr(finalPc));
+        return true;
+    }
+
+    function dynamicApplyForeignResumeContext(cpuCtx, resumePc) {
+        if (!cpuCtx || !resumePc || resumePc.isNull()) return;
+        cpuCtx.pc = resumePc;
+        try {
+            cpuCtx.lr = resumePc;
+        } catch (e) {}
+        try {
+            cpuCtx.x30 = resumePc;
+        } catch (e) {}
+    }
+
+    function dynamicMaybeQuarantineForeignAdmission(details, threadId, dynThreadName, why) {
+        if (!details || !details.context) return false;
+        if (threadId === null || threadId === undefined) return false;
+        if (hasClaim(state.dynamic.threadClaims, threadId)) return false;
+        var activeCall = state.dynamic && state.dynamic.activeCall;
+        if (!activeCall || !activeCall.admission_frozen_to_root) return false;
+        if (activeCall.owner_native_tail) return false;
+        var rootThreadId = dynamicEffectiveRootThreadId(activeCall);
+        if (rootThreadId === null || rootThreadId === undefined) return false;
+        if (threadId === rootThreadId) return false;
+        var resumePc = dynamicChooseForeignPostResumeResumePc(details.context);
+        if (!resumePc || resumePc.isNull()) {
+            return false;
+        }
+        var trapPc = normalizeWordPtr(details.context.pc);
+        dynamicApplyForeignResumeContext(details.context, resumePc);
+        if (dynamicShouldLogAdmissionEvent(activeCall, threadId, resumePc, why, trapPc)) {
+            console.log('[CAPTURE] [GATE] dynamic quarantine foreign admission' + tidField(threadId) +
+                ' name=' + (dynThreadName || '<unknown>') +
+                ' trap=' + fmtPtr(trapPc) +
+                ' resume=' + fmtPtr(resumePc) +
+                ' root=' + dynamicCurrentRootThreadLabel() +
+                ' reason=' + (why || 'foreign-admission-frozen'));
+        }
+        return true;
+    }
+
     function dynamicMaybeQuarantineForeignPostResume(details, threadId, dynThreadName, why) {
         if (!details || !details.context) return false;
         if (threadId === null || threadId === undefined) return false;
         if (hasClaim(state.dynamic.threadClaims, threadId)) return false;
         var activeCall = state.dynamic && state.dynamic.activeCall;
         if (!activeCall) return false;
+        if (activeCall.owner_native_tail) return false;
         var rootThreadId = dynamicEffectiveRootThreadId(activeCall);
         if (rootThreadId === null || rootThreadId === undefined) return false;
         if (threadId === rootThreadId) return false;
@@ -2696,7 +2890,7 @@
         if (!rootResume) return false;
         var resumePc = dynamicChooseForeignPostResumeResumePc(details.context);
         if (!resumePc || resumePc.isNull()) {
-            console.log('[CAPTURE] [GATE] dynamic quarantine miss thread=' + threadId +
+            console.log('[CAPTURE] [GATE] dynamic quarantine miss' + tidField(threadId) +
                 ' name=' + (dynThreadName || '<unknown>') +
                 ' pc=' + fmtPtr(details.context.pc) +
                 ' lr=' + fmtPtr(details.context.lr) +
@@ -2705,14 +2899,17 @@
                 ' reason=' + (why || 'foreign-post-resume'));
             return false;
         }
-        details.context.pc = resumePc;
-        console.log('[CAPTURE] [GATE] dynamic quarantine foreign thread=' + threadId +
-            ' name=' + (dynThreadName || '<unknown>') +
-            ' pc=' + fmtPtr(details.context.pc) +
-            ' resume=' + fmtPtr(resumePc) +
-            ' root=' + dynamicCurrentRootThreadLabel() +
-            ' root_final=' + (rootResume.final_pc || '<none>') +
-            ' reason=' + (why || 'foreign-post-resume'));
+        var trapPc = normalizeWordPtr(details.context.pc);
+        dynamicApplyForeignResumeContext(details.context, resumePc);
+        if (dynamicShouldLogAdmissionEvent(activeCall, threadId, resumePc, why, trapPc)) {
+            console.log('[CAPTURE] [GATE] dynamic quarantine foreign' + tidField(threadId) +
+                ' name=' + (dynThreadName || '<unknown>') +
+                ' trap=' + fmtPtr(trapPc) +
+                ' resume=' + fmtPtr(resumePc) +
+                ' root=' + dynamicCurrentRootThreadLabel() +
+                ' root_final=' + (rootResume.final_pc || '<none>') +
+                ' reason=' + (why || 'foreign-post-resume'));
+        }
         return true;
     }
 
@@ -3919,7 +4116,10 @@
         }
         console.log('[CAPTURE] [GATE] installing for exec range base=' + range.base +
                     ' corridor=' + state.currentBase +
+                    ' trap_mode=r--' +
+                    ' requested_size=0x' + ACTIVE_EXEC_SIZE.toString(16) +
                     ' trap_size=0x' + state.currentSize.toString(16) +
+                    ' full_window=' + (state.currentSize === ACTIVE_EXEC_SIZE) +
                     ' file=' + (state.currentFile || ''));
     }
 
@@ -4325,7 +4525,18 @@
             last_run: state.translated.lastRun,
             recent_runs: state.translated.runs,
             recent_blocks: state.translated.recentBlocks,
+            call_scope_mode: callScopeMode(),
         });
+    };
+
+    globalThis.__jitGateSetCallScopeMode = function (mode) {
+        var prev = callScopeMode();
+        if (mode !== 'normal' && mode !== 'no_scope' && mode !== 'no_protect') {
+            throw new Error('invalid call scope mode: ' + String(mode));
+        }
+        state.callDebug.scopeMode = mode;
+        console.log('[CAPTURE] [GATE] call scope mode set prev=' + prev + ' next=' + mode);
+        return prev;
     };
 
     globalThis.__jitGateDynamicLoad = function (libPath) {
@@ -4346,12 +4557,13 @@
         }
     };
 
-    globalThis.__jitGateDynamicArm = function (libPath, minPcHex, maxSteps) {
+    globalThis.__jitGateDynamicArm = function (libPath, minPcHex, maxSteps, traceAllThreads) {
         if (libPath) {
             globalThis.__jitGateDynamicLoad(libPath);
         }
         dynamicFreeAllPendingThreads(state.dynamic.pendingThreads);
         state.dynamic.armed = true;
+        state.dynamic.traceAllThreads = true;
         state.dynamic.minPc = minPcHex ? ptr(minPcHex) : null;
         state.dynamic.activeThreadId = null;
         state.dynamic.activeChallenge = null;
@@ -4386,7 +4598,11 @@
         };
         console.log('[CAPTURE] [GATE] dynamic ARM loaded=' + state.dynamic.loaded +
                     ' minPc=' + (status.min_pc || '<none>') +
-                    ' current=' + (status.current_corridor || '<none>'));
+                    ' current=' + (status.current_corridor || '<none>') +
+                    ' trap_mode=r--' +
+                    ' corridor_size=0x' + ((status.current_corridor_size || 0).toString(16)) +
+                    ' requested_size=0x' + ACTIVE_EXEC_SIZE.toString(16) +
+                    ' full_window=' + (status.current_corridor_size === ACTIVE_EXEC_SIZE));
         return JSON.stringify(status);
     };
 
@@ -4455,7 +4671,8 @@
             return globalThis.__jitGateDynamicArm(
                 libPath !== undefined && libPath !== null ? String(libPath) : undefined,
                 minPcHex !== undefined && minPcHex !== null ? String(minPcHex) : undefined,
-                maxSteps
+                maxSteps,
+                undefined
             );
         };
         rpc.exports.jitGateDynamicClear = function () {
@@ -4498,7 +4715,7 @@
         return JSON.stringify(files);
     };
 
-    if (!globalThis.__jitGateTraceExceptionHandlerInstalled) {
+    if (state.bootstrap.installExceptionHandler && !globalThis.__jitGateTraceExceptionHandlerInstalled) {
         Process.setExceptionHandler(function (details) {
             var event = {
                 type: details.type || null,
@@ -4524,7 +4741,7 @@
                 console.log('[CAPTURE] [GATE] dynamic resume trap type=' + event.type +
                             ' pc=' + event.pc +
                             ' lr=' + event.lr +
-                            ' thread=' + dynamicResumeTrap.threadId);
+                            tidField(dynamicResumeTrap.threadId));
                 try {
                     dynamicFinishResumeTrap(details, dynamicResumeTrap);
                     return true;
@@ -4625,100 +4842,9 @@
                 (!state.dynamic.minPc || (details.context && ptr(details.context.pc).compare(state.dynamic.minPc) >= 0))) {
                 try {
                     var dynThreadName = threadNameMaybe(threadId);
-                    var existingDynamicClaim = getClaim(state.dynamic.threadClaims, threadId);
-                    if (existingDynamicClaim && existingDynamicClaim.disabled) {
-                        console.log('[CAPTURE] [GATE] dynamic skip disabled thread=' + threadId +
-                            ' name=' + (dynThreadName || '<unknown>') +
-                            ' pc=' + event.pc +
-                            ' reason=' + (existingDynamicClaim.disabled_reason || 'disabled'));
-                        if (!activatePage(pageBase)) {
-                            return false;
-                        }
-                        return true;
-                    }
                     if (dynamicIsZeroTrapCandidate(details.context)) {
                         console.log('[CAPTURE] [GATE] dynamic ignore zero/trap candidate pc=' + event.pc +
-                                    ' thread=' + threadId +
-                                    (hasClaim(state.dynamic.threadClaims, threadId) ? ' claimed=true' : ' claimed=false'));
-                        if (!activatePage(pageBase)) {
-                            return false;
-                        }
-                        return true;
-                    }
-                    if (!hasClaim(state.dynamic.threadClaims, threadId)) {
-                        var rootResume = dynamicActiveRootNativeResume();
-                        var rootThreadId = dynamicEffectiveRootThreadId(state.dynamic.activeCall);
-                        if (!state.dynamic.traceAllThreads &&
-                            rootResume && rootThreadId !== null && rootThreadId !== undefined && threadId !== rootThreadId) {
-                            if (dynamicMaybeQuarantineForeignPostResume(details, threadId, dynThreadName, 'admission-frozen-root-native-resume')) {
-                                return true;
-                            }
-                            console.log('[CAPTURE] [GATE] dynamic freeze new claim miss thread=' + threadId +
-                                ' name=' + (dynThreadName || '<unknown>') +
-                                ' pc=' + event.pc +
-                                ' lr=' + fmtPtr(details.context.lr) +
-                                ' root=' + dynamicCurrentRootThreadLabel() +
-                                ' root_final=' + (rootResume.final_pc || '<none>'));
-                            if (!activatePage(pageBase)) {
-                                return false;
-                            }
-                            return true;
-                        }
-                    }
-                    if (!hasClaim(state.dynamic.threadClaims, threadId) &&
-                        isBackgroundArtThreadName(dynThreadName)) {
-                        if (dynamicMaybeQuarantineForeignPostResume(details, threadId, dynThreadName, 'background-root-native-resume')) {
-                            return true;
-                        }
-                        console.log('[CAPTURE] [GATE] dynamic skip background thread=' + threadId +
-                            ' name=' + dynThreadName +
-                            ' pc=' + event.pc);
-                        if (!activatePage(pageBase)) {
-                            return false;
-                        }
-                        return true;
-                    }
-                    if (!state.dynamic.traceAllThreads &&
-                        !hasClaim(state.dynamic.threadClaims, threadId) &&
-                        dynamicShouldSkipNonRootMainThread(threadId)) {
-                        if (dynamicMaybeQuarantineForeignPostResume(details, threadId, dynThreadName, 'non-root-main-root-native-resume')) {
-                            return true;
-                        }
-                        console.log('[CAPTURE] [GATE] dynamic skip non-root main thread=' + threadId +
-                            ' name=' + (dynThreadName || '<unknown>') +
-                            ' root=' + dynamicCurrentRootThreadLabel() +
-                            ' pc=' + event.pc);
-                        if (!activatePage(pageBase)) {
-                            return false;
-                        }
-                        return true;
-                    }
-                    if (!state.dynamic.traceAllThreads &&
-                        !hasClaim(state.dynamic.threadClaims, threadId) &&
-                        !dynamicShouldAdmitNewThread(threadId, dynThreadName)) {
-                        if (dynamicMaybeQuarantineForeignPostResume(details, threadId, dynThreadName, 'non-worker-root-native-resume')) {
-                            return true;
-                        }
-                        console.log('[CAPTURE] [GATE] dynamic skip non-worker thread=' + threadId +
-                            ' name=' + (dynThreadName || '<unknown>') +
-                            ' root=' + dynamicCurrentRootThreadLabel() +
-                            ' pc=' + event.pc);
-                        if (!activatePage(pageBase)) {
-                            return false;
-                        }
-                        return true;
-                    }
-                    if (!state.dynamic.traceAllThreads &&
-                        !hasClaim(state.dynamic.threadClaims, threadId) &&
-                        dynamicShouldSkipSelfReturnWorker(threadId, details.context)) {
-                        if (dynamicMaybeQuarantineForeignPostResume(details, threadId, dynThreadName, 'self-return-root-native-resume')) {
-                            return true;
-                        }
-                        console.log('[CAPTURE] [GATE] dynamic skip self-return worker thread=' + threadId +
-                            ' name=' + (dynThreadName || '<unknown>') +
-                            ' root=' + dynamicCurrentRootThreadLabel() +
-                            ' pc=' + event.pc +
-                            ' lr=' + fmtPtr(details.context.lr));
+                                    tidField(threadId));
                         if (!activatePage(pageBase)) {
                             return false;
                         }
@@ -4730,7 +4856,7 @@
                             challenge: state.dynamic.activeCall ? (state.dynamic.activeCall.challenge || null) : null,
                             thread_name: dynThreadName,
                         });
-                        console.log('[CAPTURE] [GATE] dynamic claimed thread=' + threadId +
+                        console.log('[CAPTURE] [GATE] dynamic thread start' + tidField(threadId) +
                             ' name=' + (dynThreadName || '<unknown>') +
                             ' pc=' + event.pc +
                             ' challenge=' + (state.dynamic.activeCall ? (state.dynamic.activeCall.challenge || '<none>') : '<none>'));
@@ -4741,7 +4867,7 @@
                         if (dynamicMaybeContinuePendingReentry(details, threadId, pendingBridgeState)) {
                             return true;
                         }
-                        console.log('[CAPTURE] [GATE] dynamic skip pending thread=' + threadId +
+                        console.log('[CAPTURE] [GATE] dynamic skip pending' + tidField(threadId) +
                             ' pc=' + event.pc +
                             ' stage=' + (pendingBridgeState.stage || '<null>') +
                             ' target=' + (pendingBridgeState.thread_last_target || pendingBridgeState.last_target || '<null>') +
@@ -4849,9 +4975,11 @@
         });
         globalThis.__jitGateTraceExceptionHandlerInstalled = true;
         console.log('[CAPTURE] [GATE] installed exception handler');
+    } else if (!state.bootstrap.installExceptionHandler) {
+        console.log('[CAPTURE] [GATE] bootstrap skip exception handler');
     }
 
-    if (typeof maybeAdoptJit === 'function') {
+    if (state.bootstrap.wrapMaybeAdoptJit && typeof maybeAdoptJit === 'function') {
         var origMaybeAdoptJit = maybeAdoptJit;
         maybeAdoptJit = function (target, source) {
             var mod = origMaybeAdoptJit(target, source);
@@ -4864,12 +4992,16 @@
             return mod;
         };
         console.log('[CAPTURE] [GATE] wrapped maybeAdoptJit');
+    } else if (!state.bootstrap.wrapMaybeAdoptJit) {
+        console.log('[CAPTURE] [GATE] bootstrap skip maybeAdoptJit wrap');
     }
 
-    if (typeof rpc !== 'undefined' && rpc && rpc.exports && typeof rpc.exports.callCert === 'function' &&
+    if (state.bootstrap.exportTracedCall &&
+        typeof rpc !== 'undefined' && rpc && rpc.exports && typeof rpc.exports.callCert === 'function' &&
         !globalThis.__jitGateWrappedCallCert) {
         originalCallCertExport = rpc.exports.callCert;
         function runCallWithTranslatedScope(challenge, fn) {
+            var scopeMode = callScopeMode();
             var useTranslatedScope = state.translated.armed && state.translated.loaded;
             var useDynamicScope = state.dynamic.armed && state.dynamic.loaded;
             var priorThreadId = state.translated.activeThreadId;
@@ -4884,7 +5016,13 @@
             var scopeStartedAt = (new Date()).toISOString();
             var rootThreadId = chooseCallScopeRootThreadId(challenge);
             var protectedTranslatedRange = false;
+            console.log('[CAPTURE] [GATE] call scope stage=enter challenge=' + (challenge || '<none>') +
+                ' translated=' + useTranslatedScope +
+                ' dynamic=' + useDynamicScope +
+                ' scope_mode=' + scopeMode +
+                ' root_tid=' + (rootThreadId === null || rootThreadId === undefined ? 'unknown' : rootThreadId));
             if (useTranslatedScope) {
+                console.log('[CAPTURE] [GATE] call scope stage=translated-pre-reset challenge=' + (challenge || '<none>'));
                 state.translated.activeThreadId = rootThreadId;
                 state.translated.activeChallenge = challenge || null;
                 state.translated.activeCall = {
@@ -4893,6 +5031,7 @@
                     started_at: scopeStartedAt,
                 };
                 state.translated.claimedThreads = {};
+                console.log('[CAPTURE] [GATE] call scope stage=translated-post-reset challenge=' + (challenge || '<none>'));
                 if (rootThreadId !== null && rootThreadId !== undefined) {
                     ensureClaim(state.translated.claimedThreads, rootThreadId, {
                         first_pc: null,
@@ -4900,11 +5039,17 @@
                         seeded_by: 'call_scope',
                     });
                 }
-                if (state.currentBase && state.currentSize) {
+                if (scopeMode === 'no_protect') {
+                    console.log('[CAPTURE] [GATE] call scope stage=translated-skip-protect challenge=' + (challenge || '<none>'));
+                } else if (state.currentBase && state.currentSize) {
                     var currentRange = findExecRangeFor(state.currentBase) || chooseTrapRange();
                     if (currentRange) {
+                        console.log('[CAPTURE] [GATE] call scope stage=translated-before-protect challenge=' + (challenge || '<none>') +
+                            ' base=' + currentRange.base +
+                            ' size=0x' + currentRange.size.toString(16));
                         ensureTrapProtection(currentRange);
                         protectedTranslatedRange = true;
+                        console.log('[CAPTURE] [GATE] call scope stage=translated-after-protect challenge=' + (challenge || '<none>'));
                     }
                 }
                 console.log('[CAPTURE] [GATE] translated call scope root_thread=' +
@@ -4918,20 +5063,13 @@
                 state.dynamic.activeCall = {
                     challenge: challenge || null,
                     root_thread_id: rootThreadId,
+                    admission_frozen_to_root: false,
+                    owner_native_tail: null,
+                    trace_mode: 'all_threads',
                     started_at: scopeStartedAt,
                 };
                 state.dynamic.threadClaims = {};
                 state.dynamic.pendingThreads = {};
-                if (rootThreadId !== null && rootThreadId !== undefined) {
-                    ensureClaim(state.dynamic.threadClaims, rootThreadId, {
-                        first_pc: null,
-                        challenge: challenge || null,
-                        seeded_by: 'call_scope',
-                        runtime: null,
-                        sourceBase: 0,
-                        sourceSize: 0,
-                    });
-                }
                 if (!protectedTranslatedRange && state.currentBase && state.currentSize) {
                     var currentDynamicRange = findExecRangeFor(state.currentBase) || chooseTrapRange();
                     if (currentDynamicRange) {
@@ -4939,14 +5077,16 @@
                         protectedTranslatedRange = true;
                     }
                 }
-                console.log('[CAPTURE] [GATE] dynamic call scope root_thread=' +
+                console.log('[CAPTURE] [GATE] dynamic call scope root_tid=' +
                             (rootThreadId === null || rootThreadId === undefined ? 'unknown' : rootThreadId) +
-                            ' mode=claim-many' +
+                            ' mode=all-threads' +
                             ' challenge=' + (challenge || '<none>'));
             }
             try {
+                console.log('[CAPTURE] [GATE] call scope stage=before-fn challenge=' + (challenge || '<none>'));
                 return fn();
             } finally {
+                console.log('[CAPTURE] [GATE] call scope stage=finally-enter challenge=' + (challenge || '<none>'));
                 var scopeDynamicClaims = state.dynamic.threadClaims;
                 if (useTranslatedScope) {
                     state.translated.activeThreadId = priorThreadId;
@@ -4995,13 +5135,32 @@
                             ' pending=' + dynamicPendingCount());
                     }
                 }
+                console.log('[CAPTURE] [GATE] call scope stage=finally-exit challenge=' + (challenge || '<none>'));
             }
         }
-        rpc.exports.callCert = function (challenge) {
+        rpc.exports.callCertTraced = function (challenge) {
             var memdumpPending = state.memdump.armed || state.memdump.captured;
+            var scopeMode = callScopeMode();
             if (!state.fixedTraceArm && !memdumpPending) {
+                console.log('[CAPTURE] [GATE] callCert plain invoke begin challenge=' + (challenge || '<none>') +
+                    ' scope_mode=' + scopeMode +
+                    ' dynamic_armed=' + state.dynamic.armed +
+                    ' dynamic_loaded=' + state.dynamic.loaded +
+                    ' translated_armed=' + state.translated.armed +
+                    ' translated_loaded=' + state.translated.loaded);
+                if (scopeMode === 'no_scope') {
+                    console.log('[CAPTURE] [GATE] callCert plain no-scope before original challenge=' + (challenge || '<none>'));
+                    var noScopeToken = originalCallCertExport(challenge);
+                    console.log('[CAPTURE] [GATE] callCert plain no-scope after original challenge=' + (challenge || '<none>') +
+                        ' token_len=' + (noScopeToken ? String(noScopeToken).length : 0));
+                    return noScopeToken;
+                }
                 var plainToken = runCallWithTranslatedScope(challenge, function () {
-                    return originalCallCertExport(challenge);
+                    console.log('[CAPTURE] [GATE] callCert plain inner before original challenge=' + (challenge || '<none>'));
+                    var token = originalCallCertExport(challenge);
+                    console.log('[CAPTURE] [GATE] callCert plain inner after original challenge=' + (challenge || '<none>') +
+                        ' token_len=' + (token ? String(token).length : 0));
+                    return token;
                 });
                 console.log('[CAPTURE] [GATE] callCert plain return challenge=' + (challenge || '<none>') +
                     ' token_len=' + (plainToken ? String(plainToken).length : 0) +
@@ -5018,8 +5177,13 @@
                 return plainToken;
             }
             if (!state.fixedTraceArm) {
+                console.log('[CAPTURE] [GATE] callCert memdump invoke begin challenge=' + (challenge || '<none>'));
                 var mdToken = runCallWithTranslatedScope(challenge, function () {
-                    return originalCallCertExport(challenge);
+                    console.log('[CAPTURE] [GATE] callCert memdump inner before original challenge=' + (challenge || '<none>'));
+                    var token = originalCallCertExport(challenge);
+                    console.log('[CAPTURE] [GATE] callCert memdump inner after original challenge=' + (challenge || '<none>') +
+                        ' token_len=' + (token ? String(token).length : 0));
+                    return token;
                 });
                 console.log('[CAPTURE] [GATE] callCert memdump return challenge=' + (challenge || '<none>') +
                     ' token_len=' + (mdToken ? String(mdToken).length : 0) +
@@ -5065,15 +5229,21 @@
             }
         };
         globalThis.__jitGateWrappedCallCert = true;
-        console.log('[CAPTURE] [GATE] wrapped rpc.exports.callCert');
+        console.log('[CAPTURE] [GATE] exported rpc.exports.callCertTraced');
+    } else if (!state.bootstrap.exportTracedCall) {
+        console.log('[CAPTURE] [GATE] bootstrap skip callCertTraced export');
     }
 
-    try {
-        Java.performNow(function () {
-            installNmssCoreHooks();
-        });
-    } catch (e) {
-        noteFailure('install nmss core hooks bootstrap', e);
+    if (state.bootstrap.installNmssCoreHooks) {
+        try {
+            Java.performNow(function () {
+                installNmssCoreHooks();
+            });
+        } catch (e) {
+            noteFailure('install nmss core hooks bootstrap', e);
+        }
+    } else {
+        console.log('[CAPTURE] [GATE] bootstrap skip nmss core hooks');
     }
 
     console.log('[CAPTURE] [GATE] relay passive until explicit arm');

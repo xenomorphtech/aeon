@@ -1,0 +1,519 @@
+{
+  "outer": {
+    "expr": "globalThis.__jitCe75cLrProbeRun && globalThis.__jitCe75cLrProbeRun('0000000000000002', '{\"warm\":true}')",
+    "result": "{\\\"ok\\\":true,\\\"challenge\\\":\\\"0000000000000002\\\",\\\"token\\\":\\\"\\\",\\\"warmChallenge\\\":\\\"6BA4D60738580083\\\",\\\"target\\\":null,\\\"targetOffset\\\":\\\"0xce75c\\\",\\\"returnProbe\\\":\\\"0x7f5c5b4000\\\",\\\"events\\\":[{\\\"seq\\\":1,\\\"kind\\\":\\\"enter\\\",\\\"tid\\\":10977,\\\"challenge\\\":\\\"0000000000000002\\\",\\\"selector\\\":87,\\\"target\\\":\\\"0x7bc473a75c\\\",\\\"target_offset\\\":\\\"0xce75c\\\",\\\"file\\\":\\\"/data/data/com.netmarble.thered/files/0390c55ecbce0 (deleted)\\\",\\\"pc\\\":\\\"0x7bc473a75c\\\",\\\"orig_lr\\\":\\\"0x7bc4774a6c\\\",\\\"orig_lr_offset\\\":\\\"0x108a6c\\\",\\\"new_lr\\\":\\\"0x7f5c5b4000\\\",\\\"sp\\\":\\\"0x7c3a449b30\\\",\\\"x0\\\":\\\"0x57\\\",\\\"x1\\\":\\\"0xb400007dc8932890\\\",\\\"x2\\\":\\\"0xb400007d68989790\\\",\\\"x19\\\":\\\"0xb400007ce8974ad0\\\",\\\"x20\\\":\\\"0x7c3a44a340\\\",\\\"x22\\\":\\\"0xb400007d68989790\\\",\\\"x25\\\":\\\"0x7c3a44a1b0\\\",\\\"sp_plus_0x60\\\":{\\\"addr\\\":\\\"0x7c3a449b90\\\",\\\"raw_hex\\\":\\\"f09b443a7c0000008c2d9e487f000000689c443a7c000000\\\"},\\\"sp_plus_0x9c0\\\":{\\\"addr\\\":\\\"0x7c3a44a4f0\\\",\\\"raw_hex\\\":\\\"5cb370a348fcd3e7aff7448b560837c3134630a88eb6e4d9\\\",\\\"kind\\\":\\\"short\\\",\\\"len\\\":46,\\\"data_hex\\\":\\\"b370a348fcd3e7aff7448b560837c3134630a88eb6e4\\\",\\\"text\\\":\\\"\\u00b3p\\u00a3H\\u00fc\\u00d3\\u00e7\\u00af\\u00f7D\\u008bV\\\\b7\\u00c3\\\\u0013F0\\u00a8\\u008e\\u00b6\\u00e4\\\",\\\"hex_ascii\\\":false},\\\"x19_slot\\\":{\\\"addr\\\":\\\"0x7ce8974ad0\\\",\\\"raw_hex\\\":\\\"d04d97e87c0000b4d04297e87c0000b4902193e87c0000b4\\\",\\\"kind\\\":\\\"short\\\",\\\"len\\\":104,\\\"data_hex\\\":\\\"4d97e87c0000b4d04297e87c0000b4902193e87c0000\\\",\\\"text\\\":\\\"M\\u0097\\u00e8|\\\\u0000\\\\u0000\\u00b4\\u00d0B\\u0097\\u00e8|\\\\u0000\\\\u0000\\u00b4\\u0090!\\u0093\\u00e8|\\\",\\\"hex_ascii\\\":false},\\\"x22_slot\\\":{\\\"addr\\\":\\\"0x7d68989790\\\",\\\"raw_hex\\\":\\\"7826d8c87b000000d04a97e87c0000b470bcdbc87b000000\\\",\\\"kind\\\":\\\"short\\\",\\\"len\\\":60,\\\"data_hex\\\":\\\"26d8c87b000000d04a97e87c0000b470bcdbc87b0000\\\",\\\"text\\\":\\\"&\\u00d8\\u00c8{\\\\u0000\\\\u0000\\\\u0000\\u00d0J\\u0097\\u00e8|\\\\u0000\\\\u0000\\u00b4p\\u00bc\\u00db\\u00c8{\\\",\\\"hex_ascii\\\":false}},{\\\"seq\\\":2,\\\"kind\\\":\\\"resume\\\",\\\"tid\\\":10977,\\\"challenge\\\":\\\"0000000000000002\\\",\\\"selector\\\":87,\\\"entry_target\\\":\\\"0x7bc473a75c\\\",\\\"entry_target_offset\\\":\\\"0xce75c\\\",\\\"entry_lr\\\":\\\"0x7bc4774a6c\\\",\\\"entry_lr_offset\\\":\\\"0x108a6c\\\",\\\"pc\\\":\\\"0x7bc4774a6c\\\",\\\"pc_offset\\\":\\\"0x108a6c\\\",\\\"lr\\\":\\\"0x7f5c90070c\\\",\\\"sp\\\":\\\"0x7c3a449b30\\\",\\\"x0\\\":\\\"0x7f48a737cc\\\",\\\"x1\\\":\\\"0x7f48a737cc\\\",\\\"x2\\\":\\\"0x7cc8953170\\\",\\\"x19\\\":\\\"0x7ce8974ad0\\\",\\\"x20\\\":\\\"0x7c3a44a340\\\",\\\"x22\\\":\\\"0x7d68989790\\\",\\\"entry_x19\\\":\\\"0x7ce8974ad0\\\",\\\"entry_x20\\\":\\\"0x7c3a44a340\\\",\\\"entry_x22\\\":\\\"0xb400007d68989790\\\",\\\"sp_plus_0x60\\\":{\\\"addr\\\":\\\"0x7c3a449b90\\\",\\\"raw_hex\\\":\\\"f09b443a7c0000008c2d9e487f000000689c443a7c000000\\\"},\\\"sp_plus_0x9c0\\\":{\\\"addr\\\":\\\"0x7c3a44a4f0\\\",\\\"raw_hex\\\":\\\"5cb370a348fcd3e7aff7448b560837c3134630a88eb6e4d9\\\",\\\"kind\\\":\\\"short\\\",\\\"len\\\":46,\\\"data_hex\\\":\\\"b370a348fcd3e7aff7448b560837c3134630a88eb6e4\\\",\\\"text\\\":\\\"\\u00b3p\\u00a3H\\u00fc\\u00d3\\u00e7\\u00af\\u00f7D\\u008bV\\\\b7\\u00c3\\\\u0013F0\\u00a8\\u008e\\u00b6\\u00e4\\\",\\\"hex_ascii\\\":false},\\\"x19_slot\\\":{\\\"addr\\\":\\\"0x7ce8974ad0\\\",\\\"raw_hex\\\":\\\"d04d97e87c0000b4d04297e87c0000b4902193e87c0000b4\\\",\\\"kind\\\":\\\"short\\\",\\\"len\\\":104,\\\"data_hex\\\":\\\"4d97e87c0000b4d04297e87c0000b4902193e87c0000\\\",\\\"text\\\":\\\"M\\u0097\\u00e8|\\\\u0000\\\\u0000\\u00b4\\u00d0B\\u0097\\u00e8|\\\\u0000\\\\u0000\\u00b4\\u0090!\\u0093\\u00e8|\\\",\\\"hex_ascii\\\":false},\\\"x19_plus_0x68\\\":{\\\"addr\\\":\\\"0x7ce8974b38\\\",\\\"raw_hex\\\":\\\"407695d87c0000b403010300000071eb0000000000000000\\\",\\\"kind\\\":\\\"short\\\",\\\"len\\\":32,\\\"data_hex\\\":\\\"7695d87c0000b403010300000071eb00000000000000\\\",\\\"text\\\":\\\"v\\u0095\\u00d8|\\\\u0000\\\\u0000\\u00b4\\\\u0003\\\\u0001\\\\u0003\\\\u0000\\\\u0000\\\\u0000q\\u00eb\\\",\\\"hex_ascii\\\":false},\\\"x20_slot\\\":{\\\"addr\\\":\\\"0x7c3a44a340\\\",\\\"raw_hex\\\":\\\"022d00eb0000000000000000000000008a80adeb00000000\\\",\\\"kind\\\":\\\"short\\\",\\\"len\\\":1,\\\"data_hex\\\":\\\"2d\\\",\\\"text\\\":\\\"-\\\",\\\"hex_ascii\\\":false},\\\"x20_plus_0x68\\\":{\\\"addr\\\":\\\"0x7c3a44a3a8\\\",\\\"raw_hex\\\":\\\"b8a7443a7c00000004000000000000000300000000000000\\\",\\\"kind\\\":\\\"short\\\",\\\"len\\\":92,\\\"data_hex\\\":\\\"a7443a7c000000040000000000000003000000000000\\\",\\\"text\\\":\\\"\\u00a7D:|\\\\u0000\\\\u0000\\\\u0000\\\\u0004\\\\u0000\\\\u0000\\\\u0000\\\\u0000\\\\u0000\\\\u0000\\\\u0000\\\\u0003\\\",\\\"hex_ascii\\\":false},\\\"x22_slot\\\":{\\\"addr\\\":\\\"0x7d68989790\\\",\\\"raw_hex\\\":\\\"7826d8c87b000000d04a97e87c0000b470bcdbc87b000000\\\",\\\"kind\\\":\\\"short\\\",\\\"len\\\":60,\\\"data_hex\\\":\\\"26d8c87b000000d04a97e87c0000b470bcdbc87b0000\\\",\\\"text\\\":\\\"&\\u00d8\\u00c8{\\\\u0000\\\\u0000\\\\u0000\\u00d0J\\u0097\\u00e8|\\\\u0000\\\\u0000\\u00b4p\\u00bc\\u00db\\u00c8{\\\",\\\"hex_ascii\\\":false},\\\"x22_plus_0x68\\\":{\\\"addr\\\":\\\"0x7d689897f8\\\",\\\"raw_hex\\\":\\\"000000000000000000000000000000000000000000000000\\\",\\\"kind\\\":\\\"short\\\",\\\"len\\\":0,\\\"data_hex\\\":\\\"\\\",\\\"text\\\":\\\"\\\",\\\"hex_ascii\\\":false},\\\"entry_x19_slot\\\":{\\\"addr\\\":\\\"0x7ce8974ad0\\\",\\\"raw_hex\\\":\\\"d04d97e87c0000b4d04297e87c0000b4902193e87c0000b4\\\",\\\"kind\\\":\\\"short\\\",\\\"len\\\":104,\\\"data_hex\\\":\\\"4d97e87c0000b4d04297e87c0000b4902193e87c0000\\\",\\\"text\\\":\\\"M\\u0097\\u00e8|\\\\u0000\\\\u0000\\u00b4\\u00d0B\\u0097\\u00e8|\\\\u0000\\\\u0000\\u00b4\\u0090!\\u0093\\u00e8|\\\",\\\"hex_ascii\\\":false},\\\"entry_x19_plus_0x68\\\":{\\\"addr\\\":\\\"0x7ce8974b38\\\",\\\"raw_hex\\\":\\\"407695d87c0000b403010300000071eb0000000000000000\\\",\\\"kind\\\":\\\"short\\\",\\\"len\\\":32,\\\"data_hex\\\":\\\"7695d87c0000b403010300000071eb00000000000000\\\",\\\"text\\\":\\\"v\\u0095\\u00d8|\\\\u0000\\\\u0000\\u00b4\\\\u0003\\\\u0001\\\\u0003\\\\u0000\\\\u0000\\\\u0000q\\u00eb\\\",\\\"hex_ascii\\\":false},\\\"entry_x20_slot\\\":{\\\"addr\\\":\\\"0x7c3a44a340\\\",\\\"raw_hex\\\":\\\"022d00eb0000000000000000000000008a80adeb00000000\\\",\\\"kind\\\":\\\"short\\\",\\\"len\\\":1,\\\"data_hex\\\":\\\"2d\\\",\\\"text\\\":\\\"-\\\",\\\"hex_ascii\\\":false},\\\"entry_x20_plus_0x68\\\":{\\\"addr\\\":\\\"0x7c3a44a3a8\\\",\\\"raw_hex\\\":\\\"b8a7443a7c00000004000000000000000300000000000000\\\",\\\"kind\\\":\\\"short\\\",\\\"len\\\":92,\\\"data_hex\\\":\\\"a7443a7c000000040000000000000003000000000000\\\",\\\"text\\\":\\\"\\u00a7D:|\\\\u0000\\\\u0000\\\\u0000\\\\u0004\\\\u0000\\\\u0000\\\\u0000\\\\u0000\\\\u0000\\\\u0000\\\\u0000\\\\u0003\\\",\\\"hex_ascii\\\":false},\\\"entry_x22_slot\\\":{\\\"addr\\\":\\\"0x7d68989790\\\",\\\"raw_hex\\\":\\\"7826d8c87b000000d04a97e87c0000b470bcdbc87b000000\\\",\\\"kind\\\":\\\"short\\\",\\\"len\\\":60,\\\"data_hex\\\":\\\"26d8c87b000000d04a97e87c0000b470bcdbc87b0000\\\",\\\"text\\\":\\\"&\\u00d8\\u00c8{\\\\u0000\\\\u0000\\\\u0000\\u00d0J\\u0097\\u00e8|\\\\u0000\\\\u0000\\u00b4p\\u00bc\\u00db\\u00c8{\\\",\\\"hex_ascii\\\":false},\\\"entry_x22_plus_0x68\\\":{\\\"addr\\\":\\\"0x7d689897f8\\\",\\\"raw_hex\\\":\\\"000000000000000000000000000000000000000000000000\\\",\\\"kind\\\":\\\"short\\\",\\\"len\\\":0,\\\"data_hex\\\":\\\"\\\",\\\"text\\\":\\\"\\\",\\\"hex_ascii\\\":false}},{\\\"seq\\\":3,\\\"kind\\\":\\\"enter\\\",\\\"tid\\\":10977,\\\"challenge\\\":\\\"0000000000000002\\\",\\\"selector\\\":87,\\\"target\\\":\\\"0x7bc473a75c\\\",\\\"target_offset\\\":\\\"0xce75c\\\",\\\"file\\\":\\\"/data/data/com.netmarble.thered/files/0390c55ecbce0 (deleted)\\\",\\\"pc\\\":\\\"0x7bc473a75c\\\",\\\"orig_lr\\\":\\\"0x7bc4774ae4\\\",\\\"orig_lr_offset\\\":\\\"0x108ae4\\\",\\\"new_lr\\\":\\\"0x7f5c5b4000\\\",\\\"sp\\\":\\\"0x7c3a449b30\\\",\\\"x0\\\":\\\"0x57\\\",\\\"x1\\\":\\\"0x7f48a737cc\\\",\\\"x2\\\":\\\"0x7cc8953170\\\",\\\"x19\\\":\\\"0xb400007ce8974ad0\\\",\\\"x20\\\":\\\"0x7c3a44a290\\\",\\\"x22\\\":\\\"0x7c3a44a341\\\",\\\"x25\\\":\\\"0x7c3a44a1b0\\\",\\\"sp_plus_0x60\\\":{\\\"addr\\\":\\\"0x7c3a449b90\\\",\\\"raw_hex\\\":\\\"f09b443a7c0000008c2d9e487f000000689c443a7c000000\\\"},\\\"sp_plus_0x9c0\\\":{\\\"addr\\\":\\\"0x7c3a44a4f0\\\",\\\"raw_hex\\\":\\\"5cb370a348fcd3e7aff7448b560837c3134630a88eb6e4d9\\\",\\\"kind\\\":\\\"short\\\",\\\"len\\\":46,\\\"data_hex\\\":\\\"b370a348fcd3e7aff7448b560837c3134630a88eb6e4\\\",\\\"text\\\":\\\"\\u00b3p\\u00a3H\\u00fc\\u00d3\\u00e7\\u00af\\u00f7D\\u008bV\\\\b7\\u00c3\\\\u0013F0\\u00a8\\u008e\\u00b6\\u00e4\\\",\\\"hex_ascii\\\":false},\\\"x19_slot\\\":{\\\"addr\\\":\\\"0x7ce8974ad0\\\",\\\"raw_hex\\\":\\\"d04d97e87c0000b4d04297e87c0000b4902193e87c0000b4\\\",\\\"kind\\\":\\\"short\\\",\\\"len\\\":104,\\\"data_hex\\\":\\\"4d97e87c0000b4d04297e87c0000b4902193e87c0000\\\",\\\"text\\\":\\\"M\\u0097\\u00e8|\\\\u0000\\\\u0000\\u00b4\\u00d0B\\u0097\\u00e8|\\\\u0000\\\\u0000\\u00b4\\u0090!\\u0093\\u00e8|\\\",\\\"hex_ascii\\\":false},\\\"x22_slot\\\":{\\\"addr\\\":\\\"0x7c3a44a341\\\",\\\"raw_hex\\\":\\\"2d00eb0000000000000000000000008a80adeb00000000e8\\\",\\\"error\\\":\\\"TypeError: not a function\\\"}},{\\\"seq\\\":4,\\\"kind\\\":\\\"resume\\\",\\\"tid\\\":10977,\\\"challenge\\\":\\\"0000000000000002\\\",\\\"selector\\\":87,\\\"entry_target\\\":\\\"0x7bc473a75c\\\",\\\"entry_target_offset\\\":\\\"0xce75c\\\",\\\"entry_lr\\\":\\\"0x7bc4774ae4\\\",\\\"entry_lr_offset\\\":\\\"0x108ae4\\\",\\\"pc\\\":\\\"0x7bc4774ae4\\\",\\\"pc_offset\\\":\\\"0x108ae4\\\",\\\"lr\\\":\\\"0x7f5c90070c\\\",\\\"sp\\\":\\\"0x7c3a449b30\\\",\\\"x0\\\":\\\"0x7f48a737cc\\\",\\\"x1\\\":\\\"0x7f48a737cc\\\",\\\"x2\\\":\\\"0x7cc8953170\\\",\\\"x19\\\":\\\"0x7ce8974ad0\\\",\\\"x20\\\":\\\"0x7c3a44a290\\\",\\\"x22\\\":\\\"0x7c3a44a341\\\",\\\"entry_x19\\\":\\\"0x7ce8974ad0\\\",\\\"entry_x20\\\":\\\"0x7c3a44a290\\\",\\\"entry_x22\\\":\\\"0x7c3a44a341\\\",\\\"sp_plus_0x60\\\":{\\\"addr\\\":\\\"0x7c3a449b90\\\",\\\"raw_hex\\\":\\\"f09b443a7c0000008c2d9e487f000000689c443a7c000000\\\"},\\\"sp_plus_0x9c0\\\":{\\\"addr\\\":\\\"0x7c3a44a4f0\\\",\\\"raw_hex\\\":\\\"5cb370a348fcd3e7aff7448b560837c3134630a88eb6e4d9\\\",\\\"kind\\\":\\\"short\\\",\\\"len\\\":46,\\\"data_hex\\\":\\\"b370a348fcd3e7aff7448b560837c3134630a88eb6e4\\\",\\\"text\\\":\\\"\\u00b3p\\u00a3H\\u00fc\\u00d3\\u00e7\\u00af\\u00f7D\\u008bV\\\\b7\\u00c3\\\\u0013F0\\u00a8\\u008e\\u00b6\\u00e4\\\",\\\"hex_ascii\\\":false},\\\"x19_slot\\\":{\\\"addr\\\":\\\"0x7ce8974ad0\\\",\\\"raw_hex\\\":\\\"d04d97e87c0000b4d04297e87c0000b4902193e87c0000b4\\\",\\\"kind\\\":\\\"short\\\",\\\"len\\\":104,\\\"data_hex\\\":\\\"4d97e87c0000b4d04297e87c0000b4902193e87c0000\\\",\\\"text\\\":\\\"M\\u0097\\u00e8|\\\\u0000\\\\u0000\\u00b4\\u00d0B\\u0097\\u00e8|\\\\u0000\\\\u0000\\u00b4\\u0090!\\u0093\\u00e8|\\\",\\\"hex_ascii\\\":false},\\\"x19_plus_0x68\\\":{\\\"addr\\\":\\\"0x7ce8974b38\\\",\\\"raw_hex\\\":\\\"407695d87c0000b403010300000071eb0000000000000000\\\",\\\"kind\\\":\\\"short\\\",\\\"len\\\":32,\\\"data_hex\\\":\\\"7695d87c0000b403010300000071eb00000000000000\\\",\\\"text\\\":\\\"v\\u0095\\u00d8|\\\\u0000\\\\u0000\\u00b4\\\\u0003\\\\u0001\\\\u0003\\\\u0000\\\\u0000\\\\u0000q\\u00eb\\\",\\\"hex_ascii\\\":false},\\\"x20_slot\\\":{\\\"addr\\\":\\\"0x7c3a44a290\\\",\\\"raw_hex\\\":\\\"022d00eb0000000000000000000000008a80adeb00000000\\\",\\\"kind\\\":\\\"short\\\",\\\"len\\\":1,\\\"data_hex\\\":\\\"2d\\\",\\\"text\\\":\\\"-\\\",\\\"hex_ascii\\\":false},\\\"x20_plus_0x68\\\":{\\\"addr\\\":\\\"0x7c3a44a2f8\\\",\\\"raw_hex\\\":\\\"e8f19d487f0000000020453a7c00000000b0dbc87b000000\\\",\\\"kind\\\":\\\"short\\\",\\\"len\\\":116,\\\"data_hex\\\":\\\"f19d487f0000000020453a7c00000000b0dbc87b0000\\\",\\\"text\\\":\\\"\\u00f1\\u009dH\\u007f\\\\u0000\\\\u0000\\\\u0000\\\\u0000 E:|\\\\u0000\\\\u0000\\\\u0000\\\\u0000\\u00b0\\u00db\\u00c8{\\\",\\\"hex_ascii\\\":false},\\\"x22_slot\\\":{\\\"addr\\\":\\\"0x7c3a44a341\\\",\\\"raw_hex\\\":\\\"2d00eb0000000000000000000000008a80adeb00000000e8\\\",\\\"error\\\":\\\"TypeError: not a function\\\"},\\\"x22_plus_0x68\\\":{\\\"addr\\\":\\\"0x7c3a44a3a9\\\",\\\"raw_hex\\\":\\\"a7443a7c0000000400000000000000030000000000000000\\\",\\\"error\\\":\\\"TypeError: not a function\\\"},\\\"entry_x19_slot\\\":{\\\"addr\\\":\\\"0x7ce8974ad0\\\",\\\"raw_hex\\\":\\\"d04d97e87c0000b4d04297e87c0000b4902193e87c0000b4\\\",\\\"kind\\\":\\\"short\\\",\\\"len\\\":104,\\\"data_hex\\\":\\\"4d97e87c0000b4d04297e87c0000b4902193e87c0000\\\",\\\"text\\\":\\\"M\\u0097\\u00e8|\\\\u0000\\\\u0000\\u00b4\\u00d0B\\u0097\\u00e8|\\\\u0000\\\\u0000\\u00b4\\u0090!\\u0093\\u00e8|\\\",\\\"hex_ascii\\\":false},\\\"entry_x19_plus_0x68\\\":{\\\"addr\\\":\\\"0x7ce8974b38\\\",\\\"raw_hex\\\":\\\"407695d87c0000b403010300000071eb0000000000000000\\\",\\\"kind\\\":\\\"short\\\",\\\"len\\\":32,\\\"data_hex\\\":\\\"7695d87c0000b403010300000071eb00000000000000\\\",\\\"text\\\":\\\"v\\u0095\\u00d8|\\\\u0000\\\\u0000\\u00b4\\\\u0003\\\\u0001\\\\u0003\\\\u0000\\\\u0000\\\\u0000q\\u00eb\\\",\\\"hex_ascii\\\":false},\\\"entry_x20_slot\\\":{\\\"addr\\\":\\\"0x7c3a44a290\\\",\\\"raw_hex\\\":\\\"022d00eb0000000000000000000000008a80adeb00000000\\\",\\\"kind\\\":\\\"short\\\",\\\"len\\\":1,\\\"data_hex\\\":\\\"2d\\\",\\\"text\\\":\\\"-\\\",\\\"hex_ascii\\\":false},\\\"entry_x20_plus_0x68\\\":{\\\"addr\\\":\\\"0x7c3a44a2f8\\\",\\\"raw_hex\\\":\\\"e8f19d487f0000000020453a7c00000000b0dbc87b000000\\\",\\\"kind\\\":\\\"short\\\",\\\"len\\\":116,\\\"data_hex\\\":\\\"f19d487f0000000020453a7c00000000b0dbc87b0000\\\",\\\"text\\\":\\\"\\u00f1\\u009dH\\u007f\\\\u0000\\\\u0000\\\\u0000\\\\u0000 E:|\\\\u0000\\\\u0000\\\\u0000\\\\u0000\\u00b0\\u00db\\u00c8{\\\",\\\"hex_ascii\\\":false},\\\"entry_x22_slot\\\":{\\\"addr\\\":\\\"0x7c3a44a341\\\",\\\"raw_hex\\\":\\\"2d00eb0000000000000000000000008a80adeb00000000e8\\\",\\\"error\\\":\\\"TypeError: not a function\\\"},\\\"entry_x22_plus_0x68\\\":{\\\"addr\\\":\\\"0x7c3a44a3a9\\\",\\\"raw_hex\\\":\\\"a7443a7c0000000400000000000000030000000000000000\\\",\\\"error\\\":\\\"TypeError: not a function\\\"}}],\\\"comparisons\\\":[{\\\"index\\\":0,\\\"selector\\\":87,\\\"entry_lr\\\":\\\"0x7bc4774a6c\\\",\\\"entry_lr_offset\\\":\\\"0x108a6c\\\",\\\"sp_0x9c0_text\\\":\\\"\\u00b3p\\u00a3H\\u00fc\\u00d3\\u00e7\\u00af\\u00f7D\\u008bV\\\\b7\\u00c3\\\\u0013F0\\u00a8\\u008e\\u00b6\\u00e4\\\",\\\"x19_text\\\":\\\"M\\u0097\\u00e8|\\\\u0000\\\\u0000\\u00b4\\u00d0B\\u0097\\u00e8|\\\\u0000\\\\u0000\\u00b4\\u0090!\\u0093\\u00e8|\\\",\\\"x19_plus_0x68_text\\\":\\\"v\\u0095\\u00d8|\\\\u0000\\\\u0000\\u00b4\\\\u0003\\\\u0001\\\\u0003\\\\u0000\\\\u0000\\\\u0000q\\u00eb\\\",\\\"x20_text\\\":\\\"-\\\",\\\"x20_plus_0x68_text\\\":\\\"\\u00a7D:|\\\\u0000\\\\u0000\\\\u0000\\\\u0004\\\\u0000\\\\u0000\\\\u0000\\\\u0000\\\\u0000\\\\u0000\\\\u0000\\\\u0003\\\",\\\"x22_text\\\":\\\"&\\u00d8\\u00c8{\\\\u0000\\\\u0000\\\\u0000\\u00d0J\\u0097\\u00e8|\\\\u0000\\\\u0000\\u00b4p\\u00bc\\u00db\\u00c8{\\\",\\\"x22_plus_0x68_text\\\":null,\\\"entry_x22_text\\\":\\\"&\\u00d8\\u00c8{\\\\u0000\\\\u0000\\\\u0000\\u00d0J\\u0097\\u00e8|\\\\u0000\\\\u0000\\u00b4p\\u00bc\\u00db\\u00c8{\\\",\\\"entry_x22_plus_0x68_text\\\":null,\\\"sp_0x9c0_vs_final\\\":{\\\"exact\\\":false,\\\"prefix\\\":false,\\\"substring\\\":false},\\\"x19_vs_final\\\":{\\\"exact\\\":false,\\\"prefix\\\":false,\\\"substring\\\":false},\\\"x19_plus_0x68_vs_final\\\":{\\\"exact\\\":false,\\\"prefix\\\":false,\\\"substring\\\":false},\\\"x20_vs_final\\\":{\\\"exact\\\":false,\\\"prefix\\\":false,\\\"substring\\\":false},\\\"x20_plus_0x68_vs_final\\\":{\\\"exact\\\":false,\\\"prefix\\\":false,\\\"substring\\\":false},\\\"x22_vs_final\\\":{\\\"exact\\\":false,\\\"prefix\\\":false,\\\"substring\\\":false},\\\"x22_plus_0x68_vs_final\\\":{\\\"exact\\\":false,\\\"prefix\\\":false,\\\"substring\\\":false},\\\"entry_x22_vs_final\\\":{\\\"exact\\\":false,\\\"prefix\\\":false,\\\"substring\\\":false},\\\"entry_x22_plus_0x68_vs_final\\\":{\\\"exact\\\":false,\\\"prefix\\\":false,\\\"substring\\\":false}},{\\\"index\\\":1,\\\"selector\\\":87,\\\"entry_lr\\\":\\\"0x7bc4774ae4\\\",\\\"entry_lr_offset\\\":\\\"0x108ae4\\\",\\\"sp_0x9c0_text\\\":\\\"\\u00b3p\\u00a3H\\u00fc\\u00d3\\u00e7\\u00af\\u00f7D\\u008bV\\\\b7\\u00c3\\\\u0013F0\\u00a8\\u008e\\u00b6\\u00e4\\\",\\\"x19_text\\\":\\\"M\\u0097\\u00e8|\\\\u0000\\\\u0000\\u00b4\\u00d0B\\u0097\\u00e8|\\\\u0000\\\\u0000\\u00b4\\u0090!\\u0093\\u00e8|\\\",\\\"x19_plus_0x68_text\\\":\\\"v\\u0095\\u00d8|\\\\u0000\\\\u0000\\u00b4\\\\u0003\\\\u0001\\\\u0003\\\\u0000\\\\u0000\\\\u0000q\\u00eb\\\",\\\"x20_text\\\":\\\"-\\\",\\\"x20_plus_0x68_text\\\":\\\"\\u00f1\\u009dH\\u007f\\\\u0000\\\\u0000\\\\u0000\\\\u0000 E:|\\\\u0000\\\\u0000\\\\u0000\\\\u0000\\u00b0\\u00db\\u00c8{\\\",\\\"x22_text\\\":null,\\\"x22_plus_0x68_text\\\":null,\\\"entry_x22_text\\\":null,\\\"entry_x22_plus_0x68_text\\\":null,\\\"sp_0x9c0_vs_final\\\":{\\\"exact\\\":false,\\\"prefix\\\":false,\\\"substring\\\":false},\\\"x19_vs_final\\\":{\\\"exact\\\":false,\\\"prefix\\\":false,\\\"substring\\\":false},\\\"x19_plus_0x68_vs_final\\\":{\\\"exact\\\":false,\\\"prefix\\\":false,\\\"substring\\\":false},\\\"x20_vs_final\\\":{\\\"exact\\\":false,\\\"prefix\\\":false,\\\"substring\\\":false},\\\"x20_plus_0x68_vs_final\\\":{\\\"exact\\\":false,\\\"prefix\\\":false,\\\"substring\\\":false},\\\"x22_vs_final\\\":{\\\"exact\\\":false,\\\"prefix\\\":false,\\\"substring\\\":false},\\\"x22_plus_0x68_vs_final\\\":{\\\"exact\\\":false,\\\"prefix\\\":false,\\\"substring\\\":false},\\\"entry_x22_vs_final\\\":{\\\"exact\\\":false,\\\"prefix\\\":false,\\\"substring\\\":false},\\\"entry_x22_plus_0x68_vs_final\\\":{\\\"exact\\\":false,\\\"prefix\\\":false,\\\"substring\\\":false}}],\\\"resumeHookCount\\\":5,\\\"eventCount\\\":4,\\\"drops\\\":0,\\\"failures\\\":[]}"
+  },
+  "inner": {
+    "ok": true,
+    "challenge": "0000000000000002",
+    "token": "",
+    "warmChallenge": "6BA4D60738580083",
+    "target": null,
+    "targetOffset": "0xce75c",
+    "returnProbe": "0x7f5c5b4000",
+    "events": [
+      {
+        "seq": 1,
+        "kind": "enter",
+        "tid": 10977,
+        "challenge": "0000000000000002",
+        "selector": 87,
+        "target": "0x7bc473a75c",
+        "target_offset": "0xce75c",
+        "file": "/data/data/com.netmarble.thered/files/0390c55ecbce0 (deleted)",
+        "pc": "0x7bc473a75c",
+        "orig_lr": "0x7bc4774a6c",
+        "orig_lr_offset": "0x108a6c",
+        "new_lr": "0x7f5c5b4000",
+        "sp": "0x7c3a449b30",
+        "x0": "0x57",
+        "x1": "0xb400007dc8932890",
+        "x2": "0xb400007d68989790",
+        "x19": "0xb400007ce8974ad0",
+        "x20": "0x7c3a44a340",
+        "x22": "0xb400007d68989790",
+        "x25": "0x7c3a44a1b0",
+        "sp_plus_0x60": {
+          "addr": "0x7c3a449b90",
+          "raw_hex": "f09b443a7c0000008c2d9e487f000000689c443a7c000000"
+        },
+        "sp_plus_0x9c0": {
+          "addr": "0x7c3a44a4f0",
+          "raw_hex": "5cb370a348fcd3e7aff7448b560837c3134630a88eb6e4d9",
+          "kind": "short",
+          "len": 46,
+          "data_hex": "b370a348fcd3e7aff7448b560837c3134630a88eb6e4",
+          "text": "\u00b3p\u00a3H\u00fc\u00d3\u00e7\u00af\u00f7D\u008bV\b7\u00c3\u0013F0\u00a8\u008e\u00b6\u00e4",
+          "hex_ascii": false
+        },
+        "x19_slot": {
+          "addr": "0x7ce8974ad0",
+          "raw_hex": "d04d97e87c0000b4d04297e87c0000b4902193e87c0000b4",
+          "kind": "short",
+          "len": 104,
+          "data_hex": "4d97e87c0000b4d04297e87c0000b4902193e87c0000",
+          "text": "M\u0097\u00e8|\u0000\u0000\u00b4\u00d0B\u0097\u00e8|\u0000\u0000\u00b4\u0090!\u0093\u00e8|",
+          "hex_ascii": false
+        },
+        "x22_slot": {
+          "addr": "0x7d68989790",
+          "raw_hex": "7826d8c87b000000d04a97e87c0000b470bcdbc87b000000",
+          "kind": "short",
+          "len": 60,
+          "data_hex": "26d8c87b000000d04a97e87c0000b470bcdbc87b0000",
+          "text": "&\u00d8\u00c8{\u0000\u0000\u0000\u00d0J\u0097\u00e8|\u0000\u0000\u00b4p\u00bc\u00db\u00c8{",
+          "hex_ascii": false
+        }
+      },
+      {
+        "seq": 2,
+        "kind": "resume",
+        "tid": 10977,
+        "challenge": "0000000000000002",
+        "selector": 87,
+        "entry_target": "0x7bc473a75c",
+        "entry_target_offset": "0xce75c",
+        "entry_lr": "0x7bc4774a6c",
+        "entry_lr_offset": "0x108a6c",
+        "pc": "0x7bc4774a6c",
+        "pc_offset": "0x108a6c",
+        "lr": "0x7f5c90070c",
+        "sp": "0x7c3a449b30",
+        "x0": "0x7f48a737cc",
+        "x1": "0x7f48a737cc",
+        "x2": "0x7cc8953170",
+        "x19": "0x7ce8974ad0",
+        "x20": "0x7c3a44a340",
+        "x22": "0x7d68989790",
+        "entry_x19": "0x7ce8974ad0",
+        "entry_x20": "0x7c3a44a340",
+        "entry_x22": "0xb400007d68989790",
+        "sp_plus_0x60": {
+          "addr": "0x7c3a449b90",
+          "raw_hex": "f09b443a7c0000008c2d9e487f000000689c443a7c000000"
+        },
+        "sp_plus_0x9c0": {
+          "addr": "0x7c3a44a4f0",
+          "raw_hex": "5cb370a348fcd3e7aff7448b560837c3134630a88eb6e4d9",
+          "kind": "short",
+          "len": 46,
+          "data_hex": "b370a348fcd3e7aff7448b560837c3134630a88eb6e4",
+          "text": "\u00b3p\u00a3H\u00fc\u00d3\u00e7\u00af\u00f7D\u008bV\b7\u00c3\u0013F0\u00a8\u008e\u00b6\u00e4",
+          "hex_ascii": false
+        },
+        "x19_slot": {
+          "addr": "0x7ce8974ad0",
+          "raw_hex": "d04d97e87c0000b4d04297e87c0000b4902193e87c0000b4",
+          "kind": "short",
+          "len": 104,
+          "data_hex": "4d97e87c0000b4d04297e87c0000b4902193e87c0000",
+          "text": "M\u0097\u00e8|\u0000\u0000\u00b4\u00d0B\u0097\u00e8|\u0000\u0000\u00b4\u0090!\u0093\u00e8|",
+          "hex_ascii": false
+        },
+        "x19_plus_0x68": {
+          "addr": "0x7ce8974b38",
+          "raw_hex": "407695d87c0000b403010300000071eb0000000000000000",
+          "kind": "short",
+          "len": 32,
+          "data_hex": "7695d87c0000b403010300000071eb00000000000000",
+          "text": "v\u0095\u00d8|\u0000\u0000\u00b4\u0003\u0001\u0003\u0000\u0000\u0000q\u00eb",
+          "hex_ascii": false
+        },
+        "x20_slot": {
+          "addr": "0x7c3a44a340",
+          "raw_hex": "022d00eb0000000000000000000000008a80adeb00000000",
+          "kind": "short",
+          "len": 1,
+          "data_hex": "2d",
+          "text": "-",
+          "hex_ascii": false
+        },
+        "x20_plus_0x68": {
+          "addr": "0x7c3a44a3a8",
+          "raw_hex": "b8a7443a7c00000004000000000000000300000000000000",
+          "kind": "short",
+          "len": 92,
+          "data_hex": "a7443a7c000000040000000000000003000000000000",
+          "text": "\u00a7D:|\u0000\u0000\u0000\u0004\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0003",
+          "hex_ascii": false
+        },
+        "x22_slot": {
+          "addr": "0x7d68989790",
+          "raw_hex": "7826d8c87b000000d04a97e87c0000b470bcdbc87b000000",
+          "kind": "short",
+          "len": 60,
+          "data_hex": "26d8c87b000000d04a97e87c0000b470bcdbc87b0000",
+          "text": "&\u00d8\u00c8{\u0000\u0000\u0000\u00d0J\u0097\u00e8|\u0000\u0000\u00b4p\u00bc\u00db\u00c8{",
+          "hex_ascii": false
+        },
+        "x22_plus_0x68": {
+          "addr": "0x7d689897f8",
+          "raw_hex": "000000000000000000000000000000000000000000000000",
+          "kind": "short",
+          "len": 0,
+          "data_hex": "",
+          "text": "",
+          "hex_ascii": false
+        },
+        "entry_x19_slot": {
+          "addr": "0x7ce8974ad0",
+          "raw_hex": "d04d97e87c0000b4d04297e87c0000b4902193e87c0000b4",
+          "kind": "short",
+          "len": 104,
+          "data_hex": "4d97e87c0000b4d04297e87c0000b4902193e87c0000",
+          "text": "M\u0097\u00e8|\u0000\u0000\u00b4\u00d0B\u0097\u00e8|\u0000\u0000\u00b4\u0090!\u0093\u00e8|",
+          "hex_ascii": false
+        },
+        "entry_x19_plus_0x68": {
+          "addr": "0x7ce8974b38",
+          "raw_hex": "407695d87c0000b403010300000071eb0000000000000000",
+          "kind": "short",
+          "len": 32,
+          "data_hex": "7695d87c0000b403010300000071eb00000000000000",
+          "text": "v\u0095\u00d8|\u0000\u0000\u00b4\u0003\u0001\u0003\u0000\u0000\u0000q\u00eb",
+          "hex_ascii": false
+        },
+        "entry_x20_slot": {
+          "addr": "0x7c3a44a340",
+          "raw_hex": "022d00eb0000000000000000000000008a80adeb00000000",
+          "kind": "short",
+          "len": 1,
+          "data_hex": "2d",
+          "text": "-",
+          "hex_ascii": false
+        },
+        "entry_x20_plus_0x68": {
+          "addr": "0x7c3a44a3a8",
+          "raw_hex": "b8a7443a7c00000004000000000000000300000000000000",
+          "kind": "short",
+          "len": 92,
+          "data_hex": "a7443a7c000000040000000000000003000000000000",
+          "text": "\u00a7D:|\u0000\u0000\u0000\u0004\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0003",
+          "hex_ascii": false
+        },
+        "entry_x22_slot": {
+          "addr": "0x7d68989790",
+          "raw_hex": "7826d8c87b000000d04a97e87c0000b470bcdbc87b000000",
+          "kind": "short",
+          "len": 60,
+          "data_hex": "26d8c87b000000d04a97e87c0000b470bcdbc87b0000",
+          "text": "&\u00d8\u00c8{\u0000\u0000\u0000\u00d0J\u0097\u00e8|\u0000\u0000\u00b4p\u00bc\u00db\u00c8{",
+          "hex_ascii": false
+        },
+        "entry_x22_plus_0x68": {
+          "addr": "0x7d689897f8",
+          "raw_hex": "000000000000000000000000000000000000000000000000",
+          "kind": "short",
+          "len": 0,
+          "data_hex": "",
+          "text": "",
+          "hex_ascii": false
+        }
+      },
+      {
+        "seq": 3,
+        "kind": "enter",
+        "tid": 10977,
+        "challenge": "0000000000000002",
+        "selector": 87,
+        "target": "0x7bc473a75c",
+        "target_offset": "0xce75c",
+        "file": "/data/data/com.netmarble.thered/files/0390c55ecbce0 (deleted)",
+        "pc": "0x7bc473a75c",
+        "orig_lr": "0x7bc4774ae4",
+        "orig_lr_offset": "0x108ae4",
+        "new_lr": "0x7f5c5b4000",
+        "sp": "0x7c3a449b30",
+        "x0": "0x57",
+        "x1": "0x7f48a737cc",
+        "x2": "0x7cc8953170",
+        "x19": "0xb400007ce8974ad0",
+        "x20": "0x7c3a44a290",
+        "x22": "0x7c3a44a341",
+        "x25": "0x7c3a44a1b0",
+        "sp_plus_0x60": {
+          "addr": "0x7c3a449b90",
+          "raw_hex": "f09b443a7c0000008c2d9e487f000000689c443a7c000000"
+        },
+        "sp_plus_0x9c0": {
+          "addr": "0x7c3a44a4f0",
+          "raw_hex": "5cb370a348fcd3e7aff7448b560837c3134630a88eb6e4d9",
+          "kind": "short",
+          "len": 46,
+          "data_hex": "b370a348fcd3e7aff7448b560837c3134630a88eb6e4",
+          "text": "\u00b3p\u00a3H\u00fc\u00d3\u00e7\u00af\u00f7D\u008bV\b7\u00c3\u0013F0\u00a8\u008e\u00b6\u00e4",
+          "hex_ascii": false
+        },
+        "x19_slot": {
+          "addr": "0x7ce8974ad0",
+          "raw_hex": "d04d97e87c0000b4d04297e87c0000b4902193e87c0000b4",
+          "kind": "short",
+          "len": 104,
+          "data_hex": "4d97e87c0000b4d04297e87c0000b4902193e87c0000",
+          "text": "M\u0097\u00e8|\u0000\u0000\u00b4\u00d0B\u0097\u00e8|\u0000\u0000\u00b4\u0090!\u0093\u00e8|",
+          "hex_ascii": false
+        },
+        "x22_slot": {
+          "addr": "0x7c3a44a341",
+          "raw_hex": "2d00eb0000000000000000000000008a80adeb00000000e8",
+          "error": "TypeError: not a function"
+        }
+      },
+      {
+        "seq": 4,
+        "kind": "resume",
+        "tid": 10977,
+        "challenge": "0000000000000002",
+        "selector": 87,
+        "entry_target": "0x7bc473a75c",
+        "entry_target_offset": "0xce75c",
+        "entry_lr": "0x7bc4774ae4",
+        "entry_lr_offset": "0x108ae4",
+        "pc": "0x7bc4774ae4",
+        "pc_offset": "0x108ae4",
+        "lr": "0x7f5c90070c",
+        "sp": "0x7c3a449b30",
+        "x0": "0x7f48a737cc",
+        "x1": "0x7f48a737cc",
+        "x2": "0x7cc8953170",
+        "x19": "0x7ce8974ad0",
+        "x20": "0x7c3a44a290",
+        "x22": "0x7c3a44a341",
+        "entry_x19": "0x7ce8974ad0",
+        "entry_x20": "0x7c3a44a290",
+        "entry_x22": "0x7c3a44a341",
+        "sp_plus_0x60": {
+          "addr": "0x7c3a449b90",
+          "raw_hex": "f09b443a7c0000008c2d9e487f000000689c443a7c000000"
+        },
+        "sp_plus_0x9c0": {
+          "addr": "0x7c3a44a4f0",
+          "raw_hex": "5cb370a348fcd3e7aff7448b560837c3134630a88eb6e4d9",
+          "kind": "short",
+          "len": 46,
+          "data_hex": "b370a348fcd3e7aff7448b560837c3134630a88eb6e4",
+          "text": "\u00b3p\u00a3H\u00fc\u00d3\u00e7\u00af\u00f7D\u008bV\b7\u00c3\u0013F0\u00a8\u008e\u00b6\u00e4",
+          "hex_ascii": false
+        },
+        "x19_slot": {
+          "addr": "0x7ce8974ad0",
+          "raw_hex": "d04d97e87c0000b4d04297e87c0000b4902193e87c0000b4",
+          "kind": "short",
+          "len": 104,
+          "data_hex": "4d97e87c0000b4d04297e87c0000b4902193e87c0000",
+          "text": "M\u0097\u00e8|\u0000\u0000\u00b4\u00d0B\u0097\u00e8|\u0000\u0000\u00b4\u0090!\u0093\u00e8|",
+          "hex_ascii": false
+        },
+        "x19_plus_0x68": {
+          "addr": "0x7ce8974b38",
+          "raw_hex": "407695d87c0000b403010300000071eb0000000000000000",
+          "kind": "short",
+          "len": 32,
+          "data_hex": "7695d87c0000b403010300000071eb00000000000000",
+          "text": "v\u0095\u00d8|\u0000\u0000\u00b4\u0003\u0001\u0003\u0000\u0000\u0000q\u00eb",
+          "hex_ascii": false
+        },
+        "x20_slot": {
+          "addr": "0x7c3a44a290",
+          "raw_hex": "022d00eb0000000000000000000000008a80adeb00000000",
+          "kind": "short",
+          "len": 1,
+          "data_hex": "2d",
+          "text": "-",
+          "hex_ascii": false
+        },
+        "x20_plus_0x68": {
+          "addr": "0x7c3a44a2f8",
+          "raw_hex": "e8f19d487f0000000020453a7c00000000b0dbc87b000000",
+          "kind": "short",
+          "len": 116,
+          "data_hex": "f19d487f0000000020453a7c00000000b0dbc87b0000",
+          "text": "\u00f1\u009dH\u007f\u0000\u0000\u0000\u0000 E:|\u0000\u0000\u0000\u0000\u00b0\u00db\u00c8{",
+          "hex_ascii": false
+        },
+        "x22_slot": {
+          "addr": "0x7c3a44a341",
+          "raw_hex": "2d00eb0000000000000000000000008a80adeb00000000e8",
+          "error": "TypeError: not a function"
+        },
+        "x22_plus_0x68": {
+          "addr": "0x7c3a44a3a9",
+          "raw_hex": "a7443a7c0000000400000000000000030000000000000000",
+          "error": "TypeError: not a function"
+        },
+        "entry_x19_slot": {
+          "addr": "0x7ce8974ad0",
+          "raw_hex": "d04d97e87c0000b4d04297e87c0000b4902193e87c0000b4",
+          "kind": "short",
+          "len": 104,
+          "data_hex": "4d97e87c0000b4d04297e87c0000b4902193e87c0000",
+          "text": "M\u0097\u00e8|\u0000\u0000\u00b4\u00d0B\u0097\u00e8|\u0000\u0000\u00b4\u0090!\u0093\u00e8|",
+          "hex_ascii": false
+        },
+        "entry_x19_plus_0x68": {
+          "addr": "0x7ce8974b38",
+          "raw_hex": "407695d87c0000b403010300000071eb0000000000000000",
+          "kind": "short",
+          "len": 32,
+          "data_hex": "7695d87c0000b403010300000071eb00000000000000",
+          "text": "v\u0095\u00d8|\u0000\u0000\u00b4\u0003\u0001\u0003\u0000\u0000\u0000q\u00eb",
+          "hex_ascii": false
+        },
+        "entry_x20_slot": {
+          "addr": "0x7c3a44a290",
+          "raw_hex": "022d00eb0000000000000000000000008a80adeb00000000",
+          "kind": "short",
+          "len": 1,
+          "data_hex": "2d",
+          "text": "-",
+          "hex_ascii": false
+        },
+        "entry_x20_plus_0x68": {
+          "addr": "0x7c3a44a2f8",
+          "raw_hex": "e8f19d487f0000000020453a7c00000000b0dbc87b000000",
+          "kind": "short",
+          "len": 116,
+          "data_hex": "f19d487f0000000020453a7c00000000b0dbc87b0000",
+          "text": "\u00f1\u009dH\u007f\u0000\u0000\u0000\u0000 E:|\u0000\u0000\u0000\u0000\u00b0\u00db\u00c8{",
+          "hex_ascii": false
+        },
+        "entry_x22_slot": {
+          "addr": "0x7c3a44a341",
+          "raw_hex": "2d00eb0000000000000000000000008a80adeb00000000e8",
+          "error": "TypeError: not a function"
+        },
+        "entry_x22_plus_0x68": {
+          "addr": "0x7c3a44a3a9",
+          "raw_hex": "a7443a7c0000000400000000000000030000000000000000",
+          "error": "TypeError: not a function"
+        }
+      }
+    ],
+    "comparisons": [
+      {
+        "index": 0,
+        "selector": 87,
+        "entry_lr": "0x7bc4774a6c",
+        "entry_lr_offset": "0x108a6c",
+        "sp_0x9c0_text": "\u00b3p\u00a3H\u00fc\u00d3\u00e7\u00af\u00f7D\u008bV\b7\u00c3\u0013F0\u00a8\u008e\u00b6\u00e4",
+        "x19_text": "M\u0097\u00e8|\u0000\u0000\u00b4\u00d0B\u0097\u00e8|\u0000\u0000\u00b4\u0090!\u0093\u00e8|",
+        "x19_plus_0x68_text": "v\u0095\u00d8|\u0000\u0000\u00b4\u0003\u0001\u0003\u0000\u0000\u0000q\u00eb",
+        "x20_text": "-",
+        "x20_plus_0x68_text": "\u00a7D:|\u0000\u0000\u0000\u0004\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0003",
+        "x22_text": "&\u00d8\u00c8{\u0000\u0000\u0000\u00d0J\u0097\u00e8|\u0000\u0000\u00b4p\u00bc\u00db\u00c8{",
+        "x22_plus_0x68_text": null,
+        "entry_x22_text": "&\u00d8\u00c8{\u0000\u0000\u0000\u00d0J\u0097\u00e8|\u0000\u0000\u00b4p\u00bc\u00db\u00c8{",
+        "entry_x22_plus_0x68_text": null,
+        "sp_0x9c0_vs_final": {
+          "exact": false,
+          "prefix": false,
+          "substring": false
+        },
+        "x19_vs_final": {
+          "exact": false,
+          "prefix": false,
+          "substring": false
+        },
+        "x19_plus_0x68_vs_final": {
+          "exact": false,
+          "prefix": false,
+          "substring": false
+        },
+        "x20_vs_final": {
+          "exact": false,
+          "prefix": false,
+          "substring": false
+        },
+        "x20_plus_0x68_vs_final": {
+          "exact": false,
+          "prefix": false,
+          "substring": false
+        },
+        "x22_vs_final": {
+          "exact": false,
+          "prefix": false,
+          "substring": false
+        },
+        "x22_plus_0x68_vs_final": {
+          "exact": false,
+          "prefix": false,
+          "substring": false
+        },
+        "entry_x22_vs_final": {
+          "exact": false,
+          "prefix": false,
+          "substring": false
+        },
+        "entry_x22_plus_0x68_vs_final": {
+          "exact": false,
+          "prefix": false,
+          "substring": false
+        }
+      },
+      {
+        "index": 1,
+        "selector": 87,
+        "entry_lr": "0x7bc4774ae4",
+        "entry_lr_offset": "0x108ae4",
+        "sp_0x9c0_text": "\u00b3p\u00a3H\u00fc\u00d3\u00e7\u00af\u00f7D\u008bV\b7\u00c3\u0013F0\u00a8\u008e\u00b6\u00e4",
+        "x19_text": "M\u0097\u00e8|\u0000\u0000\u00b4\u00d0B\u0097\u00e8|\u0000\u0000\u00b4\u0090!\u0093\u00e8|",
+        "x19_plus_0x68_text": "v\u0095\u00d8|\u0000\u0000\u00b4\u0003\u0001\u0003\u0000\u0000\u0000q\u00eb",
+        "x20_text": "-",
+        "x20_plus_0x68_text": "\u00f1\u009dH\u007f\u0000\u0000\u0000\u0000 E:|\u0000\u0000\u0000\u0000\u00b0\u00db\u00c8{",
+        "x22_text": null,
+        "x22_plus_0x68_text": null,
+        "entry_x22_text": null,
+        "entry_x22_plus_0x68_text": null,
+        "sp_0x9c0_vs_final": {
+          "exact": false,
+          "prefix": false,
+          "substring": false
+        },
+        "x19_vs_final": {
+          "exact": false,
+          "prefix": false,
+          "substring": false
+        },
+        "x19_plus_0x68_vs_final": {
+          "exact": false,
+          "prefix": false,
+          "substring": false
+        },
+        "x20_vs_final": {
+          "exact": false,
+          "prefix": false,
+          "substring": false
+        },
+        "x20_plus_0x68_vs_final": {
+          "exact": false,
+          "prefix": false,
+          "substring": false
+        },
+        "x22_vs_final": {
+          "exact": false,
+          "prefix": false,
+          "substring": false
+        },
+        "x22_plus_0x68_vs_final": {
+          "exact": false,
+          "prefix": false,
+          "substring": false
+        },
+        "entry_x22_vs_final": {
+          "exact": false,
+          "prefix": false,
+          "substring": false
+        },
+        "entry_x22_plus_0x68_vs_final": {
+          "exact": false,
+          "prefix": false,
+          "substring": false
+        }
+      }
+    ],
+    "resumeHookCount": 5,
+    "eventCount": 4,
+    "drops": 0,
+    "failures": []
+  }
+}

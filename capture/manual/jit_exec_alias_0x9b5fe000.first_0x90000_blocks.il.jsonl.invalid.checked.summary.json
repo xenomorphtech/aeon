@@ -1,0 +1,141 @@
+{
+  "invalid_rows": 2037,
+  "unique_words": 1357,
+  "per_row_status": {
+    "undefined": 2033,
+    "nyi": 1,
+    "decoded": 3
+  },
+  "per_unique_word_status": {
+    "undefined": 1353,
+    "nyi": 1,
+    "decoded": 3
+  },
+  "missing_words": [],
+  "sample_decoded_words": [
+    {
+      "word": "0x5461c070",
+      "objdump": "bc.eq\t0xc47f8  // bc.none",
+      "objdump_status": "decoded"
+    },
+    {
+      "word": "0x5921a0b8",
+      "objdump": "rcwsswpp\tx24, x1, [x5]",
+      "objdump_status": "decoded"
+    },
+    {
+      "word": "0x5921a018",
+      "objdump": "rcwsswpp\tx24, x1, [x0]",
+      "objdump_status": "decoded"
+    }
+  ],
+  "sample_nyi_words": [
+    {
+      "word": "0x00200000",
+      "objdump": ".inst\t0x00200000 ; NYI",
+      "objdump_status": "nyi"
+    }
+  ],
+  "sample_undefined_words": [
+    {
+      "word": "0xaee00000",
+      "objdump": ".inst\t0xaee00000 ; undefined",
+      "objdump_status": "undefined"
+    },
+    {
+      "word": "0xaee069d0",
+      "objdump": ".inst\t0xaee069d0 ; undefined",
+      "objdump_status": "undefined"
+    },
+    {
+      "word": "0xaee4fb50",
+      "objdump": ".inst\t0xaee4fb50 ; undefined",
+      "objdump_status": "undefined"
+    },
+    {
+      "word": "0xffffffbb",
+      "objdump": ".inst\t0xffffffbb ; undefined",
+      "objdump_status": "undefined"
+    },
+    {
+      "word": "0xffffffff",
+      "objdump": ".inst\t0xffffffff ; undefined",
+      "objdump_status": "undefined"
+    },
+    {
+      "word": "0xaee00058",
+      "objdump": ".inst\t0xaee00058 ; undefined",
+      "objdump_status": "undefined"
+    },
+    {
+      "word": "0xaee00068",
+      "objdump": ".inst\t0xaee00068 ; undefined",
+      "objdump_status": "undefined"
+    },
+    {
+      "word": "0xaee00078",
+      "objdump": ".inst\t0xaee00078 ; undefined",
+      "objdump_status": "undefined"
+    },
+    {
+      "word": "0xaee00088",
+      "objdump": ".inst\t0xaee00088 ; undefined",
+      "objdump_status": "undefined"
+    },
+    {
+      "word": "0xaee0b830",
+      "objdump": ".inst\t0xaee0b830 ; undefined",
+      "objdump_status": "undefined"
+    },
+    {
+      "word": "0xaee03aa0",
+      "objdump": ".inst\t0xaee03aa0 ; undefined",
+      "objdump_status": "undefined"
+    },
+    {
+      "word": "0xaee000a8",
+      "objdump": ".inst\t0xaee000a8 ; undefined",
+      "objdump_status": "undefined"
+    },
+    {
+      "word": "0xaee01450",
+      "objdump": ".inst\t0xaee01450 ; undefined",
+      "objdump_status": "undefined"
+    },
+    {
+      "word": "0xaee071c0",
+      "objdump": ".inst\t0xaee071c0 ; undefined",
+      "objdump_status": "undefined"
+    },
+    {
+      "word": "0xaee000c8",
+      "objdump": ".inst\t0xaee000c8 ; undefined",
+      "objdump_status": "undefined"
+    },
+    {
+      "word": "0xaee0c090",
+      "objdump": ".inst\t0xaee0c090 ; undefined",
+      "objdump_status": "undefined"
+    },
+    {
+      "word": "0xaee05580",
+      "objdump": ".inst\t0xaee05580 ; undefined",
+      "objdump_status": "undefined"
+    },
+    {
+      "word": "0xaee000e8",
+      "objdump": ".inst\t0xaee000e8 ; undefined",
+      "objdump_status": "undefined"
+    },
+    {
+      "word": "0xaee0ca40",
+      "objdump": ".inst\t0xaee0ca40 ; undefined",
+      "objdump_status": "undefined"
+    },
+    {
+      "word": "0xaee01600",
+      "objdump": ".inst\t0xaee01600 ; undefined",
+      "objdump_status": "undefined"
+    }
+  ]
+}

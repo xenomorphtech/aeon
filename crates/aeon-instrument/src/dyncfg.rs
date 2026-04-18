@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 
 use aeon_jit::{JitCompiler, JitConfig, JitEntry, JitError};
-use aeonil::{Expr, Reg, Stmt};
+use aeonil::{BranchCond, Condition, Expr, Reg, Stmt};
 
 use crate::context::MemoryProvider;
 
@@ -104,6 +104,58 @@ fn classify_terminator(stmt: &Stmt) -> Option<BlockTerminator> {
         Stmt::Pair(a, b) => classify_terminator(b).or_else(|| classify_terminator(a)),
         _ => None,
     }
+}
+
+struct ManualLiftResult {
+    stmt: Stmt,
+    edges: Vec<u64>,
+}
+
+fn condition_from_nibble(cond: u32) -> Option<Condition> {
+    match cond {
+        0x0 => Some(Condition::EQ),
+        0x1 => Some(Condition::NE),
+        0x2 => Some(Condition::CS),
+        0x3 => Some(Condition::CC),
+        0x4 => Some(Condition::MI),
+        0x5 => Some(Condition::PL),
+        0x6 => Some(Condition::VS),
+        0x7 => Some(Condition::VC),
+        0x8 => Some(Condition::HI),
+        0x9 => Some(Condition::LS),
+        0xa => Some(Condition::GE),
+        0xb => Some(Condition::LT),
+        0xc => Some(Condition::GT),
+        0xd => Some(Condition::LE),
+        0xe => Some(Condition::AL),
+        0xf => Some(Condition::NV),
+        _ => None,
+    }
+}
+
+fn sign_extend_i64(value: u64, bits: u8) -> i64 {
+    let shift = 64 - bits;
+    ((value << shift) as i64) >> shift
+}
+
+fn manual_lift_if_known(word: u32, pc: u64, next_pc: u64) -> Option<ManualLiftResult> {
+    // FEAT_HBC / BC.cond: same imm19<<2 + condition layout as B.cond, but bit 4 is set.
+    if (word & 0xff00_0010) == 0x5400_0010 {
+        let cond = condition_from_nibble(word & 0xf)?;
+        let imm19 = ((word >> 5) & 0x7ffff) as u64;
+        let rel = sign_extend_i64(imm19, 19) << 2;
+        let target = ((pc as i64) + rel) as u64;
+        return Some(ManualLiftResult {
+            stmt: Stmt::CondBranch {
+                cond: BranchCond::Flag(cond),
+                target: Expr::Imm(target),
+                fallthrough: next_pc,
+            },
+            edges: vec![target, next_pc],
+        });
+    }
+
+    None
 }
 
 /// Transform Call and Ret statements so the JIT returns control to the engine
@@ -209,6 +261,23 @@ impl DynCfg {
             let insn = match bad64::decode(word, pc) {
                 Ok(i) => i,
                 Err(_) => {
+                    if let Some(result) = manual_lift_if_known(word, pc, pc + 4) {
+                        cfg_trace_line(&format!(
+                            "cfg manual_lift addr=0x{addr:x} pc=0x{pc:x} word=0x{word:08x}"
+                        ));
+                        let is_term = is_terminator(&result.stmt);
+                        if is_term {
+                            terminator = classify_terminator(&result.stmt);
+                        }
+                        stmts.push(result.stmt);
+                        total_bytes += 4;
+                        if is_term {
+                            edges = result.edges;
+                            break;
+                        }
+                        pc += 4;
+                        continue;
+                    }
                     cfg_trace_line(&format!("cfg decode_err addr=0x{addr:x} pc=0x{pc:x} word=0x{word:08x}"));
                     let msg = format!("invalid encoding 0x{:08x} at 0x{:x}", word, pc);
                     self.failed.insert(addr, msg);
