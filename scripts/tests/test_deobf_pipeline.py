@@ -520,5 +520,139 @@ class CmdSendTests(unittest.TestCase):
         self.assertIn("OPENROUTER_API_KEY", stderr.getvalue())
 
 
+# ---------------------------------------------------------------------------
+# Structured lifter + local simplifier
+# ---------------------------------------------------------------------------
+
+
+def _toy_target():
+    return dp.TARGETS["challenge_hash32_toy"]
+
+
+def _toy_fixture():
+    return json.loads(Path("/home/sdancer/aeon-ollvm-codex1/"
+                           "fixtures/challenge_hash32_toy_block.json").read_text())
+
+
+class LifterTests(unittest.TestCase):
+    def test_lifter_builds_structured_statements(self):
+        target = _toy_target()
+        result = dp.lift_to_symbolic(_toy_fixture(), target)
+        self.assertEqual(result.metadata["lifter_version"], 2)
+        self.assertEqual(result.metadata["instruction_count"], 7)
+        # Every non-ret statement should carry op/dst/args/width/node.
+        for s in result.statements:
+            if s.get("op") == "ret":
+                continue
+            self.assertIn("op", s)
+            self.assertIn("dst", s)
+            self.assertIn("args", s)
+            self.assertIn("node", s)
+
+    def test_register_map_aliases_inputs(self):
+        target = _toy_target()
+        result = dp.lift_to_symbolic(_toy_fixture(), target)
+        # Final expr must reference the named inputs, not raw register names.
+        self.assertIn("challenge_ascii16_lo_u64", result.final_expr)
+        self.assertIn("challenge_ascii16_hi_u64", result.final_expr)
+
+    def test_unknown_op_preserved_verbatim(self):
+        target = _toy_target()
+        block = {
+            "instructions": [
+                {"addr": "0x100", "il": "x = magic(y)", "op": "magic",
+                 "dst": "x", "args": ["y"], "width": 64},
+            ]
+        }
+        result = dp.lift_to_symbolic(block, target)
+        # Magic op survives in the statements list; final_expr falls back.
+        self.assertEqual(result.statements[0]["op"], "magic")
+
+
+class SimplifierTests(unittest.TestCase):
+    def test_constant_folding(self):
+        n = dp._bv_op("add",
+                      (dp._bv_const(3, 64), dp._bv_const(4, 64)), 64)
+        s = dp._fixed_point_simplify(n)
+        self.assertEqual(s.kind, "const")
+        self.assertEqual(s.value, 7)
+
+    def test_xor_with_zero_collapses(self):
+        x = dp._bv_var("x", 64)
+        n = dp._bv_op("xor", (x, dp._bv_const(0, 64)), 64)
+        self.assertEqual(repr(dp._fixed_point_simplify(n)), "x")
+
+    def test_x_xor_x_is_zero(self):
+        x = dp._bv_var("x", 64)
+        n = dp._bv_op("xor", (x, x), 64)
+        s = dp._fixed_point_simplify(n)
+        self.assertEqual(s.kind, "const")
+        self.assertEqual(s.value, 0)
+
+    def test_x_minus_x_is_zero(self):
+        x = dp._bv_var("x", 64)
+        n = dp._bv_op("sub", (x, x), 64)
+        s = dp._fixed_point_simplify(n)
+        self.assertEqual(s.kind, "const")
+        self.assertEqual(s.value, 0)
+
+    def test_add_then_subtract_same_cancels(self):
+        x = dp._bv_var("x", 64); y = dp._bv_var("y", 64)
+        n = dp._bv_op("sub", (dp._bv_op("add", (x, y), 64), y), 64)
+        self.assertEqual(repr(dp._fixed_point_simplify(n)), "x")
+
+    def test_mba_xor_plus_two_and_to_add(self):
+        # (x^y) + 2*(x&y) = x + y
+        x = dp._bv_var("x", 64); y = dp._bv_var("y", 64)
+        xy_xor = dp._bv_op("xor", (x, y), 64)
+        xy_and = dp._bv_op("and", (x, y), 64)
+        two_and = dp._bv_op("mul", (xy_and, dp._bv_const(2, 64)), 64)
+        n = dp._bv_op("add", (xy_xor, two_and), 64)
+        s = dp._fixed_point_simplify(n)
+        self.assertEqual(s.op, "add")
+        self.assertIn("x", repr(s))
+        self.assertIn("y", repr(s))
+        self.assertNotIn("xor", repr(s))
+
+    def test_mba_xor_plus_shl_and_to_add(self):
+        # (x^y) + ((x&y) << 1) = x + y  (shift form)
+        x = dp._bv_var("x", 64); y = dp._bv_var("y", 64)
+        xy_xor = dp._bv_op("xor", (x, y), 64)
+        xy_and = dp._bv_op("and", (x, y), 64)
+        shl_and = dp._bv_op("shl", (xy_and, dp._bv_const(1, 64)), 64)
+        n = dp._bv_op("add", (xy_xor, shl_and), 64)
+        self.assertEqual(dp._fixed_point_simplify(n).op, "add")
+
+    def test_mba_or_minus_and_to_xor(self):
+        x = dp._bv_var("x", 64); y = dp._bv_var("y", 64)
+        n = dp._bv_op("sub",
+                      (dp._bv_op("or", (x, y), 64),
+                       dp._bv_op("and", (x, y), 64)),
+                      64)
+        s = dp._fixed_point_simplify(n)
+        self.assertEqual(s.op, "xor")
+
+    def test_toy_fixture_simplifies_to_xor_truncated(self):
+        target = _toy_target()
+        result = dp.lift_to_symbolic(_toy_fixture(), target)
+        result = dp.simplify_local(result)
+        # Closed form is (trunc (xor x0 x1)) — no longer carries any add/sub
+        # MBA structure.
+        simp = result.metadata["simplified"]
+        self.assertIn("xor", simp)
+        self.assertNotIn("add", simp)
+        self.assertNotIn("sub", simp)
+        self.assertIn("trunc", simp)
+        self.assertTrue(result.metadata["fully_reduced"])
+
+    def test_emit_includes_simplified_expr(self):
+        target = _toy_target()
+        result = dp.lift_to_symbolic(_toy_fixture(), target)
+        result = dp.simplify_local(result)
+        req = dp.emit_llm_request(target, target.block_addrs[0], result)
+        self.assertIn("simplified_expr", req["symbolic"])
+        self.assertTrue(req["symbolic"]["fully_reduced_locally"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

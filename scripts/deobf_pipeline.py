@@ -322,83 +322,404 @@ class SymbolicResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-def lift_to_symbolic(il_block: dict[str, Any], target: Target) -> SymbolicResult:
-    """Produce a symbolic-IR representation of a lifted block.
+# -- Pure-Python symbolic IR (claripy-free) -------------------------------
 
-    The lifter is written as a pure-Python state machine so it runs without
-    claripy.  When claripy is available, `final_expr` is the claripy
-    `.__repr__()` of the deepest residual expression, otherwise it is a
-    compact prefix-notation string.
 
-    The lifter recognises the narrow subset of aeon IL ops we expect in the
-    NMSS corridor:
+@dataclass(frozen=True)
+class BV:
+    """A bit-vector expression node.
 
-        copy | load | store | add | sub | mul | and | or  | xor |
-        shl  | shr  | rotl  | rotr | neg | not | ite | eq  | ult |
-        sext | zext | trunc | phi | call | ret
-
-    Anything else is emitted verbatim; the LLM request carries the raw
-    instruction so the external simplifier can reason about it textually.
+    ``kind`` is one of {"var", "const", "op"}.
+    ``value`` is the constant integer for kind=="const", else ignored.
+    ``name`` is the identifier for kind=="var", else "".
+    ``op`` is the operator for kind=="op": one of OP_NAMES below.
+    ``args`` is the tuple of child BVs for kind=="op", else ().
+    ``width`` is the bit-width.
     """
-    claripy = _try_import_claripy()
+    kind: str
+    width: int
+    value: int = 0
+    name: str = ""
+    op: str = ""
+    args: tuple = ()
+
+    def __repr__(self) -> str:
+        if self.kind == "var":
+            return self.name
+        if self.kind == "const":
+            return f"0x{self.value & ((1 << self.width) - 1):x}u{self.width}"
+        return f"({self.op} {' '.join(repr(a) for a in self.args)})"
+
+
+OP_NAMES = {
+    "xor", "and", "or", "add", "sub", "mul",
+    "shl", "shr", "ashr", "rotl", "rotr",
+    "neg", "not",
+    "trunc", "zext", "sext", "copy",
+}
+
+
+def _bv_const(value: int, width: int) -> BV:
+    return BV(kind="const", width=width,
+              value=value & ((1 << width) - 1))
+
+
+def _bv_var(name: str, width: int) -> BV:
+    return BV(kind="var", width=width, name=name)
+
+
+def _bv_op(op: str, args: tuple[BV, ...], width: int) -> BV:
+    return BV(kind="op", width=width, op=op, args=args)
+
+
+def _parse_arg(token: str, env: dict[str, BV], default_width: int) -> BV:
+    """Resolve an IL argument token into a BV node.
+
+    Tokens can be:
+      * SSA name already in env ("x0", "t1", ...)
+      * Immediate "#1" or "0x1234" or "1234"  (decimal/hex)
+    """
+    t = token.strip()
+    if t.startswith("#"):
+        t = t[1:]
+    if t in env:
+        return env[t]
+    # Numeric literal — accept hex (0x prefix), decimal, or signed.
+    try:
+        if t.lower().startswith("0x"):
+            v = int(t, 16)
+        else:
+            v = int(t)
+    except ValueError:
+        # Unknown identifier — surface as a fresh variable so the lifter
+        # never silently drops information.
+        return _bv_var(t, default_width)
+    return _bv_const(v, default_width)
+
+
+def lift_to_symbolic(il_block: dict[str, Any], target: Target) -> SymbolicResult:
+    """Build a structured symbolic IR from an aeon IL block.
+
+    The lifter consumes the fixture's structured ``op/dst/args/width`` fields
+    (preferred) and falls back to preserving the raw ``il`` string when those
+    fields are absent.  Output is a pure-Python expression tree (see ``BV``)
+    keyed by SSA name plus the original instruction list.
+
+    Recognised ops: copy, add, sub, mul, and, or, xor, shl, shr, ashr, rotl,
+    rotr, neg, not, trunc, zext, sext, ret.  Unknown ops are preserved
+    verbatim.
+    """
     sym_inputs: list[dict[str, Any]] = [
         {"name": i.name, "width_bits": i.width_bits} for i in target.inputs
     ]
+    register_map = dict(il_block.get("register_map", {}))
+
+    # Seed SSA env with declared target inputs.
+    env: dict[str, BV] = {i.name: _bv_var(i.name, i.width_bits)
+                          for i in target.inputs}
+    # Pre-populate any inputs that the IL block aliases via register_map
+    # (e.g. fixture register x0 → challenge_ascii16_lo_u64 input).
+    for reg, mapped in register_map.items():
+        if mapped in env:
+            env[reg] = env[mapped]
+
     statements: list[dict[str, Any]] = []
-    register_map: dict[str, str] = {}
-
-    # Seed SSA env with the declared target inputs (they're callee-ABI regs).
-    env: dict[str, Any] = {}
-    if claripy is not None:
-        for i in target.inputs:
-            env[i.name] = claripy.BVS(i.name, i.width_bits)
-
+    final_node: BV | None = None
     for instr in il_block.get("instructions", []):
-        il = instr.get("il", "")
         addr = instr.get("addr", "?")
-        statements.append({"addr": addr, "il": il})
-        # Placeholder: a real lifter parses `il` into op/dst/args and updates
-        # env + statements with structured entries.  The skeleton keeps the
-        # raw IL string so stage 4 can still emit a useful payload.
+        op = instr.get("op")
+        dst = instr.get("dst")
+        raw_args = instr.get("args", []) or []
+        width = int(instr.get("width", target.output.width_bits) or
+                    target.output.width_bits)
 
-    if claripy is not None and env:
-        final = next(iter(env.values()))
-        final_repr = repr(final)
-    else:
-        final_repr = "(no claripy — raw IL preserved in `statements`)"
+        if op == "ret":
+            # Return value is whichever SSA name was passed.
+            ret_name = raw_args[0] if raw_args else None
+            if ret_name and ret_name in env:
+                final_node = env[ret_name]
+            statements.append({"addr": addr, "op": "ret",
+                               "dst": None, "args": list(raw_args),
+                               "width": width})
+            continue
+
+        if op in OP_NAMES and dst:
+            arg_nodes = tuple(_parse_arg(a, env, width) for a in raw_args)
+            node = _bv_op(op, arg_nodes, width)
+            env[dst] = node
+            statements.append({"addr": addr, "op": op, "dst": dst,
+                               "args": [str(a) for a in raw_args],
+                               "width": width,
+                               "node": repr(node)})
+        else:
+            # Unknown op or no dst — preserve verbatim so emit can still ship.
+            statements.append({"addr": addr, "il": instr.get("il", ""),
+                               "op": op, "dst": dst,
+                               "args": list(raw_args), "width": width})
+
+    if final_node is None:
+        # No explicit ret — final_node is the last assignment if available.
+        for s in reversed(statements):
+            if s.get("dst") and s["dst"] in env:
+                final_node = env[s["dst"]]
+                break
+
+    final_repr = repr(final_node) if final_node is not None else "<no expression>"
 
     return SymbolicResult(
         symbolic_inputs=sym_inputs,
         statements=statements,
         final_expr=final_repr,
         register_map=register_map,
-        metadata={"used_claripy": claripy is not None,
-                  "instruction_count": len(statements)},
+        metadata={
+            "used_claripy": False,
+            "instruction_count": len(statements),
+            "final_node": final_repr,
+            "lifter_version": 2,
+        },
     )
 
 
 # ---------------------------------------------------------------------------
-# Stage 3 — cheap local simplification
+# Stage 3 — cheap local simplification (constant folding, identities, MBA)
 # ---------------------------------------------------------------------------
 
 
-def simplify_local(result: SymbolicResult) -> SymbolicResult:
-    """Apply cheap, purely-local rewrites.
+def _mask(width: int) -> int:
+    return (1 << width) - 1
 
-    When claripy is present, we call `.simplify()` on the final expression.
-    Otherwise we return the result unchanged — the LLM stage will handle
-    heavy lifting.  Future: add target-agnostic MBA-reduction passes here
-    (e.g. replace `x + y - (x ^ y)` with `2·(x & y)`).
+
+def _eval_const_op(op: str, args: tuple[BV, ...], width: int) -> int | None:
+    """Evaluate an op whose args are all constants; return the result int."""
+    m = _mask(width)
+    vals = [a.value & _mask(a.width) for a in args]
+    if op == "add":  return (vals[0] + vals[1]) & m
+    if op == "sub":  return (vals[0] - vals[1]) & m
+    if op == "mul":  return (vals[0] * vals[1]) & m
+    if op == "and":  return (vals[0] & vals[1]) & m
+    if op == "or":   return (vals[0] | vals[1]) & m
+    if op == "xor":  return (vals[0] ^ vals[1]) & m
+    if op == "shl":  return (vals[0] << vals[1]) & m
+    if op == "shr":  return (vals[0] >> vals[1]) & m
+    if op == "neg":  return (-vals[0]) & m
+    if op == "not":  return (~vals[0]) & m
+    if op == "copy": return vals[0] & m
+    if op == "trunc": return vals[0] & m
+    if op == "zext": return vals[0] & m
+    return None
+
+
+def _is_const(n: BV, value: int | None = None) -> bool:
+    if n.kind != "const":
+        return False
+    if value is None:
+        return True
+    return (n.value & _mask(n.width)) == (value & _mask(n.width))
+
+
+def _simplify_node(n: BV) -> BV:
+    """Bottom-up simplification of a single BV node.
+
+    Applies (in order):
+      1. recursive simplify of children
+      2. constant folding
+      3. algebraic identities (x+0, x-x, x^x, x&0, x|0, …)
+      4. structural cancellation: (a OP b) INV-OP b = a for add/sub, xor/xor
+      5. MBA contraction:  (x^y) + 2·(x&y)        →  x + y
+                           (x^y) + (x&y) + (x&y) →  x + y
+                           (x|y) - (x&y)         →  x ^ y
+                           (x+y) - (x&y)         →  x | y
+      6. trunc collapse: trunc(N, e) where e.width <= N → zext to N
     """
-    claripy = _try_import_claripy()
-    if claripy is not None:
-        try:
-            import claripy as _c  # noqa: F401  (reserved for real lift)
-            # result.final_expr is a string repr here; a real impl would
-            # carry the live claripy BV and call .simplify() on it.
-        except Exception:
-            pass
+    if n.kind != "op":
+        return n
+
+    args = tuple(_simplify_node(a) for a in n.args)
+    op, w = n.op, n.width
+
+    # 2. constant folding
+    if all(a.kind == "const" for a in args):
+        v = _eval_const_op(op, args, w)
+        if v is not None:
+            return _bv_const(v, w)
+
+    # 3. algebraic identities
+    if op in ("add", "sub", "or", "xor") and len(args) == 2:
+        a, b = args
+        if op == "add" and _is_const(b, 0): return a
+        if op == "add" and _is_const(a, 0): return b
+        if op == "sub" and _is_const(b, 0): return a
+        if op == "sub" and a == b:          return _bv_const(0, w)
+        if op == "or"  and _is_const(b, 0): return a
+        if op == "or"  and _is_const(a, 0): return b
+        if op == "xor" and _is_const(b, 0): return a
+        if op == "xor" and _is_const(a, 0): return b
+        if op == "xor" and a == b:          return _bv_const(0, w)
+    if op == "and" and len(args) == 2:
+        a, b = args
+        if _is_const(b, 0): return _bv_const(0, w)
+        if _is_const(a, 0): return _bv_const(0, w)
+        if _is_const(b, _mask(w)): return a
+        if _is_const(a, _mask(w)): return b
+        if a == b: return a
+    if op in ("shl", "shr") and len(args) == 2 and _is_const(args[1], 0):
+        return args[0]
+
+    # 4. structural cancellation: (a + b) - b = a, (a - b) + b = a
+    if op == "sub" and len(args) == 2:
+        a, b = args
+        if a.kind == "op" and a.op == "add" and len(a.args) == 2:
+            x, y = a.args
+            if y == b: return x
+            if x == b: return y
+        if a.kind == "op" and a.op == "sub" and len(a.args) == 2:
+            x, y = a.args
+            if y == b: return _bv_op("sub", (x, _bv_op("mul",
+                                                        (b, _bv_const(2, w)),
+                                                        w)), w)
+    if op == "add" and len(args) == 2:
+        a, b = args
+        if a.kind == "op" and a.op == "sub" and len(a.args) == 2:
+            x, y = a.args
+            if y == b: return x
+
+    # 5. MBA contractions
+    #    (x^y) + 2·(x&y) → x + y      (and the symmetric form)
+    #    (x^y) + (x&y) + (x&y) → same
+    if op == "add" and len(args) == 2:
+        a, b = args
+        for lhs, rhs in ((a, b), (b, a)):
+            if (lhs.kind == "op" and lhs.op == "xor"
+                and rhs.kind == "op" and rhs.op == "mul"
+                and len(rhs.args) == 2
+                and any(_is_const(c, 2) for c in rhs.args)):
+                xy = lhs.args
+                # find the AND child of mul
+                non_const = [c for c in rhs.args if not _is_const(c, 2)]
+                if len(non_const) == 1:
+                    inner = non_const[0]
+                    if (inner.kind == "op" and inner.op == "and"
+                        and tuple(sorted([repr(x) for x in inner.args]))
+                        == tuple(sorted([repr(x) for x in xy]))):
+                        return _bv_op("add", xy, w)
+            # Form: (x^y) + (x&y << 1)
+            if (lhs.kind == "op" and lhs.op == "xor"
+                and rhs.kind == "op" and rhs.op == "shl"
+                and len(rhs.args) == 2 and _is_const(rhs.args[1], 1)):
+                xy = lhs.args
+                inner = rhs.args[0]
+                if (inner.kind == "op" and inner.op == "and"
+                    and tuple(sorted([repr(x) for x in inner.args]))
+                    == tuple(sorted([repr(x) for x in xy]))):
+                    return _bv_op("add", xy, w)
+
+    # (x|y) - (x&y) → x ^ y;  (x+y) - (x&y) → x|y
+    # (x+y) - 2·(x&y) → x ^ y ;  (x+y) - ((x&y)<<1) → x ^ y
+    if op == "sub" and len(args) == 2:
+        a, b = args
+        if (a.kind == "op" and a.op == "or"
+            and b.kind == "op" and b.op == "and"
+            and tuple(sorted([repr(x) for x in a.args]))
+                == tuple(sorted([repr(x) for x in b.args]))):
+            return _bv_op("xor", a.args, w)
+        if (a.kind == "op" and a.op == "add"
+            and b.kind == "op" and b.op == "and"
+            and tuple(sorted([repr(x) for x in a.args]))
+                == tuple(sorted([repr(x) for x in b.args]))):
+            return _bv_op("or", a.args, w)
+
+        # Helper: does `b` denote 2·(x&y) where {x,y} matches a's args?
+        if a.kind == "op" and a.op == "add":
+            ab_keys = tuple(sorted([repr(x) for x in a.args]))
+            inner = None
+            if (b.kind == "op" and b.op == "shl" and len(b.args) == 2
+                and _is_const(b.args[1], 1)):
+                inner = b.args[0]
+            elif (b.kind == "op" and b.op == "mul" and len(b.args) == 2
+                  and any(_is_const(c, 2) for c in b.args)):
+                inner = next((c for c in b.args if not _is_const(c, 2)), None)
+            if (inner is not None
+                and inner.kind == "op" and inner.op == "and"
+                and tuple(sorted([repr(x) for x in inner.args])) == ab_keys):
+                return _bv_op("xor", a.args, w)
+
+    # 6. trunc collapse: trunc(N, e) where e is already N-bit-wide
+    if op == "trunc" and len(args) == 1 and args[0].width <= w:
+        return args[0]
+
+    # No rewrite applied — rebuild with simplified children.
+    if args == n.args:
+        return n
+    return _bv_op(op, args, w)
+
+
+def _fixed_point_simplify(node: BV, max_iter: int = 16) -> BV:
+    cur = node
+    for _ in range(max_iter):
+        nxt = _simplify_node(cur)
+        if nxt == cur:
+            return nxt
+        cur = nxt
+    return cur
+
+
+def simplify_local(result: SymbolicResult) -> SymbolicResult:
+    """Apply local rewrites: constant folding, identities, MBA contractions.
+
+    Reads ``metadata['final_node']`` (the IR repr) — the IR itself is in the
+    SSA env that the lifter no longer carries forward.  We re-parse the
+    final repr structure by walking the statements list to rebuild the
+    expression tree, then run rewrites to fixed-point.
+
+    NOTE: To keep the data model simple and serialisable, we attach the
+    simplified node's repr to ``metadata['simplified']``.  Downstream stages
+    (emit, verify) can use this to short-circuit the LLM call when the local
+    pass succeeds.
+    """
+    # Rebuild the SSA env from the structured statements list.
+    env: dict[str, BV] = {}
+    for s in result.symbolic_inputs:
+        env[s["name"]] = _bv_var(s["name"], s["width_bits"])
+    final_node: BV | None = None
+    for s in result.statements:
+        op = s.get("op")
+        dst = s.get("dst")
+        if op == "ret":
+            ret_args = s.get("args", [])
+            if ret_args and ret_args[0] in env:
+                final_node = env[ret_args[0]]
+            continue
+        if op in OP_NAMES and dst:
+            args = tuple(_parse_arg(a, env, s.get("width",
+                                                  result.symbolic_inputs[0]["width_bits"]))
+                         for a in s.get("args", []))
+            env[dst] = _bv_op(op, args, int(s.get("width", 64)))
+            final_node = env[dst]
+
+    if final_node is None:
+        result.metadata["simplified"] = "<no expression>"
+        result.metadata["simplified_via"] = "noop"
+        return result
+
+    simplified = _fixed_point_simplify(final_node)
+    result.metadata["simplified"] = repr(simplified)
+    result.metadata["simplified_via"] = "local-passes"
+    result.metadata["fully_reduced"] = simplified.kind != "op" or _expr_is_pure(simplified)
     return result
+
+
+def _expr_is_pure(node: BV) -> bool:
+    """An expression is 'pure' if it contains no nested ops of the same kind
+    that would suggest a still-obfuscated form (rough heuristic for whether
+    the local passes were sufficient)."""
+    if node.kind != "op":
+        return True
+    # If there are MBA-suggesting nested patterns, mark impure.
+    if node.op in ("add", "sub", "mul"):
+        for a in node.args:
+            if a.kind == "op" and a.op in ("and", "or"):
+                return False
+    return all(_expr_is_pure(a) for a in node.args)
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +748,10 @@ def emit_llm_request(target: Target, block_addr: int,
             "inputs": lifted.symbolic_inputs,
             "statements": lifted.statements,
             "final_expr": lifted.final_expr,
+            "simplified_expr": lifted.metadata.get("simplified",
+                                                   lifted.final_expr),
+            "fully_reduced_locally": bool(
+                lifted.metadata.get("fully_reduced", False)),
             "register_map": lifted.register_map,
             "metadata": lifted.metadata,
         },
