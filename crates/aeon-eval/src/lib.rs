@@ -156,6 +156,37 @@ pub struct RunMetrics {
     pub metadata: Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorpusManifest {
+    pub id: String,
+    pub description: Option<String>,
+    pub binaries: Vec<CorpusEntry>,
+    pub tasks: Vec<TaskSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskScore {
+    pub task_id: String,
+    pub run_id: String,
+    pub passed: bool,
+    pub score: f64,
+    pub outcome_kind: String,
+    pub details: Value,
+    pub duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchmarkReport {
+    pub manifest_id: String,
+    pub total_tasks: usize,
+    pub passed: usize,
+    pub failed: usize,
+    pub pass_rate: f64,
+    pub total_duration_ms: u64,
+    pub scores: Vec<TaskScore>,
+    pub timestamp: String,
+}
+
 impl EvaluationRun {
     pub fn evidence_map(&self) -> std::collections::HashMap<&str, &EvidenceItem> {
         self.evidence
@@ -178,10 +209,82 @@ impl EvaluationRun {
     }
 }
 
+pub fn load_corpus_manifest(path: &str) -> Result<CorpusManifest, Box<dyn std::error::Error>> {
+    let raw = fs::read(path)?;
+    Ok(serde_json::from_slice(&raw)?)
+}
+
+pub fn verify_expected_outcome(expected: &ExpectedOutcome, run: &EvaluationRun) -> bool {
+    match expected {
+        ExpectedOutcome::ExactJson(v) => {
+            run.evidence.iter().any(|e| &e.value == v)
+        }
+        ExpectedOutcome::ContainsStrings(strings) => {
+            let serialized = serde_json::to_string(&serde_json::to_value(run).unwrap_or_default())
+                .unwrap_or_default();
+            strings.iter().all(|s| serialized.contains(s.as_str()))
+        }
+        ExpectedOutcome::AddressSet(addrs) => {
+            let serialized = serde_json::to_string(&serde_json::to_value(run).unwrap_or_default())
+                .unwrap_or_default();
+            addrs.iter().all(|a| serialized.contains(a.as_str()))
+        }
+        ExpectedOutcome::StructuredClaim { required_evidence_kinds, .. } => {
+            let present_kinds: Vec<&EvidenceKind> = run.evidence.iter()
+                .map(|e| &e.kind).collect();
+            required_evidence_kinds.iter()
+                .all(|required| present_kinds.contains(&required))
+        }
+        ExpectedOutcome::Custom(_) => run.outcome == RunOutcome::Passed,
+    }
+}
+
+pub fn score_run(run: &EvaluationRun, task: &TaskSpec) -> TaskScore {
+    let passed = verify_expected_outcome(&task.expected_outcome, run);
+    let outcome_kind = match &task.expected_outcome {
+        ExpectedOutcome::ExactJson(_) => "exact_json",
+        ExpectedOutcome::ContainsStrings(_) => "contains_strings",
+        ExpectedOutcome::AddressSet(_) => "address_set",
+        ExpectedOutcome::StructuredClaim { .. } => "structured_claim",
+        ExpectedOutcome::Custom(_) => "custom",
+    };
+    TaskScore {
+        task_id: task.id.clone(),
+        run_id: run.run_id.clone(),
+        passed,
+        score: if passed { 1.0 } else { 0.0 },
+        outcome_kind: outcome_kind.to_string(),
+        details: json!({
+            "run_outcome": run.outcome,
+            "claims_count": run.claims.len(),
+            "evidence_count": run.evidence.len(),
+            "missing_evidence": run.claims_with_missing_evidence().len(),
+        }),
+        duration_ms: run.metrics.duration_ms,
+    }
+}
+
+pub fn aggregate_benchmark(manifest_id: &str, scores: Vec<TaskScore>) -> BenchmarkReport {
+    let passed = scores.iter().filter(|s| s.passed).count();
+    let total = scores.len();
+    let total_duration_ms = scores.iter().filter_map(|s| s.duration_ms).sum();
+    BenchmarkReport {
+        manifest_id: manifest_id.to_string(),
+        total_tasks: total,
+        passed,
+        failed: total - passed,
+        pass_rate: if total == 0 { 0.0 } else { passed as f64 / total as f64 },
+        total_duration_ms,
+        scores,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    }
+}
+
 pub fn evaluate_constructor_object_layout(
     binary_path: &str,
     addr: u64,
 ) -> Result<EvaluationRun, Box<dyn std::error::Error>> {
+    let start = std::time::Instant::now();
     let session = aeon::AeonSession::load(binary_path)?;
     let layout = session
         .analyze_constructor_object_layout(addr)
@@ -207,7 +310,7 @@ pub fn evaluate_constructor_object_layout(
         )
     };
 
-    Ok(EvaluationRun {
+    let mut run = EvaluationRun {
         run_id: format!("constructor-layout:{}:0x{:x}", binary_path, addr),
         task_id: format!("recover-constructor-object-layout:0x{:x}", addr),
         agent: AgentDescriptor {
@@ -248,7 +351,9 @@ pub fn evaluate_constructor_object_layout(
             tool_calls: 1,
             metadata: Value::Null,
         },
-    })
+    };
+    run.metrics.duration_ms = Some(start.elapsed().as_millis() as u64);
+    Ok(run)
 }
 
 struct FunctionArtifacts {
@@ -266,6 +371,7 @@ pub fn evaluate_reduced_il_golden(
     addr: u64,
     golden_path: &str,
 ) -> Result<EvaluationRun, Box<dyn std::error::Error>> {
+    let start = std::time::Instant::now();
     let artifacts = load_function_artifacts(binary_path, addr)?;
     let reduced_value = normalize_cfg_artifact(
         artifacts.function_addr,
@@ -331,7 +437,7 @@ pub fn evaluate_reduced_il_golden(
         evidence_ids.push("ev-golden-diff".to_string());
     }
 
-    Ok(EvaluationRun {
+    let mut run = EvaluationRun {
         run_id: format!(
             "reduced-il-golden:{}:0x{:x}",
             binary_path, artifacts.function_addr
@@ -352,7 +458,7 @@ pub fn evaluate_reduced_il_golden(
                     artifacts.function_addr
                 )
             },
-            confidence: Some(if matches { 0.99 } else { 0.1 }),
+            confidence: Some(if matches { 0.99 } else { 0.1}),
             evidence_ids,
             metadata: json!({
                 "binary_sha256": artifacts.binary_sha256,
@@ -372,13 +478,16 @@ pub fn evaluate_reduced_il_golden(
                 "golden_path": golden_path,
             }),
         },
-    })
+    };
+    run.metrics.duration_ms = Some(start.elapsed().as_millis() as u64);
+    Ok(run)
 }
 
 pub fn evaluate_reduction_metrics(
     binary_path: &str,
     addr: u64,
 ) -> Result<EvaluationRun, Box<dyn std::error::Error>> {
+    let start = std::time::Instant::now();
     let artifacts = load_function_artifacts(binary_path, addr)?;
     let metrics_value = reduction_metrics_value(&artifacts.metrics);
     let validation_value = validation_report_value(&artifacts.validation);
@@ -388,7 +497,7 @@ pub fn evaluate_reduction_metrics(
         RunOutcome::Failed
     };
 
-    Ok(EvaluationRun {
+    let mut run = EvaluationRun {
         run_id: format!(
             "reduction-metrics:{}:0x{:x}",
             binary_path, artifacts.function_addr
@@ -455,7 +564,169 @@ pub fn evaluate_reduction_metrics(
                 "ssa_validation": validation_value,
             }),
         },
-    })
+    };
+    run.metrics.duration_ms = Some(start.elapsed().as_millis() as u64);
+    Ok(run)
+}
+
+pub fn evaluate_function_skeleton(
+    binary_path: &str,
+    addr: u64,
+) -> Result<EvaluationRun, Box<dyn std::error::Error>> {
+    let start = std::time::Instant::now();
+    let session = AeonSession::load(binary_path)?;
+    let skeleton = session
+        .get_function_skeleton(addr)
+        .map_err(std::io::Error::other)?;
+    let skeleton_value = serde_json::to_value(&skeleton)?;
+
+    let mut run = EvaluationRun {
+        run_id: format!("function-skeleton:{}:0x{:x}", binary_path, addr),
+        task_id: format!("classify-behavior:0x{:x}", addr),
+        agent: agent_descriptor(),
+        outcome: RunOutcome::Passed,
+        claims: vec![Claim {
+            id: "claim-function-skeleton".to_string(),
+            statement: format!("Function skeleton recovered for 0x{:x}", addr),
+            confidence: Some(0.95),
+            evidence_ids: vec!["ev-function-skeleton".to_string()],
+            metadata: json!({}),
+        }],
+        evidence: vec![EvidenceItem {
+            id: "ev-function-skeleton".to_string(),
+            kind: EvidenceKind::JsonArtifact,
+            label: format!("function_skeleton@0x{:x}", addr),
+            value: skeleton_value,
+            provenance: vec![ProvenanceRef {
+                tool: "get_function_skeleton".to_string(),
+                locator: format!("{}:0x{:x}", binary_path, addr),
+            }],
+        }],
+        metrics: RunMetrics {
+            duration_ms: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+            tool_calls: 1,
+            metadata: Value::Null,
+        },
+    };
+    run.metrics.duration_ms = Some(start.elapsed().as_millis() as u64);
+    Ok(run)
+}
+
+pub fn evaluate_datalog_query(
+    binary_path: &str,
+    addr: u64,
+    query_name: &str,
+) -> Result<EvaluationRun, Box<dyn std::error::Error>> {
+    let start = std::time::Instant::now();
+    let session = AeonSession::load(binary_path)?;
+    let result = session
+        .execute_datalog(query_name, addr, None, None)
+        .map_err(std::io::Error::other)?;
+    let result_value = serde_json::to_value(&result)?;
+
+    let mut run = EvaluationRun {
+        run_id: format!("datalog-query:{}:0x{:x}:{}", binary_path, addr, query_name),
+        task_id: format!("datalog-query:0x{:x}:{}", addr, query_name),
+        agent: agent_descriptor(),
+        outcome: RunOutcome::Passed,
+        claims: vec![Claim {
+            id: "claim-datalog-query".to_string(),
+            statement: format!("Datalog query '{}' executed for 0x{:x}", query_name, addr),
+            confidence: Some(0.95),
+            evidence_ids: vec!["ev-datalog-result".to_string()],
+            metadata: json!({"query": query_name}),
+        }],
+        evidence: vec![EvidenceItem {
+            id: "ev-datalog-result".to_string(),
+            kind: EvidenceKind::DatalogResult,
+            label: format!("datalog_{}@0x{:x}", query_name, addr),
+            value: result_value,
+            provenance: vec![ProvenanceRef {
+                tool: "execute_datalog".to_string(),
+                locator: format!("{}:0x{:x}:{}", binary_path, addr, query_name),
+            }],
+        }],
+        metrics: RunMetrics {
+            duration_ms: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+            tool_calls: 1,
+            metadata: Value::Null,
+        },
+    };
+    run.metrics.duration_ms = Some(start.elapsed().as_millis() as u64);
+    Ok(run)
+}
+
+pub fn evaluate_emulation_snippet(
+    binary_path: &str,
+    start_addr: u64,
+    end_addr: u64,
+    expected_regs: &HashMap<String, u64>,
+) -> Result<EvaluationRun, Box<dyn std::error::Error>> {
+    let start = std::time::Instant::now();
+    let session = AeonSession::load(binary_path)?;
+    let result = session
+        .emulate_snippet(start_addr, end_addr, HashMap::new(), HashMap::new(), 1000)
+        .map_err(std::io::Error::other)?;
+    let result_value = serde_json::to_value(&result)?;
+
+    let passed = if let Some(final_regs) = result_value.get("final_registers").and_then(|v| v.as_object()) {
+        expected_regs.iter().all(|(reg_name, expected_val)| {
+            final_regs.get(reg_name)
+                .and_then(|v| v.as_str())
+                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+                .map(|actual| actual == *expected_val)
+                .unwrap_or(false)
+        })
+    } else {
+        false
+    };
+
+    let mut run = EvaluationRun {
+        run_id: format!("emulation-snippet:{}:0x{:x}-0x{:x}", binary_path, start_addr, end_addr),
+        task_id: format!("emulation-snippet:0x{:x}-0x{:x}", start_addr, end_addr),
+        agent: agent_descriptor(),
+        outcome: if passed { RunOutcome::Passed } else { RunOutcome::Failed },
+        claims: vec![Claim {
+            id: "claim-emulation".to_string(),
+            statement: format!("Emulation snippet 0x{:x}-0x{:x} produces expected registers", start_addr, end_addr),
+            confidence: Some(if passed { 0.95 } else { 0.1 }),
+            evidence_ids: vec!["ev-emulation-trace".to_string()],
+            metadata: json!({"expected_registers": expected_regs}),
+        }],
+        evidence: vec![EvidenceItem {
+            id: "ev-emulation-trace".to_string(),
+            kind: EvidenceKind::EmulationTrace,
+            label: format!("emulation_0x{:x}_0x{:x}", start_addr, end_addr),
+            value: result_value,
+            provenance: vec![ProvenanceRef {
+                tool: "emulate_snippet_native".to_string(),
+                locator: format!("{}:0x{:x}-0x{:x}", binary_path, start_addr, end_addr),
+            }],
+        }],
+        metrics: RunMetrics {
+            duration_ms: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+            tool_calls: 1,
+            metadata: Value::Null,
+        },
+    };
+    run.metrics.duration_ms = Some(start.elapsed().as_millis() as u64);
+    Ok(run)
+}
+
+fn parse_hex_from_metadata(metadata: &Value, key: &str) -> Result<u64, Box<dyn std::error::Error>> {
+    let s = metadata[key].as_str()
+        .ok_or_else(|| format!("missing '{}' in task metadata", key))?;
+    parse_hex_u64(s).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+}
+
+fn parse_hex_u64(s: &str) -> Result<u64, std::num::ParseIntError> {
+    u64::from_str_radix(s.trim_start_matches("0x").trim_start_matches("0X"), 16)
 }
 
 fn agent_descriptor() -> AgentDescriptor {
@@ -857,6 +1128,65 @@ fn materialize_optional_golden_fields(mut expected: Value, actual: &Value) -> Va
     expected
 }
 
+pub fn run_corpus(
+    manifest: &CorpusManifest,
+    binary_base: &std::path::Path,
+) -> Vec<(String, Result<EvaluationRun, String>)> {
+    manifest.tasks.iter().map(|task| {
+        let entry = manifest.binaries.iter()
+            .find(|b| b.id == task.corpus_entry_id);
+        let binary_path = entry
+            .map(|e| binary_base.join(&e.path).to_string_lossy().into_owned())
+            .unwrap_or_else(|| task.corpus_entry_id.clone());
+
+        let result = run_task(task, &binary_path)
+            .map_err(|e| e.to_string());
+        (task.id.clone(), result)
+    }).collect()
+}
+
+fn run_task(task: &TaskSpec, binary_path: &str)
+    -> Result<EvaluationRun, Box<dyn std::error::Error>>
+{
+    let mut run = match &task.kind {
+        TaskKind::RecoverConstructorObjectLayout => {
+            let addr = parse_hex_from_metadata(&task.metadata, "addr")?;
+            evaluate_constructor_object_layout(binary_path, addr)?
+        }
+        TaskKind::ProduceEvidenceBundle => {
+            let addr = parse_hex_from_metadata(&task.metadata, "addr")?;
+            let query = task.metadata["query"].as_str()
+                .ok_or("missing query in metadata")?;
+            evaluate_datalog_query(binary_path, addr, query)?
+        }
+        TaskKind::ClassifyBehavior => {
+            let addr = parse_hex_from_metadata(&task.metadata, "addr")?;
+            evaluate_function_skeleton(binary_path, addr)?
+        }
+        TaskKind::ExtractDecryptedStrings => {
+            let start_addr = parse_hex_from_metadata(&task.metadata, "start_addr")?;
+            let end_addr = parse_hex_from_metadata(&task.metadata, "end_addr")?;
+            let expected_regs: HashMap<String, u64> = task.metadata["expected_registers"]
+                .as_object()
+                .map(|m| m.iter().filter_map(|(k, v)| {
+                    v.as_str().and_then(|s| parse_hex_u64(s).ok())
+                        .map(|n| (k.clone(), n))
+                }).collect())
+                .unwrap_or_default();
+            evaluate_emulation_snippet(binary_path, start_addr, end_addr, &expected_regs)?
+        }
+        _ => {
+            let addr = parse_hex_from_metadata(&task.metadata, "addr")?;
+            evaluate_constructor_object_layout(binary_path, addr)?
+        }
+    };
+
+    if run.metrics.duration_ms.is_none() {
+        run.metrics.duration_ms = Some(0);
+    }
+    Ok(run)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1165,5 +1495,246 @@ mod tests {
 
     fn read_json(path: PathBuf) -> Value {
         serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn score_run_address_set_passes() {
+        let task = TaskSpec {
+            id: "task-1".to_string(),
+            corpus_entry_id: "bin-1".to_string(),
+            kind: TaskKind::FindConfigLoader,
+            prompt: "test".to_string(),
+            expected_outcome: ExpectedOutcome::AddressSet(vec!["0x401000".to_string()]),
+            metadata: Value::Null,
+        };
+        let run = EvaluationRun {
+            run_id: "run-1".to_string(),
+            task_id: "task-1".to_string(),
+            agent: AgentDescriptor {
+                name: "aeon".to_string(),
+                model: None,
+                version: None,
+            },
+            outcome: RunOutcome::Passed,
+            claims: vec![Claim {
+                id: "c1".to_string(),
+                statement: "Found function at 0x401000".to_string(),
+                confidence: Some(0.9),
+                evidence_ids: vec!["e1".to_string()],
+                metadata: Value::Null,
+            }],
+            evidence: vec![EvidenceItem {
+                id: "e1".to_string(),
+                kind: EvidenceKind::Address,
+                label: "addr".to_string(),
+                value: json!({"value": "0x401000"}),
+                provenance: vec![],
+            }],
+            metrics: RunMetrics {
+                duration_ms: Some(100),
+                prompt_tokens: None,
+                completion_tokens: None,
+                tool_calls: 1,
+                metadata: Value::Null,
+            },
+        };
+        let score = score_run(&run, &task);
+        assert!(score.passed);
+        assert_eq!(score.score, 1.0);
+    }
+
+    #[test]
+    fn score_run_address_set_fails() {
+        let task = TaskSpec {
+            id: "task-1".to_string(),
+            corpus_entry_id: "bin-1".to_string(),
+            kind: TaskKind::FindConfigLoader,
+            prompt: "test".to_string(),
+            expected_outcome: ExpectedOutcome::AddressSet(vec!["0x999999".to_string()]),
+            metadata: Value::Null,
+        };
+        let run = EvaluationRun {
+            run_id: "run-1".to_string(),
+            task_id: "task-1".to_string(),
+            agent: AgentDescriptor {
+                name: "aeon".to_string(),
+                model: None,
+                version: None,
+            },
+            outcome: RunOutcome::Passed,
+            claims: vec![],
+            evidence: vec![],
+            metrics: RunMetrics {
+                duration_ms: Some(100),
+                prompt_tokens: None,
+                completion_tokens: None,
+                tool_calls: 1,
+                metadata: Value::Null,
+            },
+        };
+        let score = score_run(&run, &task);
+        assert!(!score.passed);
+        assert_eq!(score.score, 0.0);
+    }
+
+    #[test]
+    fn score_run_contains_strings_passes() {
+        let task = TaskSpec {
+            id: "task-1".to_string(),
+            corpus_entry_id: "bin-1".to_string(),
+            kind: TaskKind::ExtractDecryptedStrings,
+            prompt: "test".to_string(),
+            expected_outcome: ExpectedOutcome::ContainsStrings(vec!["secret_key".to_string()]),
+            metadata: Value::Null,
+        };
+        let run = EvaluationRun {
+            run_id: "run-1".to_string(),
+            task_id: "task-1".to_string(),
+            agent: AgentDescriptor {
+                name: "aeon".to_string(),
+                model: None,
+                version: None,
+            },
+            outcome: RunOutcome::Passed,
+            claims: vec![Claim {
+                id: "c1".to_string(),
+                statement: "Found secret_key in decrypted strings".to_string(),
+                confidence: Some(0.9),
+                evidence_ids: vec![],
+                metadata: Value::Null,
+            }],
+            evidence: vec![],
+            metrics: RunMetrics {
+                duration_ms: Some(100),
+                prompt_tokens: None,
+                completion_tokens: None,
+                tool_calls: 1,
+                metadata: Value::Null,
+            },
+        };
+        let score = score_run(&run, &task);
+        assert!(score.passed);
+    }
+
+    #[test]
+    fn score_run_structured_claim_passes() {
+        let task = TaskSpec {
+            id: "task-1".to_string(),
+            corpus_entry_id: "bin-1".to_string(),
+            kind: TaskKind::ClassifyBehavior,
+            prompt: "test".to_string(),
+            expected_outcome: ExpectedOutcome::StructuredClaim {
+                statement: "function has crypto".to_string(),
+                required_evidence_kinds: vec![EvidenceKind::JsonArtifact],
+            },
+            metadata: Value::Null,
+        };
+        let run = EvaluationRun {
+            run_id: "run-1".to_string(),
+            task_id: "task-1".to_string(),
+            agent: AgentDescriptor {
+                name: "aeon".to_string(),
+                model: None,
+                version: None,
+            },
+            outcome: RunOutcome::Passed,
+            claims: vec![],
+            evidence: vec![EvidenceItem {
+                id: "e1".to_string(),
+                kind: EvidenceKind::JsonArtifact,
+                label: "artifact".to_string(),
+                value: json!({}),
+                provenance: vec![],
+            }],
+            metrics: RunMetrics {
+                duration_ms: Some(100),
+                prompt_tokens: None,
+                completion_tokens: None,
+                tool_calls: 1,
+                metadata: Value::Null,
+            },
+        };
+        let score = score_run(&run, &task);
+        assert!(score.passed);
+    }
+
+    #[test]
+    fn aggregate_benchmark_computes_pass_rate() {
+        let scores = vec![
+            TaskScore {
+                task_id: "t1".to_string(),
+                run_id: "r1".to_string(),
+                passed: true,
+                score: 1.0,
+                outcome_kind: "address_set".to_string(),
+                details: Value::Null,
+                duration_ms: Some(100),
+            },
+            TaskScore {
+                task_id: "t2".to_string(),
+                run_id: "r2".to_string(),
+                passed: true,
+                score: 1.0,
+                outcome_kind: "address_set".to_string(),
+                details: Value::Null,
+                duration_ms: Some(200),
+            },
+            TaskScore {
+                task_id: "t3".to_string(),
+                run_id: "r3".to_string(),
+                passed: true,
+                score: 1.0,
+                outcome_kind: "address_set".to_string(),
+                details: Value::Null,
+                duration_ms: Some(150),
+            },
+            TaskScore {
+                task_id: "t4".to_string(),
+                run_id: "r4".to_string(),
+                passed: false,
+                score: 0.0,
+                outcome_kind: "address_set".to_string(),
+                details: Value::Null,
+                duration_ms: Some(50),
+            },
+        ];
+        let report = aggregate_benchmark("test-manifest", scores);
+        assert_eq!(report.total_tasks, 4);
+        assert_eq!(report.passed, 3);
+        assert_eq!(report.failed, 1);
+        assert!((report.pass_rate - 0.75).abs() < 0.01);
+        assert_eq!(report.total_duration_ms, 500);
+        assert_eq!(report.manifest_id, "test-manifest");
+    }
+
+    #[test]
+    fn evaluate_function_skeleton_produces_evidence() {
+        let binary_path = sample_binary_path();
+        let run = evaluate_function_skeleton(binary_path.to_str().unwrap(), 0x650)
+            .expect("skeleton evaluation should succeed");
+        assert_eq!(run.outcome, RunOutcome::Passed);
+        assert_eq!(run.evidence.len(), 1);
+        assert_eq!(run.evidence[0].kind, EvidenceKind::JsonArtifact);
+        assert!(run.metrics.duration_ms.is_some());
+    }
+
+    #[test]
+    fn evaluate_datalog_query_produces_result() {
+        let binary_path = sample_binary_path();
+        let run = evaluate_datalog_query(binary_path.to_str().unwrap(), 0x788, "reachability")
+            .expect("datalog evaluation should succeed");
+        assert_eq!(run.outcome, RunOutcome::Passed);
+        assert_eq!(run.evidence.len(), 1);
+        assert_eq!(run.evidence[0].kind, EvidenceKind::DatalogResult);
+        assert!(run.metrics.duration_ms.is_some());
+    }
+
+    #[test]
+    fn evaluator_has_timing() {
+        let binary_path = sample_binary_path();
+        let run = evaluate_function_skeleton(binary_path.to_str().unwrap(), 0x650)
+            .expect("skeleton evaluation should succeed");
+        assert!(run.metrics.duration_ms.is_some());
+        assert!(run.metrics.duration_ms.unwrap() >= 0);
     }
 }

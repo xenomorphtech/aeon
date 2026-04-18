@@ -1,0 +1,159 @@
+{
+  "id": "aeon-benchmark-v1",
+  "description": "Core aeon capability benchmark using the sample ARM64 ELF.",
+  "binaries": [
+    {
+      "id": "hello-aarch64",
+      "path": "samples/hello_aarch64.elf",
+      "architecture": "aarch64",
+      "format": "elf",
+      "description": "Sample ARM64 ELF for testing",
+      "tags": ["sample"]
+    }
+  ],
+  "tasks": [
+    {
+      "id": "task-skeleton-0x650",
+      "corpus_entry_id": "hello-aarch64",
+      "kind": "classify_behavior",
+      "prompt": "Classify function at 0x650",
+      "expected_outcome": {
+        "structured_claim": {
+          "statement": "function skeleton",
+          "required_evidence_kinds": ["json_artifact"]
+        }
+      },
+      "metadata": { "addr": "0x650" }
+    },
+    {
+      "id": "task-skeleton-0x710",
+      "corpus_entry_id": "hello-aarch64",
+      "kind": "classify_behavior",
+      "prompt": "Classify function at 0x710",
+      "expected_outcome": {
+        "structured_claim": {
+          "statement": "function skeleton",
+          "required_evidence_kinds": ["json_artifact"]
+        }
+      },
+      "metadata": { "addr": "0x710" }
+    },
+    {
+      "id": "task-skeleton-0x788",
+      "corpus_entry_id": "hello-aarch64",
+      "kind": "classify_behavior",
+      "prompt": "Classify function at 0x788",
+      "expected_outcome": {
+        "structured_claim": {
+          "statement": "function skeleton",
+          "required_evidence_kinds": ["json_artifact"]
+        }
+      },
+      "metadata": { "addr": "0x788" }
+    },
+    {
+      "id": "task-datalog-cfg-0x650",
+      "corpus_entry_id": "hello-aarch64",
+      "kind": "produce_evidence_bundle",
+      "prompt": "Run CFG edges query on 0x650",
+      "expected_outcome": {
+        "structured_claim": {
+          "statement": "datalog query result",
+          "required_evidence_kinds": ["datalog_result"]
+        }
+      },
+      "metadata": { "addr": "0x650", "query": "reachability" }
+    },
+    {
+      "id": "task-datalog-cfg-0x710",
+      "corpus_entry_id": "hello-aarch64",
+      "kind": "produce_evidence_bundle",
+      "prompt": "Run CFG edges query on 0x710",
+      "expected_outcome": {
+        "structured_claim": {
+          "statement": "datalog query result",
+          "required_evidence_kinds": ["datalog_result"]
+        }
+      },
+      "metadata": { "addr": "0x710", "query": "cfg_edges" }
+    },
+    {
+      "id": "task-datalog-cfg-0x788",
+      "corpus_entry_id": "hello-aarch64",
+      "kind": "produce_evidence_bundle",
+      "prompt": "Run CFG edges query on 0x788",
+      "expected_outcome": {
+        "structured_claim": {
+          "statement": "datalog query result",
+          "required_evidence_kinds": ["datalog_result"]
+        }
+      },
+      "metadata": { "addr": "0x788", "query": "cfg_edges" }
+    },
+    {
+      "id": "task-emul-0x650-0x660",
+      "corpus_entry_id": "hello-aarch64",
+      "kind": "extract_decrypted_strings",
+      "prompt": "Emulate snippet 0x650-0x660",
+      "expected_outcome": {
+        "structured_claim": {
+          "statement": "emulation trace produced",
+          "required_evidence_kinds": ["emulation_trace"]
+        }
+      },
+      "metadata": { "start_addr": "0x650", "end_addr": "0x660", "expected_registers": {} }
+    },
+    {
+      "id": "task-emul-0x710-0x720",
+      "corpus_entry_id": "hello-aarch64",
+      "kind": "extract_decrypted_strings",
+      "prompt": "Emulate snippet 0x710-0x720",
+      "expected_outcome": {
+        "structured_claim": {
+          "statement": "emulation trace produced",
+          "required_evidence_kinds": ["emulation_trace"]
+        }
+      },
+      "metadata": { "start_addr": "0x710", "end_addr": "0x720", "expected_registers": {} }
+    },
+    {
+      "id": "task-layout-0x650",
+      "corpus_entry_id": "hello-aarch64",
+      "kind": "recover_constructor_object_layout",
+      "prompt": "Recover constructor object layout at 0x650",
+      "expected_outcome": {
+        "structured_claim": {
+          "statement": "constructor layout",
+          "required_evidence_kinds": ["object_pointer_layout"]
+        }
+      },
+      "metadata": { "addr": "0x650" }
+    },
+    {
+      "id": "task-layout-0x710",
+      "corpus_entry_id": "hello-aarch64",
+      "kind": "recover_constructor_object_layout",
+      "prompt": "Recover constructor object layout at 0x710",
+      "expected_outcome": {
+        "structured_claim": {
+          "statement": "constructor layout",
+          "required_evidence_kinds": ["object_pointer_layout"]
+        }
+      },
+      "metadata": { "addr": "0x710" }
+    },
+    {
+      "id": "task-layout-0x788",
+      "corpus_entry_id": "hello-aarch64",
+      "kind": "recover_constructor_object_layout",
+      "prompt": "Recover constructor object layout at 0x788",
+      "expected_outcome": {
+        "structured_claim": {
+          "statement": "constructor layout",
+          "required_evidence_kinds": ["object_pointer_layout"]
+        }
+      },
+      "metadata": { "addr": "0x788" }
+    }
+  ]
+}

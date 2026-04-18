@@ -1,4 +1,7 @@
 fn main() {
+    use std::fs;
+    use std::path::Path;
+
     let command = match parse_args() {
         Ok(command) => command,
         Err(message) => {
@@ -42,6 +45,45 @@ fn main() {
                 }
             }
         }
+        Command::RunCorpus { manifest_path } => {
+            match aeon_eval::load_corpus_manifest(&manifest_path) {
+                Ok(manifest) => {
+                    let base = Path::new(".");
+                    let results = aeon_eval::run_corpus(&manifest, base);
+                    let scores: Vec<_> = results.iter().zip(manifest.tasks.iter())
+                        .filter_map(|((_, result), task)| result.as_ref().ok()
+                            .map(|run| aeon_eval::score_run(run, task)))
+                        .collect();
+                    let report = aeon_eval::aggregate_benchmark(&manifest.id, scores);
+                    serde_json::to_value(report).unwrap()
+                }
+                Err(error) => {
+                    eprintln!("{}", error);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Command::ScoreRun { task_spec_path, run_path } => {
+            match (fs::read(&task_spec_path), fs::read(&run_path)) {
+                (Ok(task_data), Ok(run_data)) => {
+                    match (serde_json::from_slice::<aeon_eval::TaskSpec>(&task_data),
+                           serde_json::from_slice::<aeon_eval::EvaluationRun>(&run_data)) {
+                        (Ok(task), Ok(run)) => {
+                            let score = aeon_eval::score_run(&run, &task);
+                            serde_json::to_value(score).unwrap()
+                        }
+                        (Err(e), _) | (_, Err(e)) => {
+                            eprintln!("JSON parse error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                (Err(e), _) | (_, Err(e)) => {
+                    eprintln!("File read error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
         Command::Help => unreachable!(),
     };
 
@@ -61,6 +103,13 @@ enum Command {
     ReductionMetrics {
         binary_path: String,
         addr: u64,
+    },
+    RunCorpus {
+        manifest_path: String,
+    },
+    ScoreRun {
+        task_spec_path: String,
+        run_path: String,
     },
     Help,
 }
@@ -108,6 +157,21 @@ fn parse_args() -> Result<Command, String> {
             let addr = parse_hex_addr(&addr_str)?;
             Ok(Command::ReductionMetrics { binary_path, addr })
         }
+        "run-corpus" => {
+            let manifest_path = args.next().ok_or_else(usage)?;
+            if args.next().is_some() {
+                return Err(usage());
+            }
+            Ok(Command::RunCorpus { manifest_path })
+        }
+        "score-run" => {
+            let task_spec_path = args.next().ok_or_else(usage)?;
+            let run_path = args.next().ok_or_else(usage)?;
+            if args.next().is_some() {
+                return Err(usage());
+            }
+            Ok(Command::ScoreRun { task_spec_path, run_path })
+        }
         _ => Err(usage()),
     }
 }
@@ -123,6 +187,8 @@ fn usage() -> String {
         "  aeon-eval constructor-layout <binary> <addr>",
         "  aeon-eval reduced-il-golden <binary> <addr> <golden>",
         "  aeon-eval reduction-metrics <binary> <addr>",
+        "  aeon-eval run-corpus <manifest>",
+        "  aeon-eval score-run <task-spec> <run>",
     ]
     .join("\n")
 }
