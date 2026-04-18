@@ -6,6 +6,7 @@ members = [
     "crates/aeonil",
     "crates/aeon",
     "crates/aeon-frontend",
+    "crates/aeon-swarm",
     "crates/aeon-reduce",
     "crates/survey",
 ]
