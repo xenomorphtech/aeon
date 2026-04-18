@@ -1,0 +1,20 @@
+{
+  "target": "challenge_hash32_toy",
+  "func_addr": "0xdead00",
+  "block_addr": "0xdead00",
+  "note": "Synthetic IL fixture. MBA identity: ((x^y) + 2*(x&y)) - 2*(x&y) == x^y.",
+  "register_map": {
+    "x0": "challenge_ascii16_lo_u64",
+    "x1": "challenge_ascii16_hi_u64",
+    "w0_ret": "hash32"
+  },
+  "instructions": [
+    {"addr": "0xdead00", "il": "t0 = x0 xor x1",            "op": "xor",   "dst": "t0", "args": ["x0", "x1"],   "width": 64},
+    {"addr": "0xdead04", "il": "t1 = x0 and x1",            "op": "and",   "dst": "t1", "args": ["x0", "x1"],   "width": 64},
+    {"addr": "0xdead08", "il": "t2 = t1 shl 1",             "op": "shl",   "dst": "t2", "args": ["t1", "#1"],   "width": 64},
+    {"addr": "0xdead0c", "il": "t3 = t0 add t2",            "op": "add",   "dst": "t3", "args": ["t0", "t2"],   "width": 64},
+    {"addr": "0xdead10", "il": "t4 = t3 sub t2",            "op": "sub",   "dst": "t4", "args": ["t3", "t2"],   "width": 64},
+    {"addr": "0xdead14", "il": "w0 = t4 trunc 32",          "op": "trunc", "dst": "w0", "args": ["t4"],         "width": 32},
+    {"addr": "0xdead18", "il": "return w0",                 "op": "ret",   "dst": null, "args": ["w0"],         "width": 32}
+  ]
+}
