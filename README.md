@@ -163,7 +163,7 @@ Generated from `crates/aeon-frontend/src/service.rs` via `cargo run -p aeon-fron
 <!-- BEGIN GENERATED TOOL SURFACE -->
 | Tool | Description |
 |------|-------------|
-| `load_binary` | Load an ELF binary for analysis. Must be called before other tools. |
+| `load_binary` | Load an ELF or raw AArch64 binary for analysis. Must be called before other tools. |
 | `list_functions` | List functions discovered from .eh_frame unwind tables. Supports pagination and name filtering. |
 | `set_analysis_name` | Backwards-compatible alias for rename_symbol. Attaches or overwrites a semantic symbol on an address. |
 | `rename_symbol` | Attach or overwrite a semantic symbol name on an address. |
@@ -188,6 +188,7 @@ Generated from `crates/aeon-frontend/src/service.rs` via `cargo run -p aeon-fron
 | `get_function_at` | Find the function containing a given address. Returns function metadata by default, and can optionally attach asm and/or AeonIL listings. |
 | `get_string` | Read a null-terminated string at any virtual address (works across all ELF segments, not just .text). |
 | `get_data` | Read raw bytes at any virtual address (works across all ELF segments). Returns hex + ASCII. |
+| `emulate_snippet` | Execute an ARM64 code region in a bounded sandbox. Returns final register state, memory writes, and any decoded strings. Use for reversing obfuscated loops, string decryption, or format decoders. |
 <!-- END GENERATED TOOL SURFACE -->
 
 ## Architecture
