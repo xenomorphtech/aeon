@@ -170,12 +170,14 @@ Generated from `crates/aeon-frontend/src/service.rs` via `cargo run -p aeon-fron
 | `define_struct` | Attach or overwrite a structure definition on an address. |
 | `add_hypothesis` | Record a semantic hypothesis on an address. Duplicate notes are ignored. |
 | `search_analysis_names` | Search analysis names attached to addresses using a regex pattern. |
+| `get_blackboard_entry` | Look up all semantic context recorded for an address: symbol name, struct definition, hypotheses, and containing function. Use to inspect what the blackboard knows about a specific address. |
 | `get_il` | Get the lifted AeonIL intermediate language listing for the function containing a given address. |
 | `get_function_il` | Backwards-compatible alias for get_il. |
 | `get_reduced_il` | Return block-structured reduced AeonIL for the function containing a given address. |
 | `get_ssa` | Return reduced SSA form for the function containing a given address, optionally optimized. |
 | `get_stack_frame` | Summarize the detected stack frame and visible stack-slot accesses for the function containing a given address. |
 | `get_function_cfg` | Get the Control Flow Graph for a function. Returns adjacency list, terminal blocks, and reachability from Datalog analysis. |
+| `get_function_skeleton` | Get a dense summary of function properties for efficient triage: argument count, calls, strings, loops, crypto constants, stack frame size, and suspicious patterns. |
 | `get_xrefs` | Get cross-references for an address: outgoing calls from the function, and incoming calls from other functions. |
 | `scan_pointers` | Scan non-executable mapped sections for pointer-sized values that reference other locations in the binary, classifying data-to-data and data-to-code edges. |
 | `scan_vtables` | Detect candidate C++ vtables in .rodata/.data-style sections by finding arrays of function pointers and grouping related tables. |

@@ -30,12 +30,14 @@ impl AeonFrontend {
             "define_struct" => self.tool_define_struct(args),
             "add_hypothesis" => self.tool_add_hypothesis(args),
             "search_analysis_names" => self.tool_search_analysis_names(args),
+            "get_blackboard_entry" => self.tool_get_blackboard_entry(args),
             "get_il" => self.tool_get_il(args),
             "get_function_il" => self.tool_get_function_il(args),
             "get_reduced_il" => self.tool_get_reduced_il(args),
             "get_ssa" => self.tool_get_ssa(args),
             "get_stack_frame" => self.tool_get_stack_frame(args),
             "get_function_cfg" => self.tool_get_function_cfg(args),
+            "get_function_skeleton" => self.tool_get_function_skeleton(args),
             "get_xrefs" => self.tool_get_xrefs(args),
             "scan_pointers" => self.tool_scan_pointers(),
             "scan_vtables" => self.tool_scan_vtables(),
@@ -160,6 +162,12 @@ impl AeonFrontend {
         session.search_analysis_names(pattern)
     }
 
+    fn tool_get_blackboard_entry(&self, args: &Value) -> Result<Value, String> {
+        let session = self.require_session()?;
+        let addr = parse_addr_arg(args)?;
+        Ok(session.get_blackboard_entry(addr))
+    }
+
     fn tool_get_function_il(&self, args: &Value) -> Result<Value, String> {
         self.tool_get_il(args)
     }
@@ -193,6 +201,12 @@ impl AeonFrontend {
         let session = self.require_session()?;
         let addr = parse_addr_arg(args)?;
         session.get_function_cfg(addr)
+    }
+
+    fn tool_get_function_skeleton(&self, args: &Value) -> Result<Value, String> {
+        let session = self.require_session()?;
+        let addr = parse_addr_arg(args)?;
+        session.get_function_skeleton(addr)
     }
 
     fn tool_get_xrefs(&self, args: &Value) -> Result<Value, String> {
@@ -397,6 +411,12 @@ pub fn tools_list() -> Value {
                     "pattern": {"type": "string", "description": "Regex pattern matched against analysis names"}
                 }, "required": ["pattern"]})),
 
+            tool_schema("get_blackboard_entry",
+                "Look up all semantic context recorded for an address: symbol name, struct definition, hypotheses, and containing function. Use to inspect what the blackboard knows about a specific address.",
+                json!({"type": "object", "properties": {
+                    "addr": {"type": "string", "description": "Address to look up in hex"}
+                }, "required": ["addr"]})),
+
             tool_schema("get_il",
                 "Get the lifted AeonIL intermediate language listing for the function containing a given address.",
                 json!({"type": "object", "properties": {
@@ -430,6 +450,12 @@ pub fn tools_list() -> Value {
 
             tool_schema("get_function_cfg",
                 "Get the Control Flow Graph for a function. Returns adjacency list, terminal blocks, and reachability from Datalog analysis.",
+                json!({"type": "object", "properties": {
+                    "addr": {"type": "string", "description": "Function address in hex"}
+                }, "required": ["addr"]})),
+
+            tool_schema("get_function_skeleton",
+                "Get a dense summary of function properties for efficient triage: argument count, calls, strings, loops, crypto constants, stack frame size, and suspicious patterns.",
                 json!({"type": "object", "properties": {
                     "addr": {"type": "string", "description": "Function address in hex"}
                 }, "required": ["addr"]})),

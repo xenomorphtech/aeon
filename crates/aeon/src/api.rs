@@ -136,6 +136,20 @@ impl AeonSession {
         }))
     }
 
+    pub fn get_blackboard_entry(&self, addr: u64) -> Value {
+        let engine = self.analysis_state.borrow();
+        let func = self.binary.function_containing(addr);
+        json!({
+            "addr": format!("0x{:x}", addr),
+            "resolved_name": resolved_name_value(addr, None, &self.binary, &engine),
+            "semantic": semantic_value(&engine, addr),
+            "function": func.map(|f| format!("0x{:x}", f.addr)),
+            "function_name": func.and_then(|f| f.name.as_deref()).map(str::to_string),
+            "function_resolved_name": func.map(|f|
+                resolved_name_value(f.addr, f.name.as_deref(), &self.binary, &engine)),
+        })
+    }
+
     pub fn summary(&self) -> Value {
         let engine = self.analysis_state.borrow();
         json!({
@@ -270,9 +284,93 @@ impl AeonSession {
         Ok(details)
     }
 
+    pub fn get_function_skeleton(&self, addr: u64) -> Result<Value, String> {
+        let func = self.find_function(addr)?;
+        self.with_function_artifacts(addr, |_, artifacts| {
+            let decoded = artifacts.decoded();
+            let instructions = &decoded.instructions;
+
+            let mut calls = Vec::new();
+            let strings: Vec<String> = Vec::new();
+            let mut loop_count = 0;
+            let mut has_crypto_constants = false;
+            let mut suspicious_patterns = Vec::new();
+
+            let mut seen_branches = std::collections::HashSet::new();
+
+            for instr in instructions {
+                match &instr.stmt {
+                    Stmt::Branch { target } => {
+                        if let Expr::Imm(addr) = target {
+                            calls.push(format!("0x{:x}", addr));
+                        }
+                    }
+                    Stmt::Call { target } => {
+                        if let Expr::Imm(addr) = target {
+                            calls.push(format!("0x{:x}", addr));
+                        } else if let Expr::Reg(_) = target {
+                            calls.push("indirect".to_string());
+                        }
+                    }
+                    Stmt::CondBranch { target, fallthrough: _, cond: _ } => {
+                        if let Expr::Imm(addr) = target {
+                            if !seen_branches.insert(*addr) {
+                                loop_count += 1;
+                            }
+                        }
+                    }
+                    Stmt::Assign { src, .. } => {
+                        if let Expr::Imm(_) = src {
+                            has_crypto_constants = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            let mut stack_frame_size = 0u64;
+            if let Ok(sf) = self.get_stack_frame(addr) {
+                if let Some(size) = sf.get("frame_size").and_then(|s| s.as_u64()) {
+                    stack_frame_size = size;
+                }
+            }
+
+            if instructions.len() > 100 {
+                suspicious_patterns.push("large_function".to_string());
+            }
+
+            let has_indirect_call = calls.iter().any(|c| c == "indirect");
+            if has_indirect_call {
+                suspicious_patterns.push("indirect_calls".to_string());
+            }
+
+            if has_crypto_constants {
+                suspicious_patterns.push("crypto_constants".to_string());
+            }
+
+            Ok(json!({
+                "addr": format!("0x{:x}", addr),
+                "name": option_str(func.name.as_deref()),
+                "size": decoded.size,
+                "instruction_count": instructions.len(),
+                "arg_count": 0, // Would need DWARF or ABI analysis
+                "calls": calls,
+                "strings": strings,
+                "loops": loop_count,
+                "crypto_constants": has_crypto_constants,
+                "stack_frame_size": stack_frame_size,
+                "suspicious_patterns": suspicious_patterns,
+            }))
+        })
+    }
+
     pub fn get_function_cfg(&self, addr: u64) -> Result<Value, String> {
         let func = self.find_function(addr)?;
         let details = self.get_function_details(addr)?;
+        let engine = self.analysis_state.borrow();
+
+        let mut edges = details["internal_edges"].clone();
+        annotate_cfg_edges(&mut edges, &self.binary, &engine);
 
         Ok(json!({
             "function": format!("0x{:x}", addr),
@@ -280,7 +378,7 @@ impl AeonSession {
             "resolved_name": details["resolved_name"].clone(),
             "semantic": details["semantic"].clone(),
             "instruction_count": details["instruction_count"].clone(),
-            "edges": details["internal_edges"].clone(),
+            "edges": edges,
             "terminal_blocks": details["terminal_blocks"].clone(),
             "reachable_paths": details["reachable_paths_count"].clone(),
         }))
@@ -409,7 +507,10 @@ impl AeonSession {
             include_all_paths,
             max_paths,
         )?;
-        Ok(serde_json::to_value(report).unwrap())
+        let mut value = serde_json::to_value(report).unwrap();
+        let engine = self.analysis_state.borrow();
+        annotate_call_paths(&mut value, &self.binary, &engine);
+        Ok(value)
     }
 
     pub fn get_bytes(&self, addr: u64, size: usize) -> Result<Value, String> {
@@ -648,6 +749,17 @@ fn semantic_value(engine: &AeonEngine, addr: u64) -> Value {
     semantic_to_value(engine.semantic_context(addr))
 }
 
+fn is_crypto_constant(imm: u64) -> bool {
+    // Common crypto constants: MD5, SHA1, SHA256, AES S-box values, etc.
+    matches!(
+        imm,
+        0x67452301 | 0xefcdab89 | 0x98badcfe | 0x10325476 // MD5
+        | 0xc3d2e1f0 // SHA1
+        | 0x6a09e667 | 0xbb67ae85 | 0x3c6ef372 | 0xa54ff53a // SHA256
+        | 0x428a2f98 | 0x71374491 | 0xb5c0fbcf | 0xe9b5dba5 // SHA256 K constants
+    )
+}
+
 fn exact_function_name<'a>(binary: &'a LoadedBinary, addr: u64) -> Option<&'a str> {
     binary
         .functions
@@ -669,6 +781,66 @@ fn resolved_name_value(
     {
         Some(value) => Value::String(value.to_string()),
         None => Value::Null,
+    }
+}
+
+fn annotate_cfg_edges(edges: &mut Value, binary: &LoadedBinary, engine: &AeonEngine) {
+    let Some(arr) = edges.as_array_mut() else { return };
+    for edge in arr {
+        let Some(obj) = edge.as_object_mut() else { continue };
+        for key in &["src", "dst"] {
+            let addr_str = obj
+                .get(*key)
+                .and_then(Value::as_str)
+                .and_then(parse_hex_value);
+            if let Some(addr) = addr_str {
+                let name_key = format!("{}_name", key);
+                obj.insert(
+                    name_key,
+                    resolved_name_value(addr, None, binary, engine),
+                );
+            }
+        }
+    }
+}
+
+fn annotate_call_paths(root: &mut Value, binary: &LoadedBinary, engine: &AeonEngine) {
+    if let Some(path) = root.get_mut("shortest_path") {
+        if let Some(functions) = path.get_mut("functions").and_then(Value::as_array_mut) {
+            let mut annotated = Vec::new();
+            for func_val in functions.iter() {
+                if let Some(addr_str) = func_val.as_str().and_then(parse_hex_value) {
+                    let resolved = resolved_name_value(addr_str, None, binary, engine);
+                    annotated.push(json!({
+                        "addr": func_val,
+                        "resolved_name": resolved
+                    }));
+                } else {
+                    annotated.push(func_val.clone());
+                }
+            }
+            *functions = annotated;
+        }
+    }
+
+    if let Some(all_paths) = root.get_mut("all_paths").and_then(Value::as_array_mut) {
+        for path in all_paths {
+            if let Some(functions) = path.get_mut("functions").and_then(Value::as_array_mut) {
+                let mut annotated = Vec::new();
+                for func_val in functions.iter() {
+                    if let Some(addr_str) = func_val.as_str().and_then(parse_hex_value) {
+                        let resolved = resolved_name_value(addr_str, None, binary, engine);
+                        annotated.push(json!({
+                            "addr": func_val,
+                            "resolved_name": resolved
+                        }));
+                    } else {
+                        annotated.push(func_val.clone());
+                    }
+                }
+                *functions = annotated;
+            }
+        }
     }
 }
 
