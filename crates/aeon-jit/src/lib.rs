@@ -5444,16 +5444,13 @@ fn simd_offset(index: usize) -> usize {
     offset_of!(JitContext, simd) + index * 16
 }
 
+// NOTE: Tests must be run serially with `cargo test -- --test-threads=1`
+// Parallel execution causes failures due to JitCompiler not being Send/Sync.
+// This is a known limitation tracked in AEON_JIT_COMPREHENSIVE_EVALUATION.md
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::*;
     use std::cell::RefCell;
-    use std::sync::{Mutex, OnceLock};
-
-    fn callback_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     thread_local! {
         static READ_COUNT: RefCell<usize> = RefCell::new(0);
