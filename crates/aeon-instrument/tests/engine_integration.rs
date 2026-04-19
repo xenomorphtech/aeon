@@ -374,6 +374,16 @@ fn loops_symbolic_fold_finds_invariants() {
 
     let result = engine.fold();
 
+    eprintln!(
+        "Fold: {} const regs, {} const mem, {} branches, {} induction, {} dataflow, {} vtables",
+        result.constant_registers,
+        result.constant_memory,
+        result.resolved_branches,
+        result.induction_variables,
+        result.dataflow_edges,
+        result.vtables_detected
+    );
+
     assert!(
         result.constant_registers > 0,
         "should find constant registers in loop program"
