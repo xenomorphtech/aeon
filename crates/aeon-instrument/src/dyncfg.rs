@@ -15,7 +15,7 @@
 //   6. After execution, the JIT returns the next PC
 //   7. Repeat from (1)
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use aeon_jit::{JitCompiler, JitConfig, JitEntry, JitError};
 use aeonil::{BranchCond, Condition, Expr, Reg, Stmt};
@@ -75,6 +75,8 @@ pub struct DynCfg {
     failed: BTreeMap<u64, String>,
     /// Batch processing statistics (Phase 2 optimization).
     pub batch_stats: BatchStats,
+    /// Pending blocks awaiting batch compilation (Phase 2 optimization).
+    pending_blocks: VecDeque<u64>,
 }
 
 /// Statistics for batch processing optimization.
@@ -227,6 +229,7 @@ impl DynCfg {
             blocks: BTreeMap::new(),
             failed: BTreeMap::new(),
             batch_stats: BatchStats::default(),
+            pending_blocks: VecDeque::new(),
         }
     }
 
@@ -397,5 +400,35 @@ impl DynCfg {
     pub fn invalidate(&mut self, addr: u64) {
         self.blocks.remove(&addr);
         self.failed.remove(&addr);
+    }
+
+    /// Enqueue a block for batch processing (Phase 2 optimization).
+    /// When batch reaches batch_size, blocks will be compiled together
+    /// to improve instruction cache locality.
+    pub fn enqueue_for_batch(&mut self, addr: u64) {
+        if !self.blocks.contains_key(&addr) && !self.failed.contains_key(&addr) {
+            self.pending_blocks.push_back(addr);
+        }
+    }
+
+    /// Get the number of pending blocks awaiting batch compilation.
+    pub fn pending_block_count(&self) -> usize {
+        self.pending_blocks.len()
+    }
+
+    /// Clear pending batch without compiling.
+    pub fn clear_pending(&mut self) {
+        self.pending_blocks.clear();
+    }
+
+    /// Update batch statistics after processing.
+    pub fn record_batch(&mut self, blocks_in_batch: usize, failures: usize) {
+        self.batch_stats.batches_processed += 1;
+        self.batch_stats.total_blocks += blocks_in_batch;
+        self.batch_stats.total_failed += failures;
+        if self.batch_stats.batches_processed > 0 {
+            self.batch_stats.avg_blocks_per_batch =
+                self.batch_stats.total_blocks as f64 / self.batch_stats.batches_processed as f64;
+        }
     }
 }

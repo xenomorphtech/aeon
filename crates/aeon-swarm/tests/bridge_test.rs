@@ -1,4 +1,4 @@
-use aeon_swarm::bridge::{DirectBridge, ToolBridge};
+use aeon_swarm::bridge::{DirectBridge, HttpBridge, ToolBridge};
 use aeon_frontend::service::AeonFrontend;
 use serde_json::json;
 
@@ -55,4 +55,40 @@ fn direct_bridge_clone_shares_state() {
 
     let r2 = bridge2.execute("list_functions", &json!({ "offset": 0, "limit": 5 }));
     assert!(r2.is_ok());
+}
+
+#[test]
+fn http_bridge_calls_remote_tool() {
+    let mut server = mockito::Server::new();
+    let mock = server.mock("POST", "/call")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"ok":true,"result":{"status":"success","data":"test_result"}}"#)
+        .create();
+
+    let bridge = HttpBridge::new(server.url());
+    let result = bridge.execute("test_tool", &json!({ "key": "value" }));
+
+    assert!(result.is_ok());
+    let val = result.unwrap();
+    assert_eq!(val["status"], "success");
+    assert_eq!(val["data"], "test_result");
+    mock.assert();
+}
+
+#[test]
+fn http_bridge_handles_error_response() {
+    let mut server = mockito::Server::new();
+    let mock = server.mock("POST", "/call")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"ok":false,"error":"tool not found"}"#)
+        .create();
+
+    let bridge = HttpBridge::new(server.url());
+    let result = bridge.execute("missing_tool", &json!({}));
+
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err(), "tool not found");
+    mock.assert();
 }
