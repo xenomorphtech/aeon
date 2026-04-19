@@ -32,21 +32,45 @@ Phase 2 focuses on performance optimizations to aeon_instrument identified in Ph
 
 **Tests**: 4 unit tests covering record, lookup, hit rate, and clear operations
 
-## In Progress
+### 2. Parallel CFG Infrastructure ✅
+
+**File**: `crates/aeon-instrument/src/parallel_cfg.rs`
+
+**Components**:
+- `ParallelCfgConfig`: Configuration for batch processing, work-stealing
+- `ParallelCfgStats`: Statistics for monitoring parallelization effectiveness
+- Documentation of threading limitations and alternative approaches
+
+**Benefits**:
+- Foundation for future batch processing optimization
+- Clear articulation of JitEntry threading constraints
+- Ready for batch processing implementation
+
+## In Progress / Analysis
 
 ### 2. Parallel CFG Discovery
 
 **Target**: 4-8× speedup on breadth-heavy binaries
 
-**Approach**: Parallelize block discovery phase using `rayon`
-- Discover multiple candidate blocks concurrently
-- Each worker thread lifts/compiles independently
-- Synchronize on CFG updates to avoid race conditions
+**Status**: Design analysis complete, implementation deferred
 
-**Status**: Design phase - requires:
-- Thread-safe DynCfg wrapper
-- Work queue for undiscovered blocks
-- Synchronization strategy for compiled block insertion
+**Blocker**: JitEntry function pointers cannot safely cross thread boundaries
+- Each JIT-compiled block returns a native x86_64 function pointer
+- Function pointers cannot be transferred between OS threads safely
+- Would require recompilation in each thread (defeats purpose)
+
+**Alternative Approach**: Batch processing (simpler, still effective)
+- Group discovered blocks into batches of 64-128
+- Process each batch through JIT in single thread
+- Improves instruction cache locality and reduces JIT setup overhead
+- Easier to implement and test
+
+**Files**: `crates/aeon-instrument/src/parallel_cfg.rs`
+- ParallelCfgConfig: batch configuration
+- ParallelCfgStats: statistics tracking
+- Documentation of threading limitations and alternatives
+
+**Next**: Implement batch processing optimization (2-4× speedup, lower hanging fruit)
 
 ### 3. Persistent JIT Caching
 
