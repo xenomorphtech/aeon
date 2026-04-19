@@ -22,5 +22,6 @@ pub mod dynruntime;
 pub mod engine;
 pub mod snapshot;
 pub mod symbolic;
+pub mod symbolic_cache;
 pub mod trace;
 pub mod translate;

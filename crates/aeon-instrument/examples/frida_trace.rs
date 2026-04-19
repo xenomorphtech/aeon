@@ -404,6 +404,7 @@ fn main() {
         code_alias_base,
         trace_output: Some(trace_output.clone()),
         drain_interval: 8192,
+        unmapped_memory_mode: engine::UnmappedMemoryMode::Skip,
     };
 
     let mut engine = InstrumentEngine::new(ctx).with_config(config);
