@@ -8,7 +8,7 @@ use aeonil::{BranchCond, Expr, Stmt};
 /// expression tree (bottom-up).
 pub fn fold_extension(expr: &Expr) -> Expr {
     // First, recursively fold all sub-expressions
-    let folded = expr.map_subexprs(|e| fold_extension(e));
+    let folded = expr.map_subexprs(fold_extension);
 
     match &folded {
         // Rule 5: Extension with from_bits >= 64 is a no-op
@@ -126,7 +126,7 @@ fn fold_stmt(stmt: Stmt) -> Stmt {
         Stmt::Pair(a, b) => Stmt::Pair(Box::new(fold_stmt(*a)), Box::new(fold_stmt(*b))),
         Stmt::Intrinsic { name, operands } => Stmt::Intrinsic {
             name,
-            operands: operands.iter().map(|e| fold_extension(e)).collect(),
+            operands: operands.iter().map(fold_extension).collect(),
         },
         // Ret, Nop, Barrier, Trap: pass through unchanged
         other => other,

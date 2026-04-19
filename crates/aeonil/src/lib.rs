@@ -457,7 +457,7 @@ impl Expr {
             // Intrinsic
             Expr::Intrinsic { name, operands } => Expr::Intrinsic {
                 name: name.clone(),
-                operands: operands.iter().map(|op| f(op)).collect(),
+                operands: operands.iter().map(f).collect(),
             },
         }
     }

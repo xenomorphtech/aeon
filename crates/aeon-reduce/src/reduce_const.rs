@@ -7,7 +7,7 @@ use aeonil::{BranchCond, Expr, Stmt};
 /// Recursively fold constant expressions within an expression tree.
 pub fn fold_expr(expr: &Expr) -> Expr {
     // First, recursively fold all sub-expressions
-    let folded = expr.map_subexprs(|e| fold_expr(e));
+    let folded = expr.map_subexprs(fold_expr);
 
     // Then try to simplify the folded result
     match &folded {
@@ -191,7 +191,7 @@ fn fold_stmt(stmt: Stmt) -> Stmt {
         Stmt::Pair(a, b) => Stmt::Pair(Box::new(fold_stmt(*a)), Box::new(fold_stmt(*b))),
         Stmt::Intrinsic { name, operands } => Stmt::Intrinsic {
             name,
-            operands: operands.iter().map(|e| fold_expr(e)).collect(),
+            operands: operands.iter().map(fold_expr).collect(),
         },
         // Ret, Nop, Barrier, Trap: pass through unchanged
         other => other,
