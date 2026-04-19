@@ -929,3 +929,36 @@ sample_test!(
         min_direct_call_sites: 16,
     }
 );
+
+sample_test!(
+    test_sample_advanced_loops_aarch64,
+    SampleCase {
+        source: "samples/advanced_loops_aarch64.c",
+        entry_symbol: "main",
+        expected_return: Some(2176),
+        min_lifted_functions: 6,
+        min_direct_call_sites: 5,
+    }
+);
+
+sample_test!(
+    test_sample_conditionals_aarch64,
+    SampleCase {
+        source: "samples/conditionals_aarch64.c",
+        entry_symbol: "main",
+        expected_return: Some(1900),
+        min_lifted_functions: 8,
+        min_direct_call_sites: 7,
+    }
+);
+
+sample_test!(
+    test_sample_memory_patterns_aarch64,
+    SampleCase {
+        source: "samples/memory_patterns_aarch64.c",
+        entry_symbol: "main",
+        expected_return: Some(100604),
+        min_lifted_functions: 9,
+        min_direct_call_sites: 8,
+    }
+);

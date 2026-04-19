@@ -428,6 +428,96 @@ fn loops_has_stride_1_induction_variable() {
     );
 }
 
+// ── bitops_aarch64: bitwise operations ──────────────────────────────
+
+#[test]
+fn bitops_runs_to_halt() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut engine, _mapped, _stack) = engine_for_sample("samples/bitops_aarch64.c", "main");
+    engine.config.max_steps = 50_000;
+
+    let reason = engine.run();
+    assert!(
+        matches!(reason, StopReason::Halted),
+        "expected Halted, got {:?}",
+        reason
+    );
+}
+
+#[test]
+fn bitops_traces_operations() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut engine, _mapped, _stack) = engine_for_sample("samples/bitops_aarch64.c", "main");
+    engine.config.max_steps = 50_000;
+    engine.run();
+
+    let trace = engine.trace();
+    assert!(!trace.blocks.is_empty(), "should produce block traces");
+}
+
+// ── conditionals_aarch64: branch behavior ────────────────────────────
+
+#[test]
+fn conditionals_runs_to_halt() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut engine, _mapped, _stack) = engine_for_sample("samples/conditionals_aarch64.c", "main");
+    engine.config.max_steps = 50_000;
+
+    let reason = engine.run();
+    assert!(
+        matches!(reason, StopReason::Halted),
+        "expected Halted, got {:?}",
+        reason
+    );
+}
+
+#[test]
+fn conditionals_discovers_multiple_paths() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut engine, _mapped, _stack) = engine_for_sample("samples/conditionals_aarch64.c", "main");
+    engine.config.max_steps = 50_000;
+    engine.run();
+
+    assert!(
+        engine.discovered_blocks() >= 3,
+        "branch conditionals should discover multiple blocks, got {}",
+        engine.discovered_blocks()
+    );
+}
+
+// ── mem_access_aarch64: memory patterns ─────────────────────────────
+
+#[test]
+fn mem_access_runs_to_halt() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut engine, _mapped, _stack) = engine_for_sample("samples/mem_access_aarch64.c", "main");
+    engine.config.max_steps = 50_000;
+
+    let reason = engine.run();
+    assert!(
+        matches!(reason, StopReason::Halted),
+        "expected Halted, got {:?}",
+        reason
+    );
+}
+
+#[test]
+fn mem_access_traces_memory_accesses() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut engine, _mapped, _stack) = engine_for_sample("samples/mem_access_aarch64.c", "main");
+    engine.config.max_steps = 50_000;
+    engine.run();
+
+    let trace = engine.trace();
+    let total = trace.total_memory_reads + trace.total_memory_writes;
+    assert!(
+        total > 0,
+        "should record memory accesses, reads={} writes={}",
+        trace.total_memory_reads,
+        trace.total_memory_writes
+    );
+}
+
 // ── Disk-backed trace writing ───────────────────────────────────────
 
 #[test]
@@ -727,4 +817,104 @@ fn nmss_crypto_sub_2070a8_traces_to_disk() {
     );
 
     let _ = std::fs::remove_file(&trace_path);
+}
+
+// ── recursive_calls_aarch64: recursion handling ──────────────────────
+
+#[test]
+fn recursive_calls_runs_to_halt() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut engine, _mapped, _stack) = engine_for_sample("samples/recursive_calls_aarch64.c", "main");
+    engine.config.max_steps = 100_000;
+
+    let reason = engine.run();
+    assert!(
+        matches!(reason, StopReason::Halted),
+        "expected Halted, got {:?}",
+        reason
+    );
+
+    let trace = engine.trace();
+    assert!(!trace.blocks.is_empty(), "should produce block traces");
+    let unique = trace.unique_blocks().len();
+    eprintln!("recursive_calls: {} unique blocks visited", unique);
+}
+
+#[test]
+fn recursive_calls_handles_call_stack() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut engine, _mapped, _stack) = engine_for_sample("samples/recursive_calls_aarch64.c", "main");
+    engine.config.max_steps = 100_000;
+    engine.run();
+
+    assert!(
+        engine.discovered_blocks() >= 3,
+        "recursive function should have multiple basic blocks, got {}",
+        engine.discovered_blocks()
+    );
+}
+
+// ── deep_stack_aarch64: stack usage ──────────────────────────────────
+
+#[test]
+fn deep_stack_runs_to_halt() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut engine, _mapped, _stack) = engine_for_sample("samples/deep_stack_aarch64.c", "main");
+    engine.config.max_steps = 100_000;
+
+    let reason = engine.run();
+    assert!(
+        matches!(reason, StopReason::Halted),
+        "expected Halted, got {:?}",
+        reason
+    );
+}
+
+#[test]
+fn deep_stack_traces_stack_operations() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut engine, _mapped, _stack) = engine_for_sample("samples/deep_stack_aarch64.c", "main");
+    engine.config.max_steps = 100_000;
+    engine.run();
+
+    let trace = engine.trace();
+    assert!(
+        trace.total_memory_reads > 0 || trace.total_memory_writes > 0,
+        "deep stack usage should involve memory accesses"
+    );
+}
+
+// ── advanced_loops_aarch64: complex loop patterns ─────────────────────
+
+#[test]
+fn advanced_loops_runs_to_halt() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut engine, _mapped, _stack) = engine_for_sample("samples/advanced_loops_aarch64.c", "main");
+    engine.config.max_steps = 200_000;
+
+    let reason = engine.run();
+    assert!(
+        matches!(reason, StopReason::Halted),
+        "expected Halted, got {:?}",
+        reason
+    );
+}
+
+#[test]
+fn advanced_loops_discovers_blocks() {
+    let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut engine, _mapped, _stack) = engine_for_sample("samples/advanced_loops_aarch64.c", "main");
+    engine.config.max_steps = 200_000;
+    engine.run();
+
+    assert!(
+        engine.discovered_blocks() >= 2,
+        "advanced loop pattern should discover multiple blocks, got {}",
+        engine.discovered_blocks()
+    );
+    eprintln!(
+        "advanced_loops: {} blocks, {} unique blocks",
+        engine.trace().blocks.len(),
+        engine.trace().unique_blocks().len()
+    );
 }
