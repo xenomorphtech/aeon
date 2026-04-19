@@ -618,6 +618,8 @@ fn nmss_crypto_sub_20bb48_traces_to_disk() {
         trace_output: Some(trace_path.clone()),
         drain_interval: 2048,
         unmapped_memory_mode: UnmappedMemoryMode::Halt,
+        enable_block_batching: false,
+        batch_size: 128,
     };
 
     let reason = engine.run();
@@ -688,6 +690,8 @@ fn nmss_crypto_sub_2070a8_traces_to_disk() {
         trace_output: Some(trace_path.clone()),
         drain_interval: 2048,
         unmapped_memory_mode: UnmappedMemoryMode::Halt,
+        enable_block_batching: false,
+        batch_size: 128,
     };
 
     let reason = engine.run();

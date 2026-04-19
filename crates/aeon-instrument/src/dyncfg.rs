@@ -73,6 +73,21 @@ pub struct DynCfg {
     blocks: BTreeMap<u64, CompiledBlock>,
     /// Addresses that failed to lift (unmapped, invalid encoding).
     failed: BTreeMap<u64, String>,
+    /// Batch processing statistics (Phase 2 optimization).
+    pub batch_stats: BatchStats,
+}
+
+/// Statistics for batch processing optimization.
+#[derive(Debug, Clone, Default)]
+pub struct BatchStats {
+    /// Number of batches processed
+    pub batches_processed: usize,
+    /// Total blocks compiled
+    pub total_blocks: usize,
+    /// Total blocks that failed
+    pub total_failed: usize,
+    /// Average blocks per batch
+    pub avg_blocks_per_batch: f64,
 }
 
 /// Check if a statement is a block terminator.
@@ -211,6 +226,7 @@ impl DynCfg {
             compiler: JitCompiler::new(config),
             blocks: BTreeMap::new(),
             failed: BTreeMap::new(),
+            batch_stats: BatchStats::default(),
         }
     }
 
