@@ -18,6 +18,17 @@ use crate::dyncfg::{BlockTerminator, DynCfg};
 use crate::symbolic::{FoldResult, SymbolicFolder};
 use crate::trace::{BlockTrace, MemoryAccess, RegSnapshot, TraceLog, TraceWriter};
 
+/// How the engine handles unmapped memory errors during execution.
+#[derive(Debug, Clone, Copy)]
+pub enum UnmappedMemoryMode {
+    /// Stop execution and return LiftError (default)
+    Halt,
+    /// Skip the unmapped block and continue from next block
+    Skip,
+    /// Log warning but continue execution if possible
+    Warn,
+}
+
 /// Configuration for the instrumentation engine.
 pub struct EngineConfig {
     /// Maximum blocks to execute before stopping.
@@ -38,6 +49,8 @@ pub struct EngineConfig {
     pub trace_output: Option<PathBuf>,
     /// How often to drain in-memory blocks when disk tracing is active.
     pub drain_interval: u64,
+    /// How to handle unmapped memory errors during lifting.
+    pub unmapped_memory_mode: UnmappedMemoryMode,
 }
 
 impl Default for EngineConfig {
@@ -51,6 +64,7 @@ impl Default for EngineConfig {
             code_alias_base: None,
             trace_output: None,
             drain_interval: 4096,
+            unmapped_memory_mode: UnmappedMemoryMode::Halt,
         }
     }
 }
@@ -214,7 +228,30 @@ impl InstrumentEngine {
             let (entry, block_addr, terminator) =
                 match self.cfg.get_or_compile(pc, self.context.memory.as_ref()) {
                     Ok(b) => (b.entry, b.addr, b.terminator),
-                    Err(e) => return StopReason::LiftError(pc, format!("{:?}", e)),
+                    Err(e) => {
+                        let error_msg = format!("{:?}", e);
+                        let is_unmapped = error_msg.contains("unmapped memory");
+
+                        match (is_unmapped, self.config.unmapped_memory_mode) {
+                            (true, UnmappedMemoryMode::Halt) => {
+                                return StopReason::LiftError(pc, error_msg);
+                            }
+                            (true, UnmappedMemoryMode::Skip) => {
+                                // Skip this block and try next PC
+                                eprintln!("Skipping unmapped block at 0x{:x}", pc);
+                                self.context.regs.pc = pc.wrapping_add(4); // Advance by one instruction
+                                continue;
+                            }
+                            (true, UnmappedMemoryMode::Warn) => {
+                                // Log warning and return error
+                                eprintln!("Warning: unmapped memory at 0x{:x}, continuing", pc);
+                                return StopReason::LiftError(pc, error_msg);
+                            }
+                            (false, _) => {
+                                return StopReason::LiftError(pc, error_msg);
+                            }
+                        }
+                    }
                 };
 
             // Capture entry register snapshot
