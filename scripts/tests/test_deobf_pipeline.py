@@ -654,5 +654,73 @@ class SimplifierTests(unittest.TestCase):
         self.assertTrue(req["symbolic"]["fully_reduced_locally"])
 
 
+# ---------------------------------------------------------------------------
+# Wide-output verify (192-bit cert) + wire-vector loader
+# ---------------------------------------------------------------------------
+
+
+class WireCertTargetTests(unittest.TestCase):
+    def test_popcount_handles_192_bit_values(self):
+        # Every bit set across 192 bits.
+        v = (1 << 192) - 1
+        self.assertEqual(dp._popcount(v), 192)
+        # A single high bit should not be silently masked to zero.
+        self.assertEqual(dp._popcount(1 << 191), 1)
+
+    def test_wire_vector_loader_handles_empty_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "empty.json"
+            p.write_text("")
+            self.assertEqual(dp._wire_cert_vectors_from_capture(str(p)), ())
+
+    def test_wire_vector_loader_skips_malformed_lines(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "mixed.json"
+            p.write_text(
+                '{"challenge": "ABABABABABABABAB", '
+                '"cert": "' + ("AA" * 24) + '", "ts": 1}\n'
+                'not-json\n'
+                '{"challenge": "xx", "cert": "short"}\n'
+            )
+            vs = dp._wire_cert_vectors_from_capture(str(p))
+            self.assertEqual(len(vs), 1)
+            self.assertEqual(vs[0].output, int("AA" * 24, 16))
+
+    def test_wire_vector_loader_packs_challenge_as_le_u64_halves(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "single.json"
+            # challenge ASCII = "0123456789ABCDEF"
+            # lo = LE u64 of b"01234567" = 0x3736353433323130
+            # hi = LE u64 of b"89ABCDEF" = 0x4645444342413938
+            p.write_text(
+                '{"challenge": "0123456789ABCDEF", '
+                '"cert": "' + ("00" * 24) + '", "ts": 0}\n'
+            )
+            vs = dp._wire_cert_vectors_from_capture(str(p))
+            self.assertEqual(vs[0].inputs["challenge_ascii16_lo_u64"],
+                             0x3736353433323130)
+            self.assertEqual(vs[0].inputs["challenge_ascii16_hi_u64"],
+                             0x4645444342413938)
+
+    def test_null_stub_fails_all_wire_vectors(self):
+        target = dp.TARGETS["cert_from_wire_session5"]
+        if not target.test_vectors:
+            self.skipTest("no wire vectors captured")
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "null_stub.py"
+            p.write_text(
+                "def simplified(challenge_ascii16_lo_u64, "
+                "challenge_ascii16_hi_u64):\n    return 0\n"
+            )
+            report = dp.verify_expression(target, p, fuzz_runs=50)
+        self.assertEqual(report.ground_truth_passed, 0)
+        self.assertEqual(report.ground_truth_failed, len(target.test_vectors))
+        # Avalanche should be exactly 0 for a constant-returning stub.
+        self.assertEqual(report.avalanche_ratio_mean, 0.0)
+        # Every bit should be flagged biased (constant 0 → all bits zero).
+        assert report.distribution_bit_bias is not None
+        self.assertEqual(len(report.distribution_bit_bias), 192)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

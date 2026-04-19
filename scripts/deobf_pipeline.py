@@ -200,6 +200,52 @@ def _fuzz_derive_well512(rng: "random.Random") -> dict[str, int]:
     }
 
 
+def _fuzz_wire_challenge_to_cert(rng: "random.Random") -> dict[str, int]:
+    """Random 16-char ASCII-hex challenge packed as two LE u64 halves."""
+    alphabet = b"0123456789ABCDEF"
+    ascii16 = bytes(alphabet[rng.randrange(16)] for _ in range(16))
+    return {
+        "challenge_ascii16_lo_u64": struct.unpack("<Q", ascii16[0:8])[0],
+        "challenge_ascii16_hi_u64": struct.unpack("<Q", ascii16[8:16])[0],
+    }
+
+
+def _wire_cert_vectors_from_capture(path: str) -> tuple[TestVector, ...]:
+    """Load (challenge → cert) pairs from hash32_flip_corpus.json.
+
+    Each line is a JSON object; challenge is 16-hex-char ASCII, cert is
+    48-hex-char ASCII (24 bytes).  Packs the challenge's ASCII bytes into
+    two LE u64 halves (matching challenge_hash32's input signature) and
+    decodes the cert hex into a 192-bit int.
+    """
+    p = Path(path)
+    if not p.exists():
+        return ()
+    out: list[TestVector] = []
+    for line in p.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+            ch = d["challenge"]
+            cert_hex = d["cert"]
+        except (json.JSONDecodeError, KeyError):
+            continue
+        ascii16 = ch.encode()
+        if len(ascii16) != 16 or len(cert_hex) != 48:
+            continue
+        lo = struct.unpack("<Q", ascii16[0:8])[0]
+        hi = struct.unpack("<Q", ascii16[8:16])[0]
+        cert_int = int(cert_hex, 16)
+        out.append(TestVector(
+            {"challenge_ascii16_lo_u64": lo,
+             "challenge_ascii16_hi_u64": hi},
+            cert_int,
+            f"wire:ts={d.get('ts','?')}"))
+    return tuple(out)
+
+
 TARGETS: dict[str, Target] = {
     "challenge_hash32": Target(
         name="challenge_hash32",
@@ -234,6 +280,35 @@ TARGETS: dict[str, Target] = {
             "Synthetic pipeline self-test target.  IL fixture expresses the "
             "MBA identity (x^y) = ((x^y)+2·(x&y)) − 2·(x&y).  Closed form: "
             "(lo ^ hi) & 0xffffffff."
+        ),
+    ),
+    "cert_from_wire_session5": Target(
+        name="cert_from_wire_session5",
+        binary="/home/sdancer/aeon-trace/capture/binaries/libnmsssa.so",
+        # Unknown func/block — this target is ground-truth-only for now,
+        # populated from /home/sdancer/aeon-trace/capture/hash32_flip_corpus.json.
+        # When trace-claude locates the primitive, update these addresses.
+        func_addr=0x000000,
+        block_addrs=(0x000000,),
+        inputs=(
+            SymInput("challenge_ascii16_lo_u64", 64,
+                     "challenge LE first 8 ASCII bytes"),
+            SymInput("challenge_ascii16_hi_u64", 64,
+                     "challenge LE second 8 ASCII bytes"),
+        ),
+        output=SymInput("cert_192", 192,
+                        "24-byte cert as big int from wire (48 hex chars)"),
+        test_vectors=_wire_cert_vectors_from_capture(
+            "/home/sdancer/aeon-trace/capture/hash32_flip_corpus.json"),
+        fuzz_sample=_fuzz_wire_challenge_to_cert,
+        notes=(
+            "Real wire-captured (challenge, cert) pairs from session 5 "
+            "(device_id=7B0D26CDC87D42EA — same device as TRACED_SESSION_UDID "
+            "but different account_pid/token/nmnid).  Ground-truth-only: "
+            "cert_from_wire depends on the full WELL512 → SHA-256 Merkle "
+            "chain, which is blocked on derive_well512_state and session "
+            "D04/D09 digests.  Use this target to regression-verify any "
+            "candidate closed-form against 6 real pairs."
         ),
     ),
     "derive_well512_state": Target(
@@ -796,7 +871,12 @@ def _load_expression_module(path: Path) -> Any:
 
 
 def _popcount(x: int) -> int:
-    return bin(x & ((1 << 64) - 1)).count("1")
+    """Population count over arbitrary-width non-negative ints.
+
+    Must not mask — cert outputs are 192 bits wide and the avalanche
+    calculation would be wrong if bits above bit 63 were silently dropped.
+    """
+    return bin(x).count("1") if x >= 0 else bin(x & ((1 << 2048) - 1)).count("1")
 
 
 @dataclass
