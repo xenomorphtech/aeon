@@ -82,6 +82,7 @@ name = "aeon-reduce"
 version = "0.1.0"
 dependencies = [
  "aeonil",
+ "criterion",
 ]
 
 [[package]]
