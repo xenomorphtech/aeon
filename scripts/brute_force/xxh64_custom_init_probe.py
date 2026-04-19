@@ -8,16 +8,34 @@ non-canonical INIT lanes over a 16449-byte template buffer.  This probe:
 2. Verifies against the static capture (matches raw32_02 post-update AND
    the reference cert "22091D63..." from codex-tui.log for the challenge
    "test_challenge_12345").
-3. Tests the reference INIT against the 19 session-5 wire pairs in
-   hash32_flip_corpus.json — result: 0/19 matches.
-4. Demonstrates that v1, v2 are session-invariant across the 19 pairs
-   (the challenge only affects lanes v3, v4 at block 256).
+3. Tests the reference INIT against the session-5 wire pairs in
+   hash32_flip_corpus.json — result: 0/N matches under the capture's
+   template.
+4. Demonstrates that v1, v2 appear session-invariant across pairs WHEN
+   the capture's template is reused — this is an ARTEFACT of using the
+   wrong (unsubstituted) template, not evidence of a real structural
+   invariant.  With the real per-session substituted template, v1, v2
+   would vary per pair because the substituted template's trailing
+   bytes (before 0x2010) contain per-call session data (timestamps, PID,
+   UdId, CODE_*, etc.).
 5. Sweeps session-material-derived INIT candidates and page-resident
    INIT candidates — all negative.
 
-Conclusion: the fold formula and pipeline are correct; only session-5's
-INIT lanes are the remaining unknown.  Those lanes must be obtained via
-a live hook at the xxHash64 entry or derived from runtime state.
+REVISED CONCLUSION (per fact xxh64-init-captured-5556):
+------------------------------------------------------
+The INIT quartet is STATIC — binary-confirmed by trace-claude2
+(load+store path at 0xf9728 / 0xf9868 with no intermediate modification).
+The blocker is NOT the INIT lanes; it's the 495-byte TEMPLATE at buffer
+offset 0x0..0x1EF, which is a printf(%s/%d) format string whose
+placeholders get substituted at runtime with session-specific data
+(session token, device_id, PID, CODE_* values, timestamps, PlayerId,
+etc.).
+
+Unblock gate:  the live 16449-byte buffer content itself, obtained via a
+Frida hook at the xxHash64 call site (data_ptr 0xb4000075254959a0 on
+device 5558 per fact xxh64-init-captured-5556).  Once the buffer is
+dumped, feed it into xxh64_live_buffer_validator.py — the moment any
+wire-pair cert matches, the pipeline closes.
 """
 import hashlib
 import json
@@ -131,8 +149,11 @@ def main() -> int:
     sweep_hits = sweep_page_resident_inits(mod)
     print(f"  sweep hits: {sweep_hits}")
 
-    print("\nRemaining unknown: session-5 INIT_V1..V4 lanes.")
-    print("Need: Frida hook at xxHash64 entry during a known session-5 cert call.")
+    print("\nREVISED: INIT is static (binary-confirmed). Remaining unknown is")
+    print("the 495-byte template contents (session-substituted printf fields).")
+    print("Drop a live 16449-byte buffer into")
+    print("  python3 scripts/brute_force/xxh64_live_buffer_validator.py BUF.bin")
+    print("to close the loop as soon as trace-claude dumps the live buffer.")
     return 2
 
 
