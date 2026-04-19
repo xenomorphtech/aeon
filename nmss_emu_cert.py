@@ -13340,6 +13340,23 @@ class NMSSCertEmulator:
         print(f"[S1-WATCH] installed write watch on {_s1_watch_lo:#x}-{_s1_watch_hi:#x}", flush=True)
 
         self._emu_start_time = time.time()
+        # ============================================================
+        # PATH-DIVERGENCE WARNING (fact ollvm-path-divergence, 2026-04-19):
+        # Device enters the cert function at corridor+0x17ded0 (cert_entry)
+        # and its OLLVM CFF dispatch from state=0 NEVER reaches the S1
+        # sprintf blocks at JIT+0x155d60 / JIT+0x15657c.  We enter here at
+        # 0x20aad4 (a DIFFERENT mid-function) which takes a divergent
+        # OLLVM state sequence that DOES hit the S1 blocks.  Consequence:
+        # the hash input computed by this emulator is structurally
+        # different from the device's cert input.  No amount of S1
+        # overriding (commit d94cfd3) will close the gap — we're computing
+        # a different function than the device is.
+        #
+        # To fix, emu_start must begin at 0x17ded0 and the emulator's
+        # mocks/hooks/state-initialization need to be re-derived for that
+        # entry.  Pending trace-claude2's aeon-based enumeration of which
+        # BL targets are reachable from the 0x17ded0 OLLVM path.
+        # ============================================================
         try:
             self.uc.emu_start(0x20aad4, ret_addr,
                              timeout=300_000_000, count=self._max_insn)
