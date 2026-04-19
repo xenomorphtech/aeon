@@ -8389,4 +8389,252 @@ mod tests {
         assert_eq!(ctx.x[1], 15);
         assert_eq!(ctx.x[2], 30, "sequential operations should produce correct result");
     }
+
+    // ── Performance Benchmarks ────────────────────────────────────
+
+    #[test]
+    fn benchmark_compile_small_block() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![
+            Stmt::Assign {
+                dst: Reg::X(0),
+                src: Expr::Imm(42),
+            },
+            Stmt::Assign {
+                dst: Reg::X(1),
+                src: Expr::Imm(100),
+            },
+        ];
+
+        let start = std::time::Instant::now();
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile should succeed");
+        let elapsed = start.elapsed();
+
+        assert!(!code.is_null(), "code should be generated");
+        println!(
+            "Small block (2 stmts) compiled in {:.2?} ({} µs)",
+            elapsed,
+            elapsed.as_micros()
+        );
+        // Expect compilation < 10ms for small block
+        assert!(
+            elapsed.as_millis() < 10,
+            "small block should compile quickly (< 10ms), took {:.2?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn benchmark_compile_medium_block() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let mut stmts = Vec::new();
+
+        // Generate 50 sequential assignment statements
+        for i in 0..50 {
+            stmts.push(Stmt::Assign {
+                dst: Reg::X(i % 31),
+                src: Expr::Imm((i as u64) * 10),
+            });
+        }
+
+        let start = std::time::Instant::now();
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile should succeed");
+        let elapsed = start.elapsed();
+
+        assert!(!code.is_null(), "code should be generated");
+        println!(
+            "Medium block (50 stmts) compiled in {:.2?} ({} µs)",
+            elapsed,
+            elapsed.as_micros()
+        );
+        // Expect compilation < 50ms for medium block
+        assert!(
+            elapsed.as_millis() < 50,
+            "medium block should compile reasonably (< 50ms), took {:.2?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn benchmark_compile_complex_block_with_branches() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![
+            Stmt::Assign {
+                dst: Reg::X(0),
+                src: Expr::Imm(100),
+            },
+            Stmt::Assign {
+                dst: Reg::X(1),
+                src: Expr::Imm(50),
+            },
+            Stmt::SetFlags {
+                expr: Expr::Sub(
+                    Box::new(Expr::Reg(Reg::X(0))),
+                    Box::new(Expr::Reg(Reg::X(1))),
+                ),
+            },
+            Stmt::CondBranch {
+                cond: BranchCond::Flag(Condition::GT),
+                target: Expr::Imm(0x2000),
+                fallthrough: 0x1010,
+            },
+        ];
+
+        let start = std::time::Instant::now();
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile should succeed");
+        let elapsed = start.elapsed();
+
+        assert!(!code.is_null(), "code should be generated");
+        println!(
+            "Complex block (branches, flags) compiled in {:.2?}",
+            elapsed
+        );
+        assert!(
+            elapsed.as_millis() < 20,
+            "complex block should compile quickly (< 20ms), took {:.2?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn benchmark_compile_simd_heavy_block() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let mut stmts = Vec::new();
+
+        // Generate SIMD operations on all 32 SIMD registers
+        for i in 0..32 {
+            stmts.push(Stmt::Assign {
+                dst: Reg::V(i),
+                src: Expr::Intrinsic {
+                    name: "and".to_string(),
+                    operands: vec![Expr::Reg(Reg::V(i)), Expr::Reg(Reg::V((i + 1) % 32))],
+                },
+            });
+        }
+
+        let start = std::time::Instant::now();
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile should succeed");
+        let elapsed = start.elapsed();
+
+        assert!(!code.is_null(), "code should be generated");
+        println!(
+            "SIMD-heavy block (32 stmts) compiled in {:.2?}",
+            elapsed
+        );
+        assert!(
+            elapsed.as_millis() < 100,
+            "SIMD block should compile within 100ms, took {:.2?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn benchmark_code_generation_efficiency() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+
+        // Simple block with just a few operations
+        let stmts = vec![
+            Stmt::Assign {
+                dst: Reg::X(0),
+                src: Expr::Imm(0xDEADBEEFCAFEBABE_u64),
+            },
+            Stmt::Assign {
+                dst: Reg::X(1),
+                src: Expr::Reg(Reg::X(0)),
+            },
+        ];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile should succeed");
+
+        // Code should be a valid pointer
+        assert!(!code.is_null());
+
+        // Execute and verify correctness
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+
+        assert_eq!(ctx.x[0], 0xDEADBEEFCAFEBABE_u64);
+        assert_eq!(ctx.x[1], 0xDEADBEEFCAFEBABE_u64);
+
+        println!("Code generation produces correct executable output");
+    }
+
+    #[test]
+    fn benchmark_multiple_blocks_same_compiler() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+
+        let start = std::time::Instant::now();
+
+        // Compile 10 different blocks
+        for i in 0..10 {
+            let stmts = vec![Stmt::Assign {
+                dst: Reg::X(0),
+                src: Expr::Imm(i as u64),
+            }];
+
+            let code = compiler
+                .compile_block(0x1000 + i * 0x100, &stmts)
+                .expect("compile should succeed");
+            assert!(!code.is_null());
+        }
+
+        let elapsed = start.elapsed();
+
+        println!(
+            "Compiled 10 blocks sequentially in {:.2?} (avg {:.2?} per block)",
+            elapsed,
+            elapsed / 10
+        );
+
+        // 10 blocks should compile in < 100ms
+        assert!(
+            elapsed.as_millis() < 100,
+            "10 blocks should compile within 100ms, took {:.2?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn benchmark_memory_usage_estimation() {
+        // Create a JitContext and measure its size
+        let ctx = JitContext::default();
+        let ctx_size = std::mem::size_of_val(&ctx);
+
+        println!(
+            "JitContext size: {} bytes ({:.2} KB)",
+            ctx_size,
+            ctx_size as f64 / 1024.0
+        );
+
+        // Expected: ~792 bytes (31 GPR x 8 + 32 SIMD x 16 + flags + pc + sp + padding)
+        assert!(ctx_size > 700 && ctx_size < 900, "JitContext should be ~792 bytes");
+
+        // Create a JitCompiler and verify it's reasonable
+        let compiler = JitCompiler::new(JitConfig::default());
+        let compiler_size = std::mem::size_of_val(&compiler);
+
+        println!(
+            "JitCompiler size: {} bytes ({:.2} KB)",
+            compiler_size,
+            compiler_size as f64 / 1024.0
+        );
+
+        // JitCompiler should be < 10KB (contains Cranelift module + builder context)
+        assert!(
+            compiler_size < 10_000,
+            "JitCompiler should be < 10KB, is {} bytes",
+            compiler_size
+        );
+    }
 }
