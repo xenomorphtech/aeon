@@ -6020,19 +6020,39 @@ class NMSSCertEmulator:
                     # All three S1 sprintf calls must match device values exactly.
                     # S1#2 and S1#3 contain address-dependent values (stack/heap/JIT
                     # pointers) that differ between emulator and device.
-                    # Load S1 overrides from device capture if available
+                    # Baseline S1#1 was empirically stable across capture runs;
+                    # device captures override this when present.
                     _device_s1 = {
                         1: b'0000000100000001000000000000000000000000400300CC',
                     }
-                    # Dynamically load S1#2/#3 from device capture
+                    # Dynamically load S1#1/#2/#3 from device capture
                     dcc_s1 = getattr(self, '_device_s1_overrides', {})
                     _device_s1.update(dcc_s1)
                     if cnt in _device_s1:
                         device_val = _device_s1[cnt]
                         if result != device_val:
+                            # Warn if device override length differs from emu
+                            # output — silently writing a different-length
+                            # value shifts the x22 output cursor relative to
+                            # what the JIT code expects.
+                            if len(device_val) != len(result):
+                                print(f"[S1-OUTPUT-FIX WARN] S1#{cnt} "
+                                      f"device_val len={len(device_val)} "
+                                      f"differs from emu result len="
+                                      f"{len(result)}; output cursor may "
+                                      f"drift.", flush=True)
                             uc.mem_write(x22, device_val + b'\x00')
                             result = device_val
-                            print(f"[S1-OUTPUT-FIX] overwrote S1#{cnt} output with device values", flush=True)
+                            src = "device-capture" if cnt in dcc_s1 else "baseline"
+                            print(f"[S1-OUTPUT-FIX] S1#{cnt} overwritten "
+                                  f"({src}): {device_val[:80]!r}", flush=True)
+                    elif cnt in (1, 2, 3):
+                        # Missing override — diagnostic only, not an error,
+                        # because S1#1 is optional and some captures may not
+                        # include S1#2/#3 yet.
+                        print(f"[S1-OUTPUT-FIX] S1#{cnt} no override — using "
+                              f"emu-computed result (cert may mismatch if this "
+                              f"S1 contains ASLR-dependent values)", flush=True)
                     if cnt <= 5:
                         # Dump the 6 uint32 args being formatted (8-byte slots)
                         try:
@@ -12086,6 +12106,95 @@ class NMSSCertEmulator:
 
         return obj
 
+    _S1_EXPECTED_LEN = 48   # current sprintf-FF S1 output width
+
+    def _load_s1_overrides_from(self, src):
+        """Parse S1 override values out of a capture dict.
+
+        Supports multiple schemas so trace-claude's different capture tools
+        can write into the same config without a rename dance:
+          - flat ASCII: src["s1_args_N"] = "<48-char ASCII>"
+          - flat hex:   src["s1_args_N_hex"] = "<96-char hex>"
+          - nested:     src["s1_overrides"] = {"1": ..., "2": ..., "3": ...}
+                        or list [v1, v2, v3]
+        Returns {idx: bytes_value} for idx in {1, 2, 3}.  Warns — but does
+        not fail — on length mismatches; a bad override would produce a
+        wrong cert silently without this.
+        """
+        out = {}
+        if not isinstance(src, dict):
+            return out
+
+        def _accept(idx, raw, tag):
+            if raw is None:
+                return
+            if isinstance(raw, bytes):
+                val = raw
+            elif isinstance(raw, str):
+                val = raw.encode('ascii', errors='replace')
+            else:
+                print(f"[OVERLAY] S1#{idx} ({tag}): unsupported type "
+                      f"{type(raw).__name__}, skipping", flush=True)
+                return
+            if len(val) != self._S1_EXPECTED_LEN:
+                print(f"[OVERLAY] WARN S1#{idx} ({tag}): length "
+                      f"{len(val)} != expected {self._S1_EXPECTED_LEN}; "
+                      f"using anyway — cert may mismatch if width is wrong",
+                      flush=True)
+            out[idx] = val
+            print(f"[OVERLAY] S1#{idx} ← {tag} "
+                  f"({len(val)}B): {val[:80]!r}", flush=True)
+
+        # Schema (a) flat ASCII
+        for idx in (1, 2, 3):
+            raw = src.get(f"s1_args_{idx}")
+            if raw:
+                _accept(idx, raw, f"s1_args_{idx}")
+
+        # Schema (c) flat hex
+        for idx in (1, 2, 3):
+            if idx in out:
+                continue
+            hx = src.get(f"s1_args_{idx}_hex")
+            if isinstance(hx, str) and hx:
+                try:
+                    _accept(idx, bytes.fromhex(hx), f"s1_args_{idx}_hex")
+                except ValueError as e:
+                    print(f"[OVERLAY] WARN s1_args_{idx}_hex is not hex: {e}",
+                          flush=True)
+
+        # Schema (b) nested
+        nested = src.get("s1_overrides")
+        if isinstance(nested, dict):
+            for idx in (1, 2, 3):
+                if idx in out:
+                    continue
+                for k in (idx, str(idx)):
+                    if k in nested:
+                        v = nested[k]
+                        if isinstance(v, dict):
+                            # {"hex": "..."} / {"ascii": "..."}
+                            if "hex" in v:
+                                try:
+                                    _accept(idx, bytes.fromhex(v["hex"]),
+                                            f"s1_overrides[{idx}].hex")
+                                except ValueError:
+                                    pass
+                            elif "ascii" in v:
+                                _accept(idx, v["ascii"],
+                                        f"s1_overrides[{idx}].ascii")
+                        else:
+                            _accept(idx, v, f"s1_overrides[{idx}]")
+                        break
+        elif isinstance(nested, list):
+            for i, v in enumerate(nested[:3]):
+                idx = i + 1
+                if idx in out:
+                    continue
+                _accept(idx, v, f"s1_overrides[{i}]")
+
+        return out
+
     def _overlay_current_session_capture(self, uc, obj):
         """Overlay fresh session/detection state from current_session_capture.json.
 
@@ -12114,6 +12223,15 @@ class NMSSCertEmulator:
 
         print("[OVERLAY] Loading current session capture from "
               f"{CURRENT_SESSION_CAPTURE_PATH}", flush=True)
+
+        # Also try reading S1 overrides directly from the outer session
+        # snapshot — trace-claude's newer tools sometimes write them there
+        # rather than into the dedicated device_cert_capture file.
+        outer_s1 = self._load_s1_overrides_from(cap)
+        if outer_s1:
+            self._device_s1_overrides = outer_s1
+            print(f"[OVERLAY] Loaded S1 overrides from outer snapshot: "
+                  f"{sorted(outer_s1.keys())}", flush=True)
 
         # Extract device JIT base for SHA-256 address rebasing
         wrapper = cap.get("wrapper", {})
@@ -12153,16 +12271,21 @@ class NMSSCertEmulator:
                     print(f"[OVERLAY] Wrote device SHA input (192 bytes) to JIT+0x448478 ({sha_addr:#x})", flush=True)
                 except Exception as e:
                     print(f"[OVERLAY] Failed to write SHA input to JIT memory: {e}", flush=True)
-            # Load S1 sprintf overrides from capture
-            s1_overrides = {}
-            for idx in (1, 2, 3):
-                key = f"s1_args_{idx}"
-                val = dcc.get(key, "")
-                if val and len(val) == 48:
-                    s1_overrides[idx] = val.encode('ascii')
-                    print(f"[OVERLAY] Loaded S1#{idx} override: {val}", flush=True)
+            # Load S1 sprintf overrides from capture — robust to several
+            # schemas that trace-claude's capture tools have produced:
+            #   (a) flat: dcc["s1_args_1"|"s1_args_2"|"s1_args_3"] = "<48ch>"
+            #   (b) nested: dcc["s1_overrides"] = {"1": ..., "2": ..., "3": ...}
+            #               or dcc["s1_overrides"] = [v1, v2, v3]
+            #   (c) hex-encoded: dcc["s1_args_N_hex"] = "<96 hex chars>"
+            s1_overrides = self._load_s1_overrides_from(dcc)
             if s1_overrides:
                 self._device_s1_overrides = s1_overrides
+                print(f"[OVERLAY] Loaded S1 overrides for indices: "
+                      f"{sorted(s1_overrides.keys())}", flush=True)
+            else:
+                print("[OVERLAY] No S1 overrides found in device cert capture "
+                      f"(checked keys: s1_args_{{1,2,3}}, s1_overrides, "
+                      f"s1_args_{{1,2,3}}_hex)", flush=True)
         else:
             print(f"[OVERLAY] No device_cert_capture.json found at {DEVICE_CERT_CAPTURE}", flush=True)
 
