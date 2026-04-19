@@ -1,0 +1,18 @@
+{
+  "source": "nohook_capture",
+  "session_key": "",
+  "pairs": [
+    {
+      "challenge": "0000000000000000",
+      "token": "4E5150219BEB565F352A4FFF300F87841036F3C3A65E0B47"
+    },
+    {
+      "challenge": "FFFFFFFFFFFFFFFF",
+      "token": "1403E310BC1CCF2415839C84AF0FC8BCB3E648D1F7CBA3DA"
+    },
+    {
+      "challenge": "AABBCCDDEEFF0011",
+      "token": "8F868A5849505353C39BA200827F07EA635A3F71D2DE812C"
+    }
+  ]
+}

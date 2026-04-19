@@ -76,7 +76,29 @@ JIT_CERT_STAGE1_THUNK = JIT_BASE + 0x1C211C
 #   I_NMSessionID = C2B7A8B206F74D8F816F29EBD6752B5D (per-install, survives restarts)
 #   I_UDID        = 7B0D26CDC87D42EA
 # Old snapshot values: SESSION_KEY=F61DFB2DA2C94AA1B67CAFCD51DA7E85, DEVICE_ID=0x71893E50
-SESSION_KEY = bytes.fromhex("F82FC41278170013A0180013F82FC412")
+#
+# SESSION_KEY is per-install and changes each session.  The default below
+# matches the 5556-auth session used in recent trace-claude2 captures
+# (310DD392D9914AE684C54433E1BEAEE1).  Override via the NMSS_SESSION_KEY
+# env var for other sessions.  The prior hardcoded F82FC4… was stale; per
+# fact cert-stale-key-bug (trace-claude2), that value survives in
+# current_session_capture.json and must not override the current session.
+_DEFAULT_SESSION_KEY_HEX = "310DD392D9914AE684C54433E1BEAEE1"
+_SESSION_KEY_ENV_HEX = os.environ.get("NMSS_SESSION_KEY", "").strip().replace(" ", "")
+if _SESSION_KEY_ENV_HEX:
+    try:
+        SESSION_KEY = bytes.fromhex(_SESSION_KEY_ENV_HEX)
+        if len(SESSION_KEY) != 16:
+            raise ValueError(f"SESSION_KEY must be 16 bytes (32 hex chars); "
+                             f"got {len(SESSION_KEY)} bytes")
+        print(f"[CONFIG] SESSION_KEY set from NMSS_SESSION_KEY env: "
+              f"{SESSION_KEY.hex().upper()}", flush=True)
+    except ValueError as e:
+        print(f"[CONFIG] WARN NMSS_SESSION_KEY invalid ({e}); falling "
+              f"back to default {_DEFAULT_SESSION_KEY_HEX}", flush=True)
+        SESSION_KEY = bytes.fromhex(_DEFAULT_SESSION_KEY_HEX)
+else:
+    SESSION_KEY = bytes.fromhex(_DEFAULT_SESSION_KEY_HEX)
 SCORE       = 118         # matches live device owner+0x314 (from device_session_fresh.json)
 DEVICE_ID   = 0x00000001  # doesn't affect cert output
 CERT_CE75C_FMT_8E = b"%08X%08X%08X%08X%08X%08X"
