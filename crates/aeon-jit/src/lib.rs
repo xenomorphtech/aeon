@@ -8090,4 +8090,303 @@ mod tests {
             Some(OBJECT_UNKNOWN_BLOCK_HOOK)
         );
     }
+
+    // ── Error Path Tests ──────────────────────────────────────────────
+
+    #[test]
+    fn compile_block_rejects_invalid_memory_size_zero() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let err = compiler
+            .compile_block(
+                0x1000,
+                &[Stmt::Store {
+                    addr: Expr::Reg(Reg::X(0)),
+                    value: Expr::Reg(Reg::X(1)),
+                    size: 0, // Invalid: zero size
+                }],
+            )
+            .expect_err("zero-byte store should fail");
+        assert!(matches!(err, JitError::InvalidMemorySize(0)));
+    }
+
+    #[test]
+    fn compile_block_rejects_invalid_memory_size_non_power_of_two() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let err = compiler
+            .compile_block(
+                0x1000,
+                &[Stmt::Assign {
+                    dst: Reg::X(0),
+                    src: Expr::Load {
+                        addr: Box::new(Expr::Reg(Reg::X(1))),
+                        size: 3, // Invalid: not power of 2
+                    },
+                }],
+            )
+            .expect_err("3-byte load should fail");
+        assert!(matches!(err, JitError::InvalidMemorySize(3)));
+    }
+
+    #[test]
+    fn compile_block_rejects_invalid_memory_size_too_large() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let err = compiler
+            .compile_block(
+                0x1000,
+                &[Stmt::Store {
+                    addr: Expr::Reg(Reg::X(0)),
+                    value: Expr::Reg(Reg::X(1)),
+                    size: 32, // Invalid: too large (16 is I8X16, but 32 is not supported)
+                }],
+            )
+            .expect_err("32-byte store should fail");
+        assert!(matches!(err, JitError::InvalidMemorySize(32)));
+    }
+
+    #[test]
+    fn compile_block_handles_large_immediate_values() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let large_imm = 0xDEADBEEFCAFEBABE_u64;
+        let code = compiler
+            .compile_block(
+                0x1000,
+                &[Stmt::Assign {
+                    dst: Reg::X(0),
+                    src: Expr::Imm(large_imm),
+                }],
+            )
+            .expect("large immediate should compile");
+
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[0], large_imm, "large immediate should be loaded correctly");
+    }
+
+    #[test]
+    fn compile_block_handles_maximum_imm64() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let max_imm = u64::MAX;
+        let code = compiler
+            .compile_block(
+                0x1000,
+                &[Stmt::Assign {
+                    dst: Reg::X(0),
+                    src: Expr::Imm(max_imm),
+                }],
+            )
+            .expect("max u64 immediate should compile");
+
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[0], max_imm);
+    }
+
+    #[test]
+    fn compile_block_handles_deep_expression_nesting() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        // (((1 + 2) + 3) + 4) + 5
+        let code = compiler
+            .compile_block(
+                0x1000,
+                &[Stmt::Assign {
+                    dst: Reg::X(0),
+                    src: Expr::Add(
+                        Box::new(Expr::Add(
+                            Box::new(Expr::Add(
+                                Box::new(Expr::Add(
+                                    Box::new(Expr::Imm(1)),
+                                    Box::new(Expr::Imm(2)),
+                                )),
+                                Box::new(Expr::Imm(3)),
+                            )),
+                            Box::new(Expr::Imm(4)),
+                        )),
+                        Box::new(Expr::Imm(5)),
+                    ),
+                }],
+            )
+            .expect("deeply nested expression should compile");
+
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[0], 15, "nested addition should evaluate correctly");
+    }
+
+    #[test]
+    fn compile_block_handles_all_gpr_registers() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let mut stmts = Vec::new();
+
+        // Initialize each GPR
+        for i in 0..31 {
+            stmts.push(Stmt::Assign {
+                dst: Reg::X(i),
+                src: Expr::Imm((i as u64) * 100),
+            });
+        }
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("all GPR assignments should compile");
+
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+
+        for i in 0..31 {
+            assert_eq!(ctx.x[i], (i as u64) * 100, "register x{} should have correct value", i);
+        }
+    }
+
+    #[test]
+    fn compile_block_handles_all_simd_registers() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let mut stmts = Vec::new();
+
+        // Perform operations on SIMD registers (AND with themselves, which is supported)
+        for i in 0..32 {
+            stmts.push(Stmt::Assign {
+                dst: Reg::V(i),
+                src: Expr::Intrinsic {
+                    name: "and".to_string(),
+                    operands: vec![Expr::Reg(Reg::V(i)), Expr::Reg(Reg::V(i))],
+                },
+            });
+        }
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("all SIMD register operations should compile");
+
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+
+        // Test passed - all SIMD operations were compiled and executed
+    }
+
+    #[test]
+    fn compile_block_rejects_unsupported_barrier_kind() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let err = compiler
+            .compile_block(
+                0x1000,
+                &[Stmt::Barrier("isb_completely_custom".to_string())],
+            )
+            .expect_err("unsupported barrier should fail");
+        assert!(matches!(err, JitError::UnsupportedStmt("barrier")));
+    }
+
+    #[test]
+    fn compile_block_compiles_call_to_immediate() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let code = compiler
+            .compile_block(
+                0x1000,
+                &[Stmt::Call {
+                    target: Expr::Imm(0x4000),
+                }],
+            )
+            .expect("call to immediate should compile");
+
+        // Just verify it compiled - code is a raw pointer
+        assert!(!code.is_null(), "call should produce code");
+    }
+
+    #[test]
+    fn compile_block_handles_minimum_stack_offset() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let code = compiler
+            .compile_block(
+                0x1000,
+                &[Stmt::Store {
+                    addr: Expr::Reg(Reg::SP),
+                    value: Expr::Imm(0x1234),
+                    size: 8,
+                }],
+            )
+            .expect("store at sp should compile");
+
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+        let mut ctx = JitContext::default();
+        ctx.sp = 0x4000;
+        let mut stack_slot = 0u64;
+        unsafe {
+            // Manually set sp to point to our stack location
+            ctx.sp = (&mut stack_slot as *mut u64) as u64;
+            func(&mut ctx);
+        }
+        assert_eq!(stack_slot, 0x1234, "stack write should succeed at sp");
+    }
+
+    #[test]
+    fn compile_block_handles_large_stack_offset() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        // Load from sp + 4096 (typical stack offset range)
+        let code = compiler
+            .compile_block(
+                0x1000,
+                &[Stmt::Assign {
+                    dst: Reg::X(0),
+                    src: Expr::Load {
+                        addr: Box::new(Expr::Add(
+                            Box::new(Expr::Reg(Reg::SP)),
+                            Box::new(Expr::Imm(4096)),
+                        )),
+                        size: 8,
+                    },
+                }],
+            )
+            .expect("load from sp + 4096 should compile");
+
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+        let mut ctx = JitContext::default();
+        let mut data = [0u8; 8192];
+        let test_value = 0xCAFEBABEDEADBEEF_u64;
+        data[4096..4104].copy_from_slice(&test_value.to_le_bytes());
+
+        ctx.sp = data.as_ptr() as u64;
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[0], test_value, "should load from offset stack address");
+    }
+
+    #[test]
+    fn compile_block_handles_sequential_operations() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let code = compiler
+            .compile_block(
+                0x1000,
+                &[
+                    Stmt::Assign {
+                        dst: Reg::X(0),
+                        src: Expr::Imm(10),
+                    },
+                    Stmt::Assign {
+                        dst: Reg::X(1),
+                        src: Expr::Add(
+                            Box::new(Expr::Reg(Reg::X(0))),
+                            Box::new(Expr::Imm(5)),
+                        ),
+                    },
+                    Stmt::Assign {
+                        dst: Reg::X(2),
+                        src: Expr::Mul(
+                            Box::new(Expr::Reg(Reg::X(1))),
+                            Box::new(Expr::Imm(2)),
+                        ),
+                    },
+                ],
+            )
+            .expect("sequential operations should compile");
+
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[0], 10);
+        assert_eq!(ctx.x[1], 15);
+        assert_eq!(ctx.x[2], 30, "sequential operations should produce correct result");
+    }
 }
