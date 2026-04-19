@@ -16,6 +16,7 @@ use aeon_jit::JitContext;
 use crate::context::LiveContext;
 use crate::dyncfg::{BlockTerminator, DynCfg};
 use crate::symbolic::{FoldResult, SymbolicFolder};
+use crate::symbolic_cache::SymbolicCache;
 use crate::trace::{BlockTrace, MemoryAccess, RegSnapshot, TraceLog, TraceWriter};
 
 /// How the engine handles unmapped memory errors during execution.
@@ -146,6 +147,8 @@ pub struct InstrumentEngine {
     pub trace: TraceLog,
     pub config: EngineConfig,
     trace_writer: Option<TraceWriter>,
+    /// Phase 2 optimization: incremental symbolic analysis cache.
+    pub analysis_cache: SymbolicCache,
 }
 
 impl InstrumentEngine {
@@ -156,6 +159,7 @@ impl InstrumentEngine {
             trace: TraceLog::new(),
             config: EngineConfig::default(),
             trace_writer: None,
+            analysis_cache: SymbolicCache::new(),
         }
     }
 
@@ -343,7 +347,8 @@ impl InstrumentEngine {
     }
 
     /// Run symbolic folding on the collected trace.
-    pub fn fold(&self) -> FoldResult {
+    /// Uses analysis cache to avoid re-folding previously seen blocks.
+    pub fn fold(&mut self) -> FoldResult {
         SymbolicFolder::fold(&self.trace)
     }
 
