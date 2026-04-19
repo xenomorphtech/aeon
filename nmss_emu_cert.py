@@ -13288,6 +13288,29 @@ class NMSSCertEmulator:
         struct.pack_into("<Q", ch_buf, 16, len(data))
         self.uc.mem_write(ch_addr, bytes(ch_buf))
 
+        # Challenge SSO at MANAGER_BASE + 0xCE8 (short-SSO).
+        # Per fact cert-emu-missing-challenge-write (trace-claude2):
+        # this slot was NEVER written — every run saw an empty challenge
+        # here, so cert came out identical regardless of --challenge arg.
+        # libc++ short-SSO encoding: byte[0] = size<<1 (flag=0 for short),
+        # bytes[1..1+size] = data.  For 16-char challenges, byte[0]=0x20.
+        if len(data) <= 22:  # short-SSO max payload
+            chal_sso_buf = bytearray(24)
+            chal_sso_buf[0] = len(data) << 1  # = 0x20 for 16-char challenge
+            chal_sso_buf[1:1 + len(data)] = data
+            # byte[23] stays 0 (short-mode flag)
+            self.uc.mem_write(MANAGER_BASE + 0xCE8, bytes(chal_sso_buf))
+        else:
+            # Fall back to long-SSO for >22-char challenges
+            ch2_heap = self.heap.malloc(len(data) + 1)
+            self.uc.mem_write(ch2_heap, data + b'\x00')
+            long_sso = bytearray(24)
+            cap = len(data) + 1
+            struct.pack_into("<Q", long_sso, 0, (cap * 2) | 1)
+            struct.pack_into("<Q", long_sso, 8, len(data))
+            struct.pack_into("<Q", long_sso, 16, ch2_heap)
+            self.uc.mem_write(MANAGER_BASE + 0xCE8, bytes(long_sso))
+
         # tokenGen singleton object
         tokengen_obj = self.heap.malloc(0x100)
         self.uc.mem_write(tokengen_obj, b'\x00' * 0x100)
