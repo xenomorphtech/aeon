@@ -14,7 +14,7 @@ use std::sync::Mutex;
 
 use aeon::elf::{load_elf, LoadedBinary};
 use aeon_instrument::context::{ElfMemory, LiveContext, SnapshotMemory};
-use aeon_instrument::engine::{EngineConfig, InstrumentEngine, StopReason};
+use aeon_instrument::engine::{EngineConfig, InstrumentEngine, StopReason, UnmappedMemoryMode};
 use aeon_instrument::symbolic::Invariant;
 use aeon_instrument::trace::read_trace_file;
 
@@ -617,6 +617,7 @@ fn nmss_crypto_sub_20bb48_traces_to_disk() {
         code_alias_base: None,
         trace_output: Some(trace_path.clone()),
         drain_interval: 2048,
+        unmapped_memory_mode: UnmappedMemoryMode::Halt,
     };
 
     let reason = engine.run();
@@ -686,6 +687,7 @@ fn nmss_crypto_sub_2070a8_traces_to_disk() {
         code_alias_base: None,
         trace_output: Some(trace_path.clone()),
         drain_interval: 2048,
+        unmapped_memory_mode: UnmappedMemoryMode::Halt,
     };
 
     let reason = engine.run();
