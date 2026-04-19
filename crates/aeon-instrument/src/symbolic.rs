@@ -48,6 +48,12 @@ pub enum Invariant {
         writer_block: u64,
         reader_block: u64,
     },
+    /// Vtable detected at `addr` with function pointers.
+    /// Elements are (offset, target_address) pairs.
+    VtablePointer {
+        addr: u64,
+        entries: Vec<(u32, u64)>,
+    },
 }
 
 /// Results of symbolic folding.
@@ -59,6 +65,7 @@ pub struct FoldResult {
     pub resolved_branches: usize,
     pub induction_variables: usize,
     pub dataflow_edges: usize,
+    pub vtables_detected: usize,
 }
 
 /// Analyze a trace log to discover invariants.
@@ -74,6 +81,7 @@ impl SymbolicFolder {
         Self::find_branch_invariants(trace, &mut result);
         Self::find_induction_variables(trace, &mut result);
         Self::find_dataflow_edges(trace, &mut result);
+        Self::find_vtables(trace, &mut result);
 
         result
     }
@@ -191,6 +199,65 @@ impl SymbolicFolder {
                         result.dataflow_edges += 1;
                     }
                 }
+            }
+        }
+    }
+
+    fn find_vtables(trace: &TraceLog, result: &mut FoldResult) {
+        // Detect vtable patterns: sequences of reads from consecutive addresses
+        // that always yield code pointers (high addresses, within binary range).
+        // Look for: addr, addr+8, addr+16, ... → all code pointers
+
+        let mut reads_by_addr: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+        for block in &trace.blocks {
+            for access in &block.memory_accesses {
+                if !access.is_write {
+                    reads_by_addr.entry(access.addr).or_default().push(access.value);
+                }
+            }
+        }
+
+        // Find potential vtable bases by looking for aligned addresses with
+        // 3+ consecutive pointer-sized reads that are all code pointers
+        let mut visited = std::collections::HashSet::new();
+        for (&addr, _) in &reads_by_addr {
+            if visited.contains(&addr) {
+                continue;
+            }
+
+            // Skip if address doesn't look like a vtable base (not 8-byte aligned)
+            if addr & 0x7 != 0 {
+                continue;
+            }
+
+            let mut entries = Vec::new();
+            let mut offset = 0u32;
+
+            // Scan forward looking for consecutive 8-byte reads that are code pointers
+            loop {
+                let check_addr = addr.wrapping_add(offset as u64);
+                if let Some(read_vals) = reads_by_addr.get(&check_addr) {
+                    // Check if all reads from this address are code pointers
+                    // (heuristic: within typical code range, non-zero)
+                    if read_vals.iter().all(|&v| v > 0x1000 && (v as i64) > 0) {
+                        entries.push((offset, read_vals[0]));
+                        offset = offset.wrapping_add(8);
+                        visited.insert(check_addr);
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            // Only report if we found 3+ entries
+            if entries.len() >= 3 {
+                result.invariants.push(Invariant::VtablePointer {
+                    addr,
+                    entries,
+                });
+                result.vtables_detected += 1;
             }
         }
     }
