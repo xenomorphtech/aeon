@@ -2398,14 +2398,35 @@ class NMSSCertEmulator:
         self.uc.mem_write(MANAGER_BASE + 0x314, struct.pack("<I", SCORE))
         # Device ID
         self.uc.mem_write(MANAGER_BASE + 0x340, struct.pack("<I", DEVICE_ID))
-        # Raw session key bytes at MANAGER_BASE+0x380 (matches live device layout).
-        # The live device stores SESSION_KEY[4:] + SESSION_KEY at +0x380.
-        # Note: the CFF code reads [obj+0x388] where obj is a STACK struct
-        # (not the manager), so these values are not directly used by the CFF loop.
+        # Session key placement in the manager struct — two different offsets
+        # are READ by different code paths:
+        #
+        #   mgr+0x210: libc++ long-SSO std::string holding the 32-char ASCII
+        #             hex form of SESSION_KEY.  Used by the UN-authenticated
+        #             cert path (JIT encoder reads it for its crypto setup).
+        #             In a real un-authed live session, +0x210 is zero.
+        #
+        #   mgr+0x388: 16 raw bytes = SESSION_KEY (verbatim).  Used by the
+        #             AUTHENTICATED cert path after session establishment
+        #             (fact cert-auth-session-key-at-0x388 from trace-claude3:
+        #             "authenticated session key lives at mgr+0x388").
+        #
+        # We write to BOTH so the same emulator image serves both cert
+        # pipelines without re-init.  Keep the legacy rotated raw_key at
+        # +0x380 as well — some older code paths probe there.
         raw_key = SESSION_KEY[4:] + SESSION_KEY
         self.uc.mem_write(MANAGER_BASE + 0x380, raw_key[:24])
+
+        # Authenticated-path session key: 16 raw bytes directly at +0x388.
+        # NOTE: this OVERLAPS with the raw_key[:24] write above.
+        # raw_key[:24] covers [+0x380, +0x398); SESSION_KEY covers [+0x388,
+        # +0x398), overwriting raw_key bytes 0x8..0x18.  That's intentional
+        # — the authenticated read wants SESSION_KEY[0..16] here, not the
+        # rotated layout.
+        self.uc.mem_write(MANAGER_BASE + 0x388, SESSION_KEY)
+
         # String at MANAGER_BASE+0x210: session key hex string (32 chars).
-        # The JIT encoder reads this for its crypto computation.
+        # The UN-authenticated path reads this for its crypto computation.
         # 32 chars > 22 (short SSO limit), so use LONG SSO format.
         sk_hex = SESSION_KEY.hex().encode('ascii')  # 32-char hex string
         sk_hex_heap = self.heap.malloc(len(sk_hex) + 1)
@@ -2417,6 +2438,11 @@ class NMSSCertEmulator:
         struct.pack_into("<Q", sso_buf, 8, len(sk_hex))     # size
         struct.pack_into("<Q", sso_buf, 16, sk_hex_heap)    # data pointer
         self.uc.mem_write(MANAGER_BASE + 0x210, bytes(sso_buf))
+
+        # Stash the offsets so runtime asserts / diagnostics can probe the
+        # right addresses without recomputing.
+        self._session_key_auth_addr = MANAGER_BASE + 0x388
+        self._session_key_unauth_sso_addr = MANAGER_BASE + 0x210
         # Detection array
         det = MANAGER_BASE + 0x900
         self.uc.mem_write(MANAGER_BASE + 0x488, struct.pack("<Q", det))
@@ -2725,6 +2751,28 @@ class NMSSCertEmulator:
         sess210_addr = MANAGER_BASE + 0x210
         self.uc.hook_add(UC_HOOK_MEM_WRITE, self._sess210_write_hook,
                         begin=sess210_addr, end=sess210_addr + 24)
+
+        # Watchpoint on session+0x388 — the AUTHENTICATED session key slot
+        # (16 raw bytes of SESSION_KEY).  If the cert path reads from here
+        # instead of +0x210, we need to see exactly where/when — it
+        # disambiguates the auth-vs-unauth flow per fact
+        # cert-auth-session-key-at-0x388.
+        sess388_addr = MANAGER_BASE + 0x388
+        self._sess388_reads = []  # list of (pc_off, size)
+        def _sess388_read_cb(uc, access, addr, size, value, user_data):
+            pc = uc.reg_read(UC_ARM64_REG_PC)
+            off = pc - JIT_BASE if JIT_BASE <= pc < JIT_BASE + JIT_RUNTIME_SIZE else pc
+            rel = addr - sess388_addr
+            self._sess388_reads.append((off, rel, size))
+            # Print first 8 reads inline; after that just tally.
+            if len(self._sess388_reads) <= 8:
+                print(f"[SESS-KEY-388 READ] JIT+{off:#x}: "
+                      f"mgr+0x388+{rel:#x} size={size}", flush=True)
+        self.uc.hook_add(UC_HOOK_MEM_READ, _sess388_read_cb,
+                        begin=sess388_addr, end=sess388_addr + 16)
+        print(f"[SESS-WATCH-388] Installed read watch on mgr+0x388 "
+              f"({sess388_addr:#x}..{sess388_addr+16:#x}) for auth-mode "
+              f"session-key tracing", flush=True)
         # Also watch the heap buffer that holds the session key hex string
         sk_heap_ptr = struct.unpack("<Q", bytes(self.uc.mem_read(sess210_addr + 16, 8)))[0]
         if sk_heap_ptr > 0x1000:
