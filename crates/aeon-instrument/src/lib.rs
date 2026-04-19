@@ -20,6 +20,7 @@ pub mod dyncfg;
 pub mod dynffi;
 pub mod dynruntime;
 pub mod engine;
+pub mod parallel_cfg;
 pub mod snapshot;
 pub mod symbolic;
 pub mod symbolic_cache;

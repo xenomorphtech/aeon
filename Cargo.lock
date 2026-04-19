@@ -53,6 +53,7 @@ dependencies = [
  "criterion",
  "libc",
  "object 0.36.7",
+ "rayon",
  "serde",
  "serde_json",
 ]
