@@ -32,7 +32,6 @@ impl AeonFrontend {
             "search_analysis_names" => self.tool_search_analysis_names(args),
             "get_blackboard_entry" => self.tool_get_blackboard_entry(args),
             "get_il" => self.tool_get_il(args),
-            "get_function_il" => self.tool_get_function_il(args),
             "get_reduced_il" => self.tool_get_reduced_il(args),
             "get_ssa" => self.tool_get_ssa(args),
             "get_stack_frame" => self.tool_get_stack_frame(args),
@@ -53,7 +52,6 @@ impl AeonFrontend {
             "get_data" => self.tool_get_data(args),
             "emulate_snippet_il" => self.tool_emulate_snippet_il(args),
             "emulate_snippet_native" => self.tool_emulate_snippet_native(args),
-            "emulate_snippet" => self.tool_emulate_snippet_native(args),
             "emulate_snippet_native_advanced" => self.tool_emulate_snippet_native_advanced(args),
             "execute_datalog" => self.tool_execute_datalog(args),
             _ => Err(format!("Unknown tool: {}", name)),
@@ -457,14 +455,14 @@ pub fn tools_list() -> Value {
                 }})),
 
             tool_schema("set_analysis_name",
-                "Backwards-compatible alias for rename_symbol. Attaches or overwrites a semantic symbol on an address.",
+                "Attach or overwrite a semantic symbol name on an address (identical to rename_symbol). Assigns a custom analysis label for documentation and reference.",
                 json!({"type": "object", "properties": {
                     "addr": {"type": "string", "description": "Virtual address in hex"},
                     "name": {"type": "string", "description": "Analysis name to assign to the address"}
                 }, "required": ["addr", "name"]})),
 
             tool_schema("rename_symbol",
-                "Attach or overwrite a semantic symbol name on an address.",
+                "Attach or overwrite a semantic symbol name on an address (identical to set_analysis_name). Assigns a custom analysis label for documentation and reference.",
                 json!({"type": "object", "properties": {
                     "addr": {"type": "string", "description": "Virtual address in hex"},
                     "name": {"type": "string", "description": "Semantic symbol name to assign to the address"}
@@ -497,25 +495,19 @@ pub fn tools_list() -> Value {
                 }, "required": ["addr"]})),
 
             tool_schema("get_il",
-                "Get the lifted AeonIL intermediate language listing for the function containing a given address.",
-                json!({"type": "object", "properties": {
-                    "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"}
-                }, "required": ["addr"]})),
-
-            tool_schema("get_function_il",
-                "Backwards-compatible alias for get_il.",
+                "Get the lifted AeonIL intermediate language listing for the function containing a given address. Use when analyzing full IL details. For block-structure overview, use get_reduced_il instead.",
                 json!({"type": "object", "properties": {
                     "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"}
                 }, "required": ["addr"]})),
 
             tool_schema("get_reduced_il",
-                "Return block-structured reduced AeonIL for the function containing a given address.",
+                "Return block-structured reduced AeonIL for the function containing a given address. Use when you need control flow structure without full IL details. Faster than get_il for overview analysis.",
                 json!({"type": "object", "properties": {
                     "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"}
                 }, "required": ["addr"]})),
 
             tool_schema("get_ssa",
-                "Return reduced SSA form for the function containing a given address, optionally optimized.",
+                "Return reduced SSA form for the function containing a given address, optionally optimized. Use for data flow analysis and value tracking. Better than IL for understanding variable definitions and uses.",
                 json!({"type": "object", "properties": {
                     "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"},
                     "optimize": {"type": "boolean", "description": "Run SSA optimization passes before returning JSON", "default": true}
@@ -534,18 +526,18 @@ pub fn tools_list() -> Value {
                 }, "required": ["addr"]})),
 
             tool_schema("get_function_skeleton",
-                "Get a dense summary of function properties for efficient triage: argument count, calls, strings, loops, crypto constants, stack frame size, and suspicious patterns.",
+                "Get a dense summary of function properties for quick analysis: argument count, calls, string literals, loops, crypto constants, stack frame, suspicious patterns. Use for initial function triage before detailed analysis with get_il or get_cfg.",
                 json!({"type": "object", "properties": {
                     "addr": {"type": "string", "description": "Function address in hex"}
                 }, "required": ["addr"]})),
 
 
             tool_schema("get_data_flow_slice",
-                "Trace value flow for a register backward or forward through a function: backward shows where a value comes from, forward shows where it goes. Detects data dependencies through assignments and control flow.",
+                "Trace value flow for a register backward or forward from an instruction. Backward: find where value originates. Forward: find where value is consumed. Returns instruction addresses and registers in the data dependency chain. Use to understand parameter flow or value dependencies.",
                 json!({"type": "object", "properties": {
                     "addr": {"type": "string", "description": "Instruction address in hex, e.g. '0x5e611fc'"},
                     "register": {"type": "string", "description": "Register name (e.g., 'x0', 'w1', 'sp')"},
-                    "direction": {"type": "string", "enum": ["backward", "forward"], "description": "Direction of data flow to trace"}
+                    "direction": {"type": "string", "enum": ["backward", "forward"], "description": "Backward: find value origin. Forward: find value uses."}
                 }, "required": ["addr", "register", "direction"]})),
 
             tool_schema("get_xrefs",
@@ -555,20 +547,20 @@ pub fn tools_list() -> Value {
                 }, "required": ["addr"]})),
 
             tool_schema("execute_datalog",
-                "Run a named Datalog query over a function or the whole binary. Returns structured facts derived by the ascent Datalog engine from lifted AeonIL.",
+                "Run a named Datalog query over a function or the whole binary. Returns structured facts derived by the ascent Datalog engine from lifted AeonIL. Query-specific parameters: 'defines' and 'flows_to' require 'register' parameter. Others only need 'addr'.",
                 json!({"type": "object", "properties": {
                     "query": {"type": "string", "enum": ["reachability", "defines", "reads_mem", "writes_mem", "flows_to", "call_graph", "call_graph_transitive"], "description": "Named Datalog query to execute"},
                     "addr": {"type": "string", "description": "Virtual address in hex. For per-function queries, identifies the function. For cross-function queries, identifies the root function."},
-                    "register": {"type": "string", "description": "Register name (e.g. 'x0', 'w1', 'sp'). Required for 'defines' and 'flows_to' queries."},
-                    "limit": {"type": "integer", "description": "Maximum number of result tuples to return", "default": 500}
+                    "register": {"type": "string", "description": "Register name (e.g. 'x0', 'w1', 'sp'). REQUIRED for 'defines' and 'flows_to' queries only."},
+                    "limit": {"type": "integer", "description": "Maximum number of result tuples to return. Default 500 usually sufficient, increase for large result sets.", "default": 500}
                 }, "required": ["query", "addr"]})),
 
             tool_schema("scan_pointers",
-                "Scan non-executable mapped sections for pointer-sized values that reference other locations in the binary, classifying data-to-data and data-to-code edges.",
+                "Scan data sections (.rodata, .data) for embedded pointers. Classifies references as data-to-data or data-to-code. Returns map of pointer addresses and targets. Use to find hidden function pointers or global data references.",
                 json!({"type": "object", "properties": {}})),
 
             tool_schema("scan_vtables",
-                "Detect candidate C++ vtables in .rodata/.data-style sections by finding arrays of function pointers and grouping related tables.",
+                "Detect C++ virtual method tables (vtables) in data sections. Finds arrays of function pointers and groups related tables. Returns vtable addresses and methods. Use to understand class hierarchies and virtual dispatch.",
                 json!({"type": "object", "properties": {}})),
 
             tool_schema("get_function_pointers",
@@ -634,26 +626,16 @@ pub fn tools_list() -> Value {
                 }, "required": ["addr"]})),
 
             tool_schema("emulate_snippet_il",
-                "Execute an ARM64 code region using AeonIL interpretation. Executes lifted IL statements without full binary emulation. Useful for symbolic execution or analyzing stripped code.",
+                "Execute an ARM64 code region using AeonIL interpretation without full binary emulation. Faster than native emulation. Use for symbolic execution, quick logic analysis, or stripped code. For accurate memory simulation, use emulate_snippet_native instead.",
                 json!({"type": "object", "properties": {
                     "start_addr": {"type": "string", "description": "Hex address to begin execution, e.g. '0x1234'"},
                     "end_addr": {"type": "string", "description": "Hex address to stop execution (exclusive)"},
                     "initial_registers": {"type": "object", "description": "Register values at entry. Keys: x0-x30, sp. Values: hex strings or integers.", "additionalProperties": {}},
-                    "step_limit": {"type": "integer", "description": "Max IL statements to execute (default 1000)", "default": 1000}
+                    "step_limit": {"type": "integer", "description": "Max IL statements to execute. Use 100-1000 for snippets, 10000+ for loops (default 1000)", "default": 1000}
                 }, "required": ["start_addr", "end_addr"]})),
 
             tool_schema("emulate_snippet_native",
-                "Execute an ARM64 code region in unicorn ARM64 sandbox. Full native emulation with memory support. Returns final register state, memory writes, and decoded strings.",
-                json!({"type": "object", "properties": {
-                    "start_addr": {"type": "string", "description": "Hex address to begin execution, e.g. '0x1234'"},
-                    "end_addr": {"type": "string", "description": "Hex address to stop execution (exclusive)"},
-                    "initial_registers": {"type": "object", "description": "Register values at entry. Keys: x0-x30, sp, pc, nzcv. Values: hex strings or integers.", "additionalProperties": {}},
-                    "initial_memory": {"type": "object", "description": "Memory overlays. Keys: hex addresses. Values: hex string or array of bytes.", "additionalProperties": {}},
-                    "step_limit": {"type": "integer", "description": "Max instructions to execute (default 1000)", "default": 1000}
-                }, "required": ["start_addr", "end_addr"]})),
-
-            tool_schema("emulate_snippet",
-                "Execute an ARM64 code region in a bounded sandbox. Alias for emulate_snippet_native. Returns final register state, memory writes, and any decoded strings. Use for reversing obfuscated loops, string decryption, or format decoders.",
+                "Execute an ARM64 code region in unicorn ARM64 sandbox. Full native emulation with memory support. Use for reversing obfuscated loops, string decryption, or format decoders. Returns final register state, memory writes, and decoded strings. For faster interpretation-only analysis, use emulate_snippet_il instead.",
                 json!({"type": "object", "properties": {
                     "start_addr": {"type": "string", "description": "Hex address to begin execution, e.g. '0x1234'"},
                     "end_addr": {"type": "string", "description": "Hex address to stop execution (exclusive)"},
