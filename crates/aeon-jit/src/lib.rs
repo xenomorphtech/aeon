@@ -1360,7 +1360,9 @@ impl LoweringState {
                 builder.ins().return_(&[ret]);
                 self.terminated = true;
             }
-            Stmt::Nop => return Err(JitError::UnsupportedStmt("nop")),
+            Stmt::Nop => {
+                // No-op: do nothing
+            }
             Stmt::Barrier(kind) => {
                 if !is_supported_barrier(kind) {
                     return Err(JitError::UnsupportedStmt("barrier"));
@@ -5922,12 +5924,12 @@ mod tests {
     }
 
     #[test]
-    fn compile_block_rejects_nop() {
+    fn compile_block_allows_nop() {
         let mut compiler = JitCompiler::new(JitConfig::default());
-        let err = compiler
+        let code = compiler
             .compile_block(0x1000, &[Stmt::Nop])
-            .expect_err("nop should fail fast");
-        assert!(matches!(err, JitError::UnsupportedStmt("nop")));
+            .expect("nop should compile");
+        assert!(!code.is_null());
     }
 
     #[test]
