@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 
 use crate::hook_engine::{HookContext, ControlFlow, InstrumentationHook, HookEngine};
 use crate::rewriter::{CodeRegion, CoreRewriter};
-use crate::il_store::{ILStore, ILLevel};
+use crate::il_store::ILStore;
 
 /// Simplified hook handler for common patterns
 pub struct SimpleHook<F>

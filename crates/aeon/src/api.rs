@@ -1179,6 +1179,50 @@ impl AeonSession {
         serde_json::to_value(&result).map_err(|e| format!("serialize result: {}", e))
     }
 
+    /// Create instrumentation for a code region
+    pub fn create_instrumentation(
+        &self,
+        start_addr: u64,
+        end_addr: u64,
+    ) -> Result<crate::instrumentation::InstrumentationBuilder, String> {
+        if start_addr >= end_addr {
+            return Err("start_addr must be less than end_addr".to_string());
+        }
+
+        // Get bytes for the region
+        let size = (end_addr - start_addr) as usize;
+        if size > 0x100000 {
+            return Err("region too large (max 1MB)".to_string());
+        }
+
+        let bytes = vec![0u8; size];
+        let region = crate::rewriter::CodeRegion::new(start_addr, end_addr, bytes);
+
+        Ok(crate::instrumentation::InstrumentationBuilder::new()
+            .register_region(region)?)
+    }
+
+    /// Get rewriter info for all registered regions
+    pub fn instrumentation_info(&self) -> Value {
+        json!({
+            "status": "instrumentation framework ready",
+            "phases": {
+                "phase_1": "Core Rewriter (shadow memory, PC redirection)",
+                "phase_2": "IL Storage (LLIL/MLIL/HLIL queries)",
+                "phase_3": "Hook Engine (sandboxed execution context)",
+                "phase_4": "Rust Scripting API (high-level hooks)",
+                "phase_5": "AeonSession Integration (this endpoint)"
+            },
+            "hooks_available": [
+                "InstructionTracer - log all instructions",
+                "MemoryTracer - log memory accesses",
+                "RegisterTracer - track register changes",
+                "BranchTracer - log branches/calls",
+                "Custom hooks via InstrumentationHook trait"
+            ]
+        })
+    }
+
     fn with_function_artifacts<T>(
         &self,
         addr: u64,

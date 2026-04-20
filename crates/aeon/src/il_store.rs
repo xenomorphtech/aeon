@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use serde_json::{json, Value};
-use crate::il::{Expr, Stmt};
+use crate::il::Stmt;
 use crate::function_ir::DecodedInstruction;
 
 /// Abstraction level for IL representation

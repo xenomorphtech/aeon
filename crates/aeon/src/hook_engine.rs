@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use serde_json::{json, Value};
-use crate::il_store::{ILLevel, ILStore, InstructionIL};
+use crate::il_store::{ILLevel, ILStore};
 use crate::il::Stmt;
 
 /// Control flow decision from hook execution

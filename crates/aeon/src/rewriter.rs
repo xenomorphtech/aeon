@@ -268,7 +268,7 @@ impl CoreRewriter {
     }
 
     /// Protect original code region as read-only
-    pub fn protect_original(&mut self, original_addr: u64) -> Result<(), String> {
+    pub fn protect_original(&mut self, _original_addr: u64) -> Result<(), String> {
         // In Phase 1, we just track the intent
         // In Phase 2-3, this will use mprotect/VirtualProtect
         Ok(())
