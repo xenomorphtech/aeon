@@ -165,36 +165,36 @@ Generated from `crates/aeon-frontend/src/service.rs` via `cargo run -p aeon-fron
 |------|-------------|
 | `load_binary` | Load an ELF or raw AArch64 binary for analysis. Must be called before other tools. |
 | `list_functions` | List functions discovered from .eh_frame unwind tables. Supports pagination and name filtering. |
-| `set_analysis_name` | Backwards-compatible alias for rename_symbol. Attaches or overwrites a semantic symbol on an address. |
-| `rename_symbol` | Attach or overwrite a semantic symbol name on an address. |
-| `define_struct` | Attach or overwrite a structure definition on an address. |
-| `add_hypothesis` | Record a semantic hypothesis on an address. Duplicate notes are ignored. |
+| `set_analysis_name` | Attach or overwrite a semantic symbol name on an address (identical to rename_symbol). Assigns a custom analysis label for documentation and reference. |
+| `rename_symbol` | Attach or overwrite a semantic symbol name on an address (identical to set_analysis_name). Assigns a custom analysis label for documentation and reference. |
+| `define_struct` | Attach or overwrite a structure definition on an address. Use to document inferred struct layouts at data locations or function parameters. |
+| `add_hypothesis` | Record a semantic hypothesis or analyst note on an address. Accumulates observations; duplicates ignored. Use to document reasoning, suspected vulnerabilities, or ambiguous behavior. |
 | `search_analysis_names` | Search analysis names attached to addresses using a regex pattern. |
 | `get_blackboard_entry` | Look up all semantic context recorded for an address: symbol name, struct definition, hypotheses, and containing function. Use to inspect what the blackboard knows about a specific address. |
-| `get_il` | Get the lifted AeonIL intermediate language listing for the function containing a given address. |
+| `get_il` | Get the lifted AeonIL intermediate language listing for the function containing a given address. Use when analyzing full IL details. For block-structure overview, use get_reduced_il instead. |
 | `get_function_il` | Backwards-compatible alias for get_il. |
-| `get_reduced_il` | Return block-structured reduced AeonIL for the function containing a given address. |
-| `get_ssa` | Return reduced SSA form for the function containing a given address, optionally optimized. |
-| `get_stack_frame` | Summarize the detected stack frame and visible stack-slot accesses for the function containing a given address. |
+| `get_reduced_il` | Return block-structured reduced AeonIL for the function containing a given address. Use when you need control flow structure without full IL details. Faster than get_il for overview analysis. |
+| `get_ssa` | Return reduced SSA form for the function containing a given address, optionally optimized. Use for data flow analysis and value tracking. Better than IL for understanding variable definitions and uses. |
+| `get_stack_frame` | Summarize the detected stack frame and visible stack-slot accesses for the function containing a given address. Use to identify local variables, stack-based arguments, and saved register locations. |
 | `get_function_cfg` | Get the Control Flow Graph for a function. Returns adjacency list, terminal blocks, and reachability from Datalog analysis. |
-| `get_function_skeleton` | Get a dense summary of function properties for efficient triage: argument count, calls, strings, loops, crypto constants, stack frame size, and suspicious patterns. |
-| `get_data_flow_slice` | Trace value flow for a register backward or forward through a function: backward shows where a value comes from, forward shows where it goes. Detects data dependencies through assignments and control flow. |
+| `get_function_skeleton` | Get a dense summary of function properties for quick analysis: argument count, calls, string literals, loops, crypto constants, stack frame, suspicious patterns. Use for initial function triage before detailed analysis with get_il or get_cfg. |
+| `get_data_flow_slice` | Trace value flow for a register backward or forward from an instruction. Backward: find where value originates. Forward: find where value is consumed. Returns instruction addresses and registers in the data dependency chain. Use to understand parameter flow or value dependencies. |
 | `get_xrefs` | Get cross-references for an address: outgoing calls from the function, and incoming calls from other functions. |
-| `execute_datalog` | Run a named Datalog query over a function or the whole binary. Returns structured facts derived by the ascent Datalog engine from lifted AeonIL. |
-| `scan_pointers` | Scan non-executable mapped sections for pointer-sized values that reference other locations in the binary, classifying data-to-data and data-to-code edges. |
-| `scan_vtables` | Detect candidate C++ vtables in .rodata/.data-style sections by finding arrays of function pointers and grouping related tables. |
-| `get_function_pointers` | Enumerate pointer-valued operands and resolved code/data references for one function or a paginated slice of functions. |
-| `find_call_paths` | Find shortest and optionally all bounded call-graph paths between two functions using direct calls and vtable-resolved indirect calls. |
+| `execute_datalog` | Run a named Datalog query over a function or the whole binary. Returns structured facts derived by the ascent Datalog engine from lifted AeonIL. Query-specific parameters: 'defines' and 'flows_to' require 'register' parameter. Others only need 'addr'. |
+| `scan_pointers` | Scan data sections (.rodata, .data) for embedded pointers. Classifies references as data-to-data or data-to-code. Returns map of pointer addresses and targets. Use to find hidden function pointers or global data references. |
+| `scan_vtables` | Detect C++ virtual method tables (vtables) in data sections. Finds arrays of function pointers and groups related tables. Returns vtable addresses and methods. Use to understand class hierarchies and virtual dispatch. |
+| `get_function_pointers` | Enumerate pointer-valued operands and resolved code/data references for one function or a paginated slice of functions. Use with addr to analyze one function, or omit addr to scan all functions. |
+| `find_call_paths` | Find call-graph paths between two functions. Returns shortest path by default. Use to understand how execution reaches target functions. Enable include_all_paths for all reachable paths (useful for exploit chains or data flow tracking). |
 | `get_bytes` | Read raw bytes from the binary at a virtual address. Returns hex-encoded string. |
-| `search_rc4` | Search for RC4 cipher implementations using Datalog behavioral subgraph isomorphism. Detects KSA (swap+256+mod256) and PRGA (swap+keystream XOR) patterns. |
-| `get_coverage` | Get IL lift coverage statistics: proper IL vs intrinsic vs nop vs decode errors. |
-| `get_asm` | Disassemble ARM64 instructions between two virtual addresses. Returns asm only, without AeonIL. |
-| `get_function_at` | Find the function containing a given address. Returns function metadata by default, and can optionally attach asm and/or AeonIL listings. |
-| `get_string` | Read a null-terminated string at any virtual address (works across all ELF segments, not just .text). |
-| `get_data` | Read raw bytes at any virtual address (works across all ELF segments). Returns hex + ASCII. |
-| `emulate_snippet_il` | Execute an ARM64 code region using AeonIL interpretation. Executes lifted IL statements without full binary emulation. Useful for symbolic execution or analyzing stripped code. |
-| `emulate_snippet_native` | Execute an ARM64 code region in unicorn ARM64 sandbox. Full native emulation with memory support. Returns final register state, memory writes, and decoded strings. |
-| `emulate_snippet` | Execute an ARM64 code region in a bounded sandbox. Alias for emulate_snippet_native. Returns final register state, memory writes, and any decoded strings. Use for reversing obfuscated loops, string decryption, or format decoders. |
+| `search_rc4` | Search for RC4 cipher implementations using behavioral pattern matching. Detects key setup (KSA) with swap/mod256 patterns and keystream generation (PRGA) with XOR operations. Use to identify crypto operations in obfuscated code. |
+| `get_coverage` | Get IL lift coverage statistics: percentage of instructions successfully lifted vs intrinsics vs NOPs vs decode failures. Use to assess IL quality and identify unlifted instruction patterns. |
+| `get_asm` | Disassemble ARM64 instructions between two virtual addresses. Returns asm only, without AeonIL. Use for quick assembly inspection without full IL lifting. |
+| `get_function_at` | Find the function containing a given address. Returns function metadata (bounds, name, etc.). Use include_asm=true for assembly listing or include_il=true for full IL analysis. Quick way to identify function context before deeper analysis. |
+| `get_string` | Read a null-terminated string at any virtual address (works across all ELF segments, not just .text). Use to extract embedded strings, error messages, or constants for context in analysis. |
+| `get_data` | Read raw bytes at any virtual address (works across all ELF segments). Returns hex + ASCII. Use for inspecting data sections, tables, or constants outside of code regions. |
+| `emulate_snippet_il` | Execute an ARM64 code region using AeonIL interpretation without full binary emulation. Faster than native emulation. Use for symbolic execution, quick logic analysis, or stripped code. For accurate memory simulation, use emulate_snippet_native instead. |
+| `emulate_snippet_native` | Execute an ARM64 code region in unicorn ARM64 sandbox. Full native emulation with memory support. Use for reversing obfuscated loops, string decryption, or format decoders. Returns final register state, memory writes, and decoded strings. For faster interpretation-only analysis, use emulate_snippet_il instead. |
+| `emulate_snippet` | Execute an ARM64 code region in a bounded sandbox. Alias for emulate_snippet_native. Returns final register state, memory writes, and decoded strings. Use for reversing obfuscated loops, string decryption, or format decoders. |
 | `emulate_snippet_native_advanced` | Execute an ARM64 code region with advanced features: memory watchpoints, instruction hooks with register patching, PC tracing, and extended register state (SIMD). |
 <!-- END GENERATED TOOL SURFACE -->
 
