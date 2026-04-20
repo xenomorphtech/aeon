@@ -483,7 +483,7 @@ fn build_advanced_emulation_schema() -> Value {
 fn tools_list_base() -> Vec<Value> {
     vec![
         tool_schema("load_binary",
-            "Load an ELF or raw AArch64 binary for analysis. Must be called before other tools.",
+            "Load an ELF or raw AArch64 binary for analysis. Must be called before other tools. Typical workflow: load_binary → list_functions → get_function_skeleton (triage) → get_il/get_ssa (deep analysis). Returns binary metadata (entry point, section info). For raw binaries, base_addr sets virtual address offset.",
             json!({"type": "object", "properties": {
                 "path": {"type": "string", "description": "Path to binary"},
                 "format": {"type": "string", "description": "Binary format: 'elf' or 'raw'", "default": "elf"},
@@ -513,27 +513,27 @@ fn tools_list_base() -> Vec<Value> {
             }, "required": ["addr", "name"]})),
 
         tool_schema("define_struct",
-            "Attach or overwrite a structure definition on an address. Use to document inferred struct layouts at data locations or function parameters.",
+            "Attach or overwrite a structure definition on an address. Use to document inferred struct layouts at data locations or function parameters. Definition is free-form text (e.g. `{field1: u64, field2: u32}` or C-like `struct { uint64_t a; uint32_t b; }`). Returns success/failure. Limitation: definition is stored as text; no validation or type checking applied.",
             json!({"type": "object", "properties": {
                 "addr": {"type": "string", "description": "Virtual address in hex"},
                 "definition": {"type": "string", "description": "Structure definition text"}
             }, "required": ["addr", "definition"]})),
 
         tool_schema("add_hypothesis",
-            "Record a semantic hypothesis or analyst note on an address. Accumulates observations; duplicates ignored. Use to document reasoning, suspected vulnerabilities, or ambiguous behavior.",
+            "Record a semantic hypothesis or analyst note on an address. Accumulates observations; duplicates ignored. Use to document reasoning, suspected vulnerabilities, or ambiguous behavior. Example notes: `possible_integer_overflow`, `looks_like_CRC32_loop`, `malloc_call_without_check`. All notes retrieved via get_blackboard_entry.",
             json!({"type": "object", "properties": {
                 "addr": {"type": "string", "description": "Virtual address in hex"},
                 "note": {"type": "string", "description": "Hypothesis or analyst note"}
             }, "required": ["addr", "note"]})),
 
         tool_schema("search_analysis_names",
-            "Search analysis names attached to addresses using a regex pattern.",
+            "Search analysis names attached to addresses using a regex pattern. Finds all addresses where set_analysis_name/rename_symbol was used. Use to locate all references to a specific analysis (e.g., all hypothetical vulnerability sites). Limitations: only searches names already annotated; returns empty if no matches. Example: pattern `^crypto_` finds all crypto-related annotations.",
             json!({"type": "object", "properties": {
                 "pattern": {"type": "string", "description": "Regex pattern matched against analysis names"}
             }, "required": ["pattern"]})),
 
         tool_schema("get_blackboard_entry",
-            "Look up all semantic context recorded for an address: symbol name, struct definition, hypotheses, and containing function. Use to inspect what the blackboard knows about a specific address.",
+            "Look up all semantic context at an address: symbol name, struct definition, hypotheses, containing function. Use to inspect accumulated annotations (e.g., what prior analysis named this location). Returns annotations added via set_analysis_name, define_struct, add_hypothesis. Limitation: empty if no annotations were added to this address. Use after analysis pass to review findings.",
             json!({"type": "object", "properties": {
                 "addr": {"type": "string", "description": "Address to look up in hex"}
             }, "required": ["addr"]})),
@@ -570,7 +570,7 @@ fn tools_list_base() -> Vec<Value> {
             }, "required": ["addr"]})),
 
         tool_schema("get_function_cfg",
-            "Get the Control Flow Graph for a function. Returns adjacency list, terminal blocks, and reachability from Datalog analysis.",
+            "Get the Control Flow Graph for a function. Returns block adjacency (edges), terminal blocks, and reachability analysis. Use to identify loops, dominators, dead code, or understand control dependencies. Returns block addresses and successors (branch targets). Limitation: represents lifted IL structure, not obfuscated control flow flattening patterns.",
             json!({"type": "object", "properties": {
                 "addr": {"type": "string", "description": "Function address in hex"}
             }, "required": ["addr"]})),
@@ -590,7 +590,7 @@ fn tools_list_base() -> Vec<Value> {
             }, "required": ["addr", "register", "direction"]})),
 
         tool_schema("get_xrefs",
-            "Get cross-references for an address: outgoing calls from the function, and incoming calls from other functions.",
+            "Get cross-references for an address: outgoing calls (direct BL/BLR) and incoming callers. Returns call sites with target functions. Use to map call graph edges, find data flow entry points, or identify vulnerability sinks. Limitation: does not resolve indirect VTable calls. Returns both function addresses and call site locations for tracing execution paths.",
             json!({"type": "object", "properties": {
                 "addr": {"type": "string", "description": "Function address in hex"}
             }, "required": ["addr"]})),
@@ -631,18 +631,18 @@ fn tools_list_base() -> Vec<Value> {
             }, "required": ["start_addr", "goal_addr"]})),
 
         tool_schema("get_bytes",
-            "Read raw bytes from the binary at a virtual address. Returns hex-encoded string.",
+            "Read raw bytes from the binary at a virtual address. Returns hex-encoded string. Use for quick binary inspection at text section addresses. Prefer get_data for reading ELF data sections (.rodata, .data) which handles segment mapping automatically.",
             json!({"type": "object", "properties": {
                 "addr": {"type": "string", "description": "Virtual address in hex"},
                 "size": {"type": "integer", "description": "Number of bytes", "default": 64}
             }, "required": ["addr"]})),
 
         tool_schema("search_rc4",
-            "Search for RC4 cipher implementations using behavioral pattern matching. Detects key setup (KSA) with swap/mod256 patterns and keystream generation (PRGA) with XOR operations. Use to identify crypto operations in obfuscated code.",
+            "Search for RC4 cipher implementations using behavioral pattern matching (KSA: swap+mod256; PRGA: XOR+keystream). Use to identify crypto operations in obfuscated code. Returns candidate functions with confidence scores. Limitation: may match similar bit-manipulation patterns (not guaranteed RC4). No examples available (algorithm signatures); returns matching function addresses and matching IL subgraph patterns.",
             json!({"type": "object", "properties": {}})),
 
         tool_schema("get_coverage",
-            "Get IL lift coverage statistics: percentage of instructions successfully lifted vs intrinsics vs NOPs vs decode failures. Use to assess IL quality and identify unlifted instruction patterns.",
+            "Get IL lift coverage: % successfully lifted vs intrinsics vs NOPs vs decode errors. Use to assess IL quality and identify unlifted patterns (e.g., SIMD/crypto). Returns counts and percentages for each category. Interpretation: >95% lifted = high confidence, <85% = significant gaps. Limitation: does not indicate semantic correctness, only syntactic liftability.",
             json!({"type": "object", "properties": {}})),
 
         tool_schema("get_asm",
