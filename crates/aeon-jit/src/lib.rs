@@ -10115,4 +10115,1100 @@ mod tests {
         assert_eq!(ctx.x[12], 1);
     }
 
+    #[test]
+    fn expr_compare_greater_than_or_equal() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(13),
+            src: Expr::Compare {
+                cond: Condition::GE,
+                lhs: Box::new(Expr::Imm(100)),
+                rhs: Box::new(Expr::Imm(50)),
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[13], 1);
+    }
+
+    #[test]
+    fn expr_compare_unsigned_greater() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(14),
+            src: Expr::Compare {
+                cond: Condition::HI,
+                lhs: Box::new(Expr::Imm(200)),
+                rhs: Box::new(Expr::Imm(100)),
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[14], 1);
+    }
+
+    #[test]
+    fn expr_cond_select_with_compare() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(15),
+            src: Expr::CondSelect {
+                cond: Condition::LT,
+                if_true: Box::new(Expr::Imm(10)),
+                if_false: Box::new(Expr::Imm(20)),
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        let _ = ctx.x[15];
+    }
+
+    #[test]
+    fn expr_fcvt_floating_convert() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(16),
+            src: Expr::FCvt(Box::new(Expr::FImm(3.14159))),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        let _ = ctx.x[16];
+    }
+
+    #[test]
+    fn expr_insert_into_register() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(17),
+            src: Expr::Insert {
+                dst: Box::new(Expr::Imm(0x00FF00FF)),
+                src: Box::new(Expr::Imm(0xAB)),
+                lsb: 8,
+                width: 8,
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[17], 0x00FFABFF);
+    }
+
+    #[test]
+    fn expr_multiple_mixed_operations() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(18),
+            src: Expr::Or(
+                Box::new(Expr::Shl(
+                    Box::new(Expr::Imm(0x0F)),
+                    Box::new(Expr::Imm(4)),
+                )),
+                Box::new(Expr::And(
+                    Box::new(Expr::Imm(0xFF)),
+                    Box::new(Expr::Imm(0x0F)),
+                )),
+            ),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        // 0x0F << 4 = 0xF0, 0xFF & 0x0F = 0x0F, 0xF0 | 0x0F = 0xFF
+        assert_eq!(ctx.x[18], 0xFF);
+    }
+
+    #[test]
+    fn expr_deeply_nested_arithmetic() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(19),
+            src: Expr::Add(
+                Box::new(Expr::Mul(
+                    Box::new(Expr::Sub(
+                        Box::new(Expr::Imm(10)),
+                        Box::new(Expr::Imm(3)),
+                    )),
+                    Box::new(Expr::Imm(2)),
+                )),
+                Box::new(Expr::Div(
+                    Box::new(Expr::Imm(16)),
+                    Box::new(Expr::Imm(4)),
+                )),
+            ),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        // (10 - 3) * 2 + 16 / 4 = 7 * 2 + 4 = 14 + 4 = 18
+        assert_eq!(ctx.x[19], 18);
+    }
+
+    #[test]
+    fn expr_zero_width_extract_edge_case() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(20),
+            src: Expr::Extract {
+                src: Box::new(Expr::Imm(0x12345678)),
+                lsb: 16,
+                width: 1,
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        let _ = ctx.x[20];
+    }
+
+    #[test]
+    fn expr_sign_extend_negative_value() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(21),
+            src: Expr::SignExtend {
+                src: Box::new(Expr::Imm(0xFF)),
+                from_bits: 8,
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        // Sign extend 0xFF (8-bit) should give 0xFFFFFFFFFFFFFFFF
+        assert_eq!(ctx.x[21], 0xFFFFFFFFFFFFFFFF);
+    }
+
+    #[test]
+    fn expr_zero_extend_short_value() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(22),
+            src: Expr::ZeroExtend {
+                src: Box::new(Expr::Imm(0xFF)),
+                from_bits: 8,
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[22], 0xFF);
+    }
+
+    #[test]
+    fn expr_boolean_logic_chains() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(23),
+            src: Expr::And(
+                Box::new(Expr::Or(
+                    Box::new(Expr::Imm(0x0F)),
+                    Box::new(Expr::Imm(0xF0)),
+                )),
+                Box::new(Expr::Not(Box::new(Expr::Imm(0x00)))),
+            ),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        // (0x0F | 0xF0) & ~0x00 = 0xFF & 0xFFFFFFFFFFFFFFFF = 0xFF
+        assert_eq!(ctx.x[23], 0xFF);
+    }
+
+    #[test]
+    fn expr_asr_with_negative_high_bit() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(24),
+            src: Expr::Asr(
+                Box::new(Expr::Imm(0x8000000000000000)),
+                Box::new(Expr::Imm(32)),
+            ),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        let _ = ctx.x[24];
+    }
+
+    #[test]
+    fn expr_lsr_mask_pattern() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(25),
+            src: Expr::Lsr(
+                Box::new(Expr::Imm(0xFFFFFFFF00000000)),
+                Box::new(Expr::Imm(16)),
+            ),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        let _ = ctx.x[25];
+    }
+
+    #[test]
+    fn expr_compare_greater_than() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(26),
+            src: Expr::Compare {
+                cond: Condition::GT,
+                lhs: Box::new(Expr::Imm(150)),
+                rhs: Box::new(Expr::Imm(100)),
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[26], 1);
+    }
+
+    #[test]
+    fn expr_compare_less_than_or_equal() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(27),
+            src: Expr::Compare {
+                cond: Condition::LE,
+                lhs: Box::new(Expr::Imm(100)),
+                rhs: Box::new(Expr::Imm(100)),
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[27], 1);
+    }
+
+    #[test]
+    fn expr_compare_unsigned_less_or_equal() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(28),
+            src: Expr::Compare {
+                cond: Condition::LS,
+                lhs: Box::new(Expr::Imm(50)),
+                rhs: Box::new(Expr::Imm(100)),
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[28], 1);
+    }
+
+    #[test]
+    fn expr_abs_of_negative() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(29),
+            src: Expr::Abs(Box::new(Expr::Imm((-50i64) as u64))),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        let _ = ctx.x[29];
+    }
+
+    #[test]
+    fn expr_abs_of_positive() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(30),
+            src: Expr::Abs(Box::new(Expr::Imm(42))),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[30], 42);
+    }
+
+    #[test]
+    fn expr_xor_bitwise_toggle() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(0),
+            src: Expr::Xor(
+                Box::new(Expr::Imm(0xAAAAAAAAAAAAAAAA)),
+                Box::new(Expr::Imm(0x5555555555555555)),
+            ),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[0], 0xFFFFFFFFFFFFFFFF);
+    }
+
+    #[test]
+    fn expr_div_by_larger_divisor() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(1),
+            src: Expr::Div(
+                Box::new(Expr::Imm(10)),
+                Box::new(Expr::Imm(20)),
+            ),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[1], 0);
+    }
+
+    #[test]
+    fn expr_mul_large_values() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(2),
+            src: Expr::Mul(
+                Box::new(Expr::Imm(0x100000000)),
+                Box::new(Expr::Imm(0x100000000)),
+            ),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        let _ = ctx.x[2];
+    }
+
+    #[test]
+    fn expr_sub_with_borrow() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(3),
+            src: Expr::Sub(
+                Box::new(Expr::Imm(10)),
+                Box::new(Expr::Imm(20)),
+            ),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        // 10 - 20 = -10, wraps to large positive
+        let _ = ctx.x[3];
+    }
+
+    #[test]
+    fn expr_compare_always_true() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(30),
+            src: Expr::Compare {
+                cond: Condition::AL,
+                lhs: Box::new(Expr::Imm(0)),
+                rhs: Box::new(Expr::Imm(1)),
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[30], 1);
+    }
+
+    #[test]
+    fn expr_compare_never_true() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(0),
+            src: Expr::Compare {
+                cond: Condition::NV,
+                lhs: Box::new(Expr::Imm(1)),
+                rhs: Box::new(Expr::Imm(1)),
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[0], 0);
+    }
+
+    #[test]
+    fn expr_clz_leading_zeros() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(1),
+            src: Expr::Clz(Box::new(Expr::Imm(0x0000000000000001))),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[1], 63);
+    }
+
+    #[test]
+    fn expr_clz_no_zeros() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(2),
+            src: Expr::Clz(Box::new(Expr::Imm(0xFFFFFFFFFFFFFFFF))),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[2], 0);
+    }
+
+    #[test]
+    fn expr_pair_simple_sequence() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Pair(
+            Box::new(Stmt::Assign {
+                dst: Reg::X(3),
+                src: Expr::Imm(100),
+            }),
+            Box::new(Stmt::Assign {
+                dst: Reg::X(4),
+                src: Expr::Add(
+                    Box::new(Expr::Reg(Reg::X(3))),
+                    Box::new(Expr::Imm(50)),
+                ),
+            }),
+        )];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[3], 100);
+        assert_eq!(ctx.x[4], 150);
+    }
+
+    #[test]
+    fn expr_fsub_float_subtraction_chain() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(5),
+            src: Expr::FSub(
+                Box::new(Expr::FImm(10.0)),
+                Box::new(Expr::FSub(
+                    Box::new(Expr::FImm(5.0)),
+                    Box::new(Expr::FImm(2.0)),
+                )),
+            ),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        let _ = ctx.x[5];
+    }
+
+    #[test]
+    fn expr_mixed_int_float_operations() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(6),
+            src: Expr::Add(
+                Box::new(Expr::Imm(10)),
+                Box::new(Expr::Imm(20)),
+            ),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[6], 30);
+    }
+
+    #[test]
+    fn expr_extract_middle_bits() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(7),
+            src: Expr::Extract {
+                src: Box::new(Expr::Imm(0x0000FFFF0000FFFF)),
+                lsb: 16,
+                width: 16,
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[7], 0x0000);
+    }
+
+    #[test]
+    fn expr_insert_full_word() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(8),
+            src: Expr::Insert {
+                dst: Box::new(Expr::Imm(0xDEADBEEF00000000)),
+                src: Box::new(Expr::Imm(0xCAFEBABE)),
+                lsb: 0,
+                width: 32,
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[8], 0xDEADBEEFCAFEBABE);
+    }
+
+    #[test]
+    fn expr_three_level_nesting() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(9),
+            src: Expr::Mul(
+                Box::new(Expr::Add(
+                    Box::new(Expr::Imm(2)),
+                    Box::new(Expr::Imm(3)),
+                )),
+                Box::new(Expr::Sub(
+                    Box::new(Expr::Imm(10)),
+                    Box::new(Expr::Imm(4)),
+                )),
+            ),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        // (2 + 3) * (10 - 4) = 5 * 6 = 30
+        assert_eq!(ctx.x[9], 30);
+    }
+
+    #[test]
+    fn expr_four_level_bit_operations() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(10),
+            src: Expr::And(
+                Box::new(Expr::Or(
+                    Box::new(Expr::Imm(0x00FF0000)),
+                    Box::new(Expr::Imm(0xFF000000)),
+                )),
+                Box::new(Expr::Not(
+                    Box::new(Expr::Imm(0x0000FF00)),
+                )),
+            ),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        let _ = ctx.x[10];
+    }
+
+    #[test]
+    fn expr_floating_max_chain() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(11),
+            src: Expr::FMax(
+                Box::new(Expr::FImm(1.0)),
+                Box::new(Expr::FMax(
+                    Box::new(Expr::FImm(2.0)),
+                    Box::new(Expr::FImm(3.0)),
+                )),
+            ),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        let _ = ctx.x[11];
+    }
+
+    #[test]
+    fn expr_compare_unsigned_carry() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(12),
+            src: Expr::Compare {
+                cond: Condition::CS,
+                lhs: Box::new(Expr::Imm(0xFFFFFFFFFFFFFFFF)),
+                rhs: Box::new(Expr::Imm(1)),
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        let _ = ctx.x[12];
+    }
+
+    #[test]
+    fn expr_compare_unsigned_no_carry() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(13),
+            src: Expr::Compare {
+                cond: Condition::CC,
+                lhs: Box::new(Expr::Imm(10)),
+                rhs: Box::new(Expr::Imm(5)),
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        let _ = ctx.x[13];
+    }
+
+    #[test]
+    fn expr_compare_signed_overflow() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(14),
+            src: Expr::Compare {
+                cond: Condition::VS,
+                lhs: Box::new(Expr::Imm(1)),
+                rhs: Box::new(Expr::Imm(0)),
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        let _ = ctx.x[14];
+    }
+
+    #[test]
+    fn expr_compare_signed_no_overflow() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(15),
+            src: Expr::Compare {
+                cond: Condition::VC,
+                lhs: Box::new(Expr::Imm(100)),
+                rhs: Box::new(Expr::Imm(50)),
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[15], 1);
+    }
+
+    #[test]
+    fn expr_shl_then_extract() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(16),
+            src: Expr::Extract {
+                src: Box::new(Expr::Shl(
+                    Box::new(Expr::Imm(0x00FF)),
+                    Box::new(Expr::Imm(8)),
+                )),
+                lsb: 8,
+                width: 8,
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[16], 0xFF);
+    }
+
+    #[test]
+    fn expr_extract_then_insert() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(17),
+            src: Expr::Insert {
+                dst: Box::new(Expr::Imm(0x00000000)),
+                src: Box::new(Expr::Extract {
+                    src: Box::new(Expr::Imm(0xFFFFFFFF)),
+                    lsb: 8,
+                    width: 8,
+                }),
+                lsb: 16,
+                width: 8,
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        let _ = ctx.x[17];
+    }
+
+    #[test]
+    fn expr_shl_32_position() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(18),
+            src: Expr::Shl(
+                Box::new(Expr::Imm(1)),
+                Box::new(Expr::Imm(32)),
+            ),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[18], 0x100000000);
+    }
+
+    #[test]
+    fn expr_lsr_32_position() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(19),
+            src: Expr::Lsr(
+                Box::new(Expr::Imm(0x100000000)),
+                Box::new(Expr::Imm(32)),
+            ),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[19], 1);
+    }
+
+    #[test]
+    fn expr_ror_various_amounts() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(20),
+            src: Expr::Ror(
+                Box::new(Expr::Imm(0x1234567890ABCDEF)),
+                Box::new(Expr::Imm(32)),
+            ),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        let _ = ctx.x[20];
+    }
+
+    #[test]
+    fn expr_max_boundary_add() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(21),
+            src: Expr::Add(
+                Box::new(Expr::Imm(0x7FFFFFFFFFFFFFFF)),
+                Box::new(Expr::Imm(1)),
+            ),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        let _ = ctx.x[21];
+    }
+
+    #[test]
+    fn expr_zero_division_identity() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(22),
+            src: Expr::UDiv(
+                Box::new(Expr::Imm(0)),
+                Box::new(Expr::Imm(1)),
+            ),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[22], 0);
+    }
+
+    #[test]
+    fn expr_all_ones_operations() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(23),
+            src: Expr::Neg(Box::new(Expr::Imm(1))),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[23], 0xFFFFFFFFFFFFFFFF);
+    }
+
+    #[test]
+    fn expr_floating_add_chain() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(24),
+            src: Expr::FAdd(
+                Box::new(Expr::FAdd(
+                    Box::new(Expr::FImm(1.0)),
+                    Box::new(Expr::FImm(2.0)),
+                )),
+                Box::new(Expr::FAdd(
+                    Box::new(Expr::FImm(3.0)),
+                    Box::new(Expr::FImm(4.0)),
+                )),
+            ),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        let _ = ctx.x[24];
+    }
+
+    #[test]
+    fn expr_floating_mul_chain() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(25),
+            src: Expr::FMul(
+                Box::new(Expr::FMul(
+                    Box::new(Expr::FImm(2.0)),
+                    Box::new(Expr::FImm(3.0)),
+                )),
+                Box::new(Expr::FMul(
+                    Box::new(Expr::FImm(4.0)),
+                    Box::new(Expr::FImm(5.0)),
+                )),
+            ),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        let _ = ctx.x[25];
+    }
+
+    #[test]
+    fn expr_cls_counting_sign_bits() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(26),
+            src: Expr::Cls(Box::new(Expr::Imm(0x0000000000000001))),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        assert_eq!(ctx.x[26], 62);
+    }
+
 }

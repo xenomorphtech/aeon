@@ -491,7 +491,7 @@ fn tools_list_base() -> Vec<Value> {
             }, "required": ["path"]})),
 
         tool_schema("list_functions",
-            "List functions discovered from .eh_frame unwind tables. Supports pagination and name filtering.",
+            "List functions discovered from .eh_frame unwind tables. Typical workflow: load_binary → list_functions → get_function_skeleton (triage) → get_il/get_ssa (analysis). Supports pagination (offset/limit) and name filtering. Returns function addresses, names, and sizes. Use to enumerate all discoverable functions; pagination needed for large binaries (e.g., offset=100, limit=50 for functions 100-149).",
             json!({"type": "object", "properties": {
                 "offset": {"type": "integer", "description": "Start index", "default": 0},
                 "limit": {"type": "integer", "description": "Max results", "default": 100},
@@ -499,14 +499,14 @@ fn tools_list_base() -> Vec<Value> {
             }})),
 
         tool_schema("set_analysis_name",
-            "Attach or overwrite a semantic symbol name on an address (identical to rename_symbol). Assigns a custom analysis label for documentation and reference.",
+            "Attach or overwrite a semantic symbol name on an address (identical to rename_symbol). Assigns a custom analysis label for documentation and reference. Naming conventions: `crypto_init`, `buffer_overflow_site`, `obfuscated_loop`, `vtable_<class>`. Retrieved via get_blackboard_entry. Use in workflows: find suspicious patterns → annotate with descriptive name → search_analysis_names to find all similar patterns.",
             json!({"type": "object", "properties": {
                 "addr": {"type": "string", "description": "Virtual address in hex"},
                 "name": {"type": "string", "description": "Analysis name to assign to the address"}
             }, "required": ["addr", "name"]})),
 
         tool_schema("rename_symbol",
-            "Attach or overwrite a semantic symbol name on an address (identical to set_analysis_name). Assigns a custom analysis label for documentation and reference.",
+            "Attach or overwrite a semantic symbol name on an address (identical to set_analysis_name). Assigns a custom analysis label for documentation and reference. Naming conventions: `crypto_init`, `buffer_overflow_site`, `obfuscated_loop`, `vtable_<class>`. Retrieved via get_blackboard_entry. Use in workflows: find suspicious patterns → annotate with descriptive name → search_analysis_names to find all similar patterns.",
             json!({"type": "object", "properties": {
                 "addr": {"type": "string", "description": "Virtual address in hex"},
                 "name": {"type": "string", "description": "Semantic symbol name to assign to the address"}
@@ -527,7 +527,7 @@ fn tools_list_base() -> Vec<Value> {
             }, "required": ["addr", "note"]})),
 
         tool_schema("search_analysis_names",
-            "Search analysis names attached to addresses using a regex pattern. Finds all addresses where set_analysis_name/rename_symbol was used. Use to locate all references to a specific analysis (e.g., all hypothetical vulnerability sites). Limitations: only searches names already annotated; returns empty if no matches. Example: pattern `^crypto_` finds all crypto-related annotations.",
+            "Search analysis names attached to addresses using a regex pattern. Finds all addresses where set_analysis_name was used matching the pattern. Workflow: annotate locations with set_analysis_name → use search_analysis_names to find all similar patterns → use get_blackboard_entry to review context. Returns all matching addresses. Example: pattern `^crypto_` finds all crypto-related annotations; `.*_vulnerability$` finds all marked vulnerabilities. Limitation: searches only annotated addresses; empty result means no matches.",
             json!({"type": "object", "properties": {
                 "pattern": {"type": "string", "description": "Regex pattern matched against analysis names"}
             }, "required": ["pattern"]})),
@@ -596,7 +596,7 @@ fn tools_list_base() -> Vec<Value> {
             }, "required": ["addr"]})),
 
         tool_schema("execute_datalog",
-            "Run a named Datalog query over a function or the whole binary. Returns structured facts derived by the ascent Datalog engine from lifted AeonIL. Query-specific parameters: 'defines' and 'flows_to' require 'register' parameter. Others only need 'addr'.",
+            "Run a named Datalog query over a function or the whole binary. Query types: 'reachability' (which blocks reachable from entry), 'defines' (where register is assigned), 'reads_mem'/'writes_mem' (memory access locations), 'flows_to' (where register value flows), 'call_graph' (direct callees), 'call_graph_transitive' (all reachable functions). Returns tuples of addresses and facts. REQUIRED register parameter: 'defines' and 'flows_to' only.",
             json!({"type": "object", "properties": {
                 "query": {"type": "string", "enum": ["reachability", "defines", "reads_mem", "writes_mem", "flows_to", "call_graph", "call_graph_transitive"], "description": "Named Datalog query to execute"},
                 "addr": {"type": "string", "description": "Virtual address in hex. For per-function queries, identifies the function. For cross-function queries, identifies the root function."},
@@ -613,7 +613,7 @@ fn tools_list_base() -> Vec<Value> {
             json!({"type": "object", "properties": {}})),
 
         tool_schema("get_function_pointers",
-            "Enumerate pointer-valued operands and resolved code/data references for one function or a paginated slice of functions. Use with addr to analyze one function, or omit addr to scan all functions.",
+            "Enumerate pointer-valued operands and resolved code/data references for one function or scan all. Use to find embedded function pointers (vtables, callbacks), global data references, or jump table indices. Returns operand addresses and their targets (code or data). With addr: analyze one function; omit addr: scan all functions (paginated). Typical usage: find hidden function pointers before analyzing control flow.",
             json!({"type": "object", "properties": {
                 "addr": {"type": "string", "description": "Optional function address in hex; when present, analyzes the containing function"},
                 "offset": {"type": "integer", "description": "Start index when scanning multiple functions", "default": 0},
@@ -646,7 +646,7 @@ fn tools_list_base() -> Vec<Value> {
             json!({"type": "object", "properties": {}})),
 
         tool_schema("get_asm",
-            "Disassemble ARM64 instructions between two virtual addresses. Returns asm only, without AeonIL. Use for quick assembly inspection without full IL lifting.",
+            "Disassemble ARM64 instructions between two virtual addresses. Returns asm only, without IL lifting. Use for quick assembly inspection or when IL lifting is unavailable. Trade-offs: faster than get_il but no semantic understanding; prefer get_il for detailed analysis, get_bytes for raw binary inspection. Returns instruction mnemonics and operands with addresses.",
             json!({"type": "object", "properties": {
                 "start_addr": {"type": "string", "description": "Start virtual address in hex, e.g. '0x512025c'"},
                 "stop_addr": {"type": "string", "description": "Stop virtual address in hex (exclusive), e.g. '0x51202cc'"}
