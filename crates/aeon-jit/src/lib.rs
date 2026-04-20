@@ -13674,4 +13674,97 @@ mod tests {
         assert_eq!(ctx.x[13], 0x00000000FFFFFFFF);
     }
 
+    // Tests for currently unsupported expression/statement types
+    // These document missing functionality and can guide future implementation
+
+    #[test]
+    #[ignore = "Load expression requires memory backing - implement with proper memory management"]
+    fn expr_load_from_memory() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(0),
+            src: Expr::Load {
+                addr: Box::new(Expr::Imm(0x1000)),
+                size: 8,
+            },
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        let _ = ctx.x[0];
+    }
+
+    #[test]
+    #[ignore = "Store expression requires memory backing - implement with proper memory management"]
+    fn stmt_store_to_memory() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Store {
+            addr: Expr::Imm(0x1000),
+            value: Expr::Imm(0xDEADBEEF),
+            size: 8,
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+    }
+
+    #[test]
+    #[ignore = "Barrier statement requires memory synchronization implementation"]
+    fn stmt_barrier_dmb() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Barrier("dmb".to_string())];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+    }
+
+    #[test]
+    #[ignore = "Barrier statement requires memory synchronization implementation"]
+    fn stmt_barrier_isb() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Barrier("isb".to_string())];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+    }
+
+    #[test]
+    #[ignore = "FImm float immediate requires extended type support"]
+    fn expr_fimm_float_immediate() {
+        let mut compiler = JitCompiler::new(JitConfig::default());
+        let stmts = vec![Stmt::Assign {
+            dst: Reg::X(0),
+            src: Expr::FImm(3.14159),
+        }];
+
+        let code = compiler
+            .compile_block(0x1000, &stmts)
+            .expect("compile block");
+        let func: JitEntry = unsafe { std::mem::transmute(code) };
+
+        let mut ctx = JitContext::default();
+        unsafe { func(&mut ctx) };
+        let _ = ctx.x[0];
+    }
+
 }
