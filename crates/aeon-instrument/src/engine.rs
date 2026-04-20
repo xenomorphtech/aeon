@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 use aeon_jit::JitContext;
 
+use crate::callbacks::{BlockEntryEvent, BlockExitEvent, BlockExitReason, CallbackRegistry, MemoryAccessEvent};
 use crate::context::LiveContext;
 use crate::dyncfg::{BlockTerminator, DynCfg};
 use crate::symbolic::{FoldResult, SymbolicFolder};
@@ -149,6 +150,8 @@ pub struct InstrumentEngine {
     trace_writer: Option<TraceWriter>,
     /// Phase 2 optimization: incremental symbolic analysis cache.
     pub analysis_cache: SymbolicCache,
+    /// Execution callback registry for custom analysis hooks.
+    pub callbacks: CallbackRegistry,
 }
 
 impl InstrumentEngine {
@@ -160,6 +163,7 @@ impl InstrumentEngine {
             config: EngineConfig::default(),
             trace_writer: None,
             analysis_cache: SymbolicCache::new(),
+            callbacks: CallbackRegistry::new(),
         }
     }
 
@@ -265,6 +269,12 @@ impl InstrumentEngine {
                     }
                 };
 
+            // Fire block entry callback
+            self.callbacks.fire_block_entry(&BlockEntryEvent {
+                block_addr,
+                block_size: (entry as u64 as u32) & 0xFFFF,
+            });
+
             // Capture entry register snapshot
             let entry_regs = RegSnapshot::from(&self.context.regs);
 
@@ -295,6 +305,32 @@ impl InstrumentEngine {
 
             // Drain memory accesses from thread-local
             let memory_accesses = MEMORY_TRACE.with(|t| std::mem::take(&mut *t.borrow_mut()));
+
+            // Fire memory access callbacks
+            for mem_access in &memory_accesses {
+                self.callbacks.fire_memory_access(&MemoryAccessEvent {
+                    addr: mem_access.addr,
+                    size: mem_access.size,
+                    value: mem_access.value,
+                    is_write: mem_access.is_write,
+                    block_addr: mem_access.block_addr,
+                });
+            }
+
+            // Fire block exit callback
+            let exit_reason = match terminator {
+                BlockTerminator::DirectBranch => BlockExitReason::Branch(next_pc),
+                BlockTerminator::DynamicBranch => BlockExitReason::Branch(next_pc),
+                BlockTerminator::DirectCall => BlockExitReason::Call(next_pc),
+                BlockTerminator::DynamicCall => BlockExitReason::Call(next_pc),
+                BlockTerminator::Return => BlockExitReason::Return,
+                BlockTerminator::CondBranch => BlockExitReason::Branch(next_pc),
+                BlockTerminator::Trap => BlockExitReason::Halt,
+            };
+            self.callbacks.fire_block_exit(&BlockExitEvent {
+                block_addr,
+                exit_reason,
+            });
 
             // Build and record the block trace
             let visit_count = self.trace.block_visit_count(block_addr) + 1;

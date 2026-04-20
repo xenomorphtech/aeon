@@ -15,6 +15,7 @@
 //   4. Records full execution + dataflow traces
 //   5. Applies symbolic analysis to identify invariants
 
+pub mod callbacks;
 pub mod context;
 pub mod dyncfg;
 pub mod dynffi;
