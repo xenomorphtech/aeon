@@ -611,7 +611,7 @@ fn tools_list_base() -> Vec<Value> {
             json!({"type": "object", "properties": {}})),
 
         tool_schema("get_function_pointers",
-            "Enumerate pointer-valued operands and resolved code/data references for one function or scan all. Use to find embedded function pointers (vtables, callbacks), global data references, or jump table indices. Returns operand addresses and their targets (code or data). With addr: analyze one function; omit addr: scan all functions (paginated). Typical usage: find hidden function pointers before analyzing control flow.",
+            "Enumerate pointer-valued operands and their resolved targets (code or data) within function IL. For single function: shows all pointer references and their targets. For all functions: paginated scan finding indirect call candidates, global references, vtable accesses. Returns: instruction addresses, operand values, resolved targets with classification (function vs data). Use for: discovering indirect dispatch (callback patterns, vtable calls), understanding global state dependencies, finding jump table indices. When to use: before analyzing control flow (find indirect call targets), understanding data dependencies (what global data does function access). Limitations: code pointers only (not constant data patterns); requires valid IL lifting. Prefer over scan_pointers when: analyzing specific function behavior vs architectural overview. Complements: scan_vtables (groups vtable-like structures), get_xrefs (cross-function view).",
             json!({"type": "object", "properties": {
                 "addr": {"type": "string", "description": "Optional function address in hex; when present, analyzes the containing function"},
                 "offset": {"type": "integer", "description": "Start index when scanning multiple functions", "default": 0},
@@ -673,7 +673,7 @@ fn tools_list_base() -> Vec<Value> {
             }, "required": ["addr"]})),
 
         tool_schema("emulate_snippet_il",
-            "Execute an ARM64 code region using AeonIL interpretation without full binary emulation. Faster than native emulation. Use for symbolic execution, quick logic analysis, or stripped code. For accurate memory simulation, use emulate_snippet_native instead.",
+            "Execute ARM64 code using lifted AeonIL semantics (interpretation mode). Executes IL statements instead of native instructions; faster than native emulation but no precise memory simulation. Use for: quick logic analysis of crypto/obfuscation routines, symbolic execution (reasoning about code paths without concrete values), analyzing stripped binaries (avoids native instruction emulation). Accuracy: high for pure computation (arithmetic, bitwise ops), lower for memory-dependent code (caches not modeled). Limitations: IL lifting coverage affects accuracy (gaps create errors); doesn't model precise memory/cache semantics. Better for: logic analysis, constant computation, control flow reasoning. Use native emulation if: code modifies memory and depends on precise load/store semantics. Complements: emulate_snippet_native (precise memory sim), get_il (inspect lifted IL first). Trade-off: fast vs accurate—IL mode trades precision for speed.",
             json!({"type": "object", "properties": {
                 "start_addr": {"type": "string", "description": "Hex address to begin execution, e.g. '0x1234'"},
                 "end_addr": {"type": "string", "description": "Hex address to stop execution (exclusive)"},
@@ -682,7 +682,7 @@ fn tools_list_base() -> Vec<Value> {
             }, "required": ["start_addr", "end_addr"]})),
 
         tool_schema("emulate_snippet_native",
-            "Execute an ARM64 code region in unicorn ARM64 sandbox. Full native emulation with memory support. Use for reversing obfuscated loops, string decryption, or format decoders. Returns final register state, memory writes, and decoded strings. For faster interpretation-only analysis, use emulate_snippet_il instead.",
+            "Execute ARM64 code natively in a sandboxed unicorn emulator with precise memory simulation. Full native instruction execution; supports memory reads/writes and register state changes. Use for: unpacking obfuscated code (execute decoder, inspect memory output), reversing format decoders (observe buffer transformations), analyzing crypto/compression routines (need accurate memory semantics), understanding control flow with data dependencies. Returns: final register state, memory writes at each address, any decoded strings discovered. Accuracy: very high (native execution), limited only by sandbox (signals, system calls blocked). Memory: pre-fill with initial_memory parameter. Better for: code with memory/data dependencies, format analysis, crypto. Limitations: slower than IL emulation; memory overhead for large regions. Trade-off: accuracy vs speed—use native for correct results, IL for quick logic analysis. Complements: emulate_snippet_native_advanced (add breakpoints/hooks), get_il (understand code structure first).",
             json!({"type": "object", "properties": {
                 "start_addr": {"type": "string", "description": "Hex address to begin execution, e.g. '0x1234'"},
                 "end_addr": {"type": "string", "description": "Hex address to stop execution (exclusive)"},
