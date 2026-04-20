@@ -124,6 +124,46 @@ Each workflow includes:
 **Length**: 495 lines  
 **Contains**: 5 advanced analysis domains:
 
+---
+
+### [TOOL_DEVELOPMENT.md](TOOL_DEVELOPMENT.md) - **DEVELOPER GUIDE**
+**Purpose**: Reference for implementing new analysis tools  
+**Audience**: Tool developers, system architects  
+**Length**: 696 lines  
+**Contains**:
+- Tool architecture and lifecycle (7 steps)
+- 4 tool tiers with stability guarantees
+- Implementation steps (design, code, register, test)
+- Integration patterns (analyzer, search, datalog, emulation)
+- API design principles (input/output)
+- Backward compatibility strategies
+- Testing strategy (unit, integration, roundtrip)
+- Code style guidelines
+- Common pitfalls with corrections
+- Extension examples with complete code
+
+**Key Sections**:
+- Architecture Components
+- Step-by-Step Implementation Guide
+- Tool Types & Tiers
+- API Design Principles
+- Backward Compatibility
+- Testing Strategy
+- Common Pitfalls
+- Extension Examples
+
+**When to use**:
+- Planning a new tool
+- Understanding aeon's tool system
+- Learning best practices
+- Avoiding common mistakes
+- Implementing integration patterns
+
+---
+
+### [advanced-workflows.md](advanced-workflows.md) - **EXPERT PATTERNS** (continued)
+**Contains**: 5 advanced analysis domains:
+
 1. **Vulnerability Classification**
    - Automated severity assessment
    - Reachability analysis
@@ -169,13 +209,13 @@ Each domain includes:
 
 ## Document Comparison
 
-| Aspect | ANALYST_GUIDE | quick-reference | analysis-workflows | advanced-workflows |
-|--------|---------------|-----------------|-------------------|-------------------|
-| **Focus** | Navigation & integration | Commands & quick lookup | Practical step-by-step | Sophisticated techniques |
-| **Entry point** | ✅ Best for new users | For experienced users | For learners | For experts |
-| **Example code** | Python/Bash scripts | Copy-paste templates | Full workflows | Domain examples |
-| **Depth** | Breadth (all areas) | Shallow (command reference) | Medium (detailed steps) | Deep (expert patterns) |
-| **Search usage** | "How do I..." | "What's the command for..." | "How do I solve..." | "Advanced technique for..." |
+| Aspect | ANALYST_GUIDE | quick-reference | analysis-workflows | advanced-workflows | TOOL_DEVELOPMENT |
+|--------|---------------|-----------------|-------------------|-------------------|------------------|
+| **Focus** | Navigation & integration | Commands & quick lookup | Practical step-by-step | Sophisticated techniques | Tool implementation |
+| **Audience** | All users | Active analysts | Learners & practitioners | Expert analysts | Tool developers |
+| **Example code** | Python/Bash scripts | Copy-paste templates | Full workflows | Domain examples | Rust implementation |
+| **Depth** | Breadth (all areas) | Shallow (command reference) | Medium (detailed steps) | Deep (expert patterns) | Implementation details |
+| **Search usage** | "How do I..." | "What's the command for..." | "How do I solve..." | "Advanced technique..." | "How do I build..." |
 
 ## Workflow Coverage
 
@@ -275,13 +315,15 @@ See [../README.md](../README.md) for complete tool descriptions and JSON schemas
 
 ## Documentation Statistics
 
-| Document | Lines | Tools Covered | Workflows | Examples |
-|----------|-------|---------------|-----------|----------|
-| ANALYST_GUIDE.md | 343 | 15+ | Navigation + 8 | 5 (Python/Bash) |
-| quick-reference.md | 327 | 15+ | 8 templates | 20+ snippets |
-| analysis-workflows.md | 432 | 15+ | 8 detailed | 8 examples |
-| advanced-workflows.md | 495 | 15+ | 5 domains | 5 examples |
-| **TOTAL** | **1597** | **15+** | **30+** | **40+** |
+| Document | Lines | Primary Content | Secondary Content |
+|----------|-------|-----------------|-------------------|
+| ANALYST_GUIDE.md | 343 | Navigation & integration | 15+ tools, 5 code examples |
+| quick-reference.md | 327 | Commands & patterns | 15+ tools, 20+ snippets |
+| analysis-workflows.md | 432 | 8 practical workflows | 15+ tools, 8 examples |
+| advanced-workflows.md | 495 | 5 expert domains | 15+ tools, 5 examples |
+| TOOL_DEVELOPMENT.md | 696 | Implementation guide | 4 patterns, 2 code examples |
+| docs/README.md | 339 | Documentation index | Navigation & comparison |
+| **TOTAL** | **2632** | **6 comprehensive guides** | **40+ examples & 15+ tools** |
 
 ## Contribution Guidelines
 
@@ -330,10 +372,15 @@ Keep all documents in sync:
 
 ## Quick Links
 
+**For Analysts:**
 - **Start here**: [ANALYST_GUIDE.md](ANALYST_GUIDE.md)
 - **Command reference**: [quick-reference.md](quick-reference.md)
 - **Learn by example**: [analysis-workflows.md](analysis-workflows.md)
 - **Advanced techniques**: [advanced-workflows.md](advanced-workflows.md)
-- **Arch & API**: [../README.md](../README.md)
+
+**For Developers:**
+- **Build a tool**: [TOOL_DEVELOPMENT.md](TOOL_DEVELOPMENT.md)
+- **Architecture**: [../README.md](../README.md)
+- **This index**: [README.md](README.md)
 
 **Got a question?** Check the [Common Questions](#common-questions) section above.
