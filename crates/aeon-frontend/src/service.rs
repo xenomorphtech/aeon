@@ -436,7 +436,7 @@ impl AeonFrontend {
 pub fn tools_list() -> Value {
     let mut tools_vec = tools_list_base();
     tools_vec.push(tool_schema("emulate_snippet_native_advanced",
-        "Execute an ARM64 code region with advanced features: memory watchpoints, instruction hooks with register patching, PC tracing, and extended register state (SIMD).",
+        "Execute ARM64 code with instrumentation: memory watchpoints (read/write on specific addresses), instruction hooks with register patching (intercept and modify execution), and PC tracing (record execution path). Use for: unpacking obfuscated code (set breakpoint post-unpacking, patch registers to control flow), reverse-engineering format decoders (watch output buffers), analyzing crypto routines (observe round transformations). Advanced features: watchpoints can stop execution or log; hooks allow register modification mid-execution; PC trace reconstructs execution path. Overhead: slower than native emulation due to instrumentation. Better for: targeted inspection of specific code regions with precise breakpoints. Simpler alternative: emulate_snippet_native (basic execution, faster).",
         build_advanced_emulation_schema()));
 
     json!({
@@ -603,11 +603,11 @@ fn tools_list_base() -> Vec<Value> {
             }, "required": ["query", "addr"]})),
 
         tool_schema("scan_pointers",
-            "Scan data sections (.rodata, .data) for embedded pointers. Classifies references as data-to-data or data-to-code. Returns map of pointer addresses and targets. Use to find hidden function pointers or global data references.",
+            "Scan non-executable sections (.rodata, .data, .bss) for pointer-sized values referencing other binary locations. Classifies edges as data-to-data (global structure links) or data-to-code (function pointer tables, indirect calls). Returns candidate pointer addresses and their resolved targets with confidence classification. Use to discover: vtable-like structures, callback tables, jump tables, GOT entries, relocation patterns. Best for: architecturally analyzing data layouts, finding hidden dispatch mechanisms, understanding global state. Limitations: heuristic-based (some false positives in numeric data); doesn't distinguish function pointers from data pointers without symbol context. Complementary to: scan_vtables (grouped analysis), get_function_pointers (per-function view).",
             json!({"type": "object", "properties": {}})),
 
         tool_schema("scan_vtables",
-            "Detect C++ virtual method tables (vtables) in data sections. Finds arrays of function pointers and groups related tables. Returns vtable addresses and methods. Use to understand class hierarchies and virtual dispatch.",
+            "Detect C++ virtual method tables (vtables) by identifying arrays of consecutive code pointers in .rodata/.data sections. Groups related tables by proximity and reference patterns. Returns: vtable base addresses, method function pointer lists, potential class ownership. Use for: understanding OOP architecture, mapping polymorphic call sites, identifying virtual dispatch vulnerabilities. Best for: C++ binaries with intact RTTI; less effective on: Rust (different vtable layout), stripped symbols. Limitations: heuristic grouping (may over/under-group); doesn't recover method signatures or class names. Complements: get_xrefs (find callers of vtable methods), get_function_skeleton (analyze methods). Trade-off: scan_pointers is more general (finds all code pointers), scan_vtables is specialized (higher precision for C++ specifically).",
             json!({"type": "object", "properties": {}})),
 
         tool_schema("get_function_pointers",
