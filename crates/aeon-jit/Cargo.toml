@@ -19,3 +19,4 @@ aeon-reduce = { path = "../aeon-reduce" }
 libc = "0.2"
 object = { version = "0.36", default-features = false, features = ["read", "elf"] }
 tempfile = "3"
+serial_test = "3"

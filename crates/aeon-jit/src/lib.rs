@@ -5551,6 +5551,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn compiles_and_executes_a_basic_block() {
         reset_test_statics();
 
@@ -5600,6 +5601,7 @@ mod tests {
             .expect("compile block");
         let mut slot = 0u64;
         let mut ctx = JitContext::default();
+        ctx.pc = 0x1000;
         ctx.x[2] = (&mut slot as *mut u64) as u64;
 
         let func: JitEntry = unsafe { std::mem::transmute(code) };
