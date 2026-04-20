@@ -32,6 +32,7 @@ impl AeonFrontend {
             "search_analysis_names" => self.tool_search_analysis_names(args),
             "get_blackboard_entry" => self.tool_get_blackboard_entry(args),
             "get_il" => self.tool_get_il(args),
+            "get_function_il" => self.tool_get_il(args), // Backward compatibility alias
             "get_reduced_il" => self.tool_get_reduced_il(args),
             "get_ssa" => self.tool_get_ssa(args),
             "get_stack_frame" => self.tool_get_stack_frame(args),
@@ -52,6 +53,7 @@ impl AeonFrontend {
             "get_data" => self.tool_get_data(args),
             "emulate_snippet_il" => self.tool_emulate_snippet_il(args),
             "emulate_snippet_native" => self.tool_emulate_snippet_native(args),
+            "emulate_snippet" => self.tool_emulate_snippet_native(args), // Backward compatibility alias
             "emulate_snippet_native_advanced" => self.tool_emulate_snippet_native_advanced(args),
             "execute_datalog" => self.tool_execute_datalog(args),
             _ => Err(format!("Unknown tool: {}", name)),
@@ -169,10 +171,6 @@ impl AeonFrontend {
         let session = self.require_session()?;
         let addr = parse_addr_arg(args)?;
         Ok(session.get_blackboard_entry(addr))
-    }
-
-    fn tool_get_function_il(&self, args: &Value) -> Result<Value, String> {
-        self.tool_get_il(args)
     }
 
     fn tool_get_reduced_il(&self, args: &Value) -> Result<Value, String> {
