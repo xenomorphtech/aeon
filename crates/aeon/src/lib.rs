@@ -8,11 +8,15 @@ pub mod emulation;
 pub mod engine;
 pub mod facts;
 pub mod function_ir;
+pub mod hook_engine;
 pub mod il;
+pub mod il_store;
+pub mod instrumentation;
 pub mod lifter;
 pub mod object_layout;
 pub mod pointer_analysis;
 pub mod rc4_search;
+pub mod rewriter;
 pub mod sandbox;
 
 pub use api::AeonSession;
