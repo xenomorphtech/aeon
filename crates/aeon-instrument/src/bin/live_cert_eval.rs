@@ -26,6 +26,13 @@ const NT_PRSTATUS: libc::c_ulong = 1;
 const LIBC_MEMCPY_OFFSET: u64 = 0x4bb20;
 const LIBC_MEMCPY_INTERNAL_OFFSET: u64 = 0x4b9b0;
 const LIBC_MEMSET_OFFSET: u64 = 0x4bbe0;
+// Phase 1 shim additions (per cert-corridor-libc-plt-map): offsets calibrated
+// for the LIVE libc.so dump at /apex/com.android.runtime/lib64/bionic/libc.so
+// captured 2026-05-11T15:06:50Z (libc base 0x7044fa1000). The conventional
+// Android 33/34 offsets baked elsewhere in this file may not match this libc.
+// Live malloc offset observed via PLT redirect from corridor: 0x3cc78.
+// TODO: free/memmove/memcmp/calloc/__stack_chk_fail offsets — derive once dynsym dump arrives.
+const LIBC_MALLOC_OFFSET: u64 = 0x3cc78;
 const LIBC_STRCHR_MTE_OFFSET: u64 = 0x49100;
 const LIBC_STRCHR_OFFSET: u64 = 0x491c0;
 const LIBC_STRCMP_MTE_OFFSET: u64 = 0x492c0;
@@ -75,6 +82,40 @@ const VDSO_CLOCK_GETTIME_OFFSET: u64 = 0x2e0;
 const VDSO_GETTIMEOFDAY_OFFSET: u64 = 0x618;
 const VDSO_CLOCK_GETRES_OFFSET: u64 = 0x810;
 const VDSO_RT_SIGRETURN_OFFSET: u64 = 0x888;
+// Cert-corridor function offsets (see cert-real-hash-algorithm,
+// cert-pipeline-table). The full pipeline is SHA-256(PREPROC_A) → CRC32 →
+// xxHash64 → SHA-256(PREPROC_A) → CRC32 → SHA-256(HASH2) → SHA-256(HASH2).
+// PREPROC_A and HASH2 are heavy OLLVM-obfuscated wrappers (25% / 21%
+// negated-logic ops) around plain SHA-256; shimming them with native
+// SHA-256 skips ~55k obfuscated instructions across the cascade.
+// CALL CONVENTION IS NOT YET LOCKED — gated behind --enable-corridor-shims
+// until a Frida probe confirms which register is src/dst/len.
+const CORRIDOR_PREPROC_A_OFFSET: u64 = 0x1475a8;
+const CORRIDOR_HASH2_OFFSET: u64 = 0x135658;
+// Corridor-side PLT shims, extracted from nmsscr.dec's PLT-GOT relocations
+// via scripts/build_corridor_plt_table.py (362/363 symbols resolved).
+// Intercept at the corridor PLT BEFORE dispatch to libc — avoids needing
+// libc.so symbol resolution AND skips libc's obfuscated/complex internals.
+const CORRIDOR_PLT_MALLOC_OFFSET: u64           = 0x5f220;
+const CORRIDOR_PLT_FREE_OFFSET: u64             = 0x5f610;
+const CORRIDOR_PLT_MEMMOVE_OFFSET: u64          = 0x5f9a0;
+const CORRIDOR_PLT_MEMCMP_OFFSET: u64           = 0x5f0b0;
+const CORRIDOR_PLT_CALLOC_OFFSET: u64           = 0x5f350;
+const CORRIDOR_PLT___STACK_CHK_FAIL_OFFSET: u64 = 0x5f2f0;
+const CORRIDOR_PLT_MEMSET_OFFSET: u64           = 0x5f9b0;
+const CORRIDOR_PLT_MEMCPY_OFFSET: u64           = 0x60150;
+const CORRIDOR_PLT_STRLEN_OFFSET: u64           = 0x60330;
+const CORRIDOR_PLT_STRCHR_OFFSET: u64           = 0x5f770;
+const CORRIDOR_PLT_STRCMP_OFFSET: u64           = 0x5f7b0;
+const CORRIDOR_PLT_STRNCMP_OFFSET: u64          = 0x600b0;
+// Pipeline 2 plaintext-cert capture (per pipeline2-output-format, conf 0.93):
+// corridor+0x77fec is secret_string::assign which AES-CBC encrypts x1 into
+// x0 in place. The PLAIN CERT bytes are in x1 at this call, length w2 (≤65).
+// We shim to (a) capture x1[0..w2] as the plaintext cert, (b) still perform
+// the memcpy so downstream code observes consistent data.
+const CORRIDOR_SECRET_STRING_ASSIGN_OFFSET: u64 = 0x77fec;
+// Also intercept its sibling 0x77d88 (sometimes called instead per arm64-runner)
+const CORRIDOR_SECRET_STRING_ASSIGN_ALT_OFFSET: u64 = 0x77d88;
 const MAX_STUB_BYTES: u64 = 1 << 20;
 const REMOTE_PAGE_SIZE: u64 = 4096;
 const MAX_TRACE_STRING_BYTES: u64 = 512;
@@ -260,7 +301,12 @@ fn main() {
         stop_on_token: cli.stop_on_token,
         stop_on_non_concrete: cli.stop_on_non_concrete,
         verbose_trace: cli.verbose_trace,
+        enable_corridor_shims: cli.enable_corridor_shims,
     };
+
+    if setup.enable_corridor_shims {
+        std::env::set_var("AEON_ENABLE_CORRIDOR_SHIMS", "1");
+    }
 
     let report = match run_replay(setup, cli.max_blocks, cli.max_block_visits) {
         Ok(report) => report,
@@ -343,7 +389,7 @@ fn main() {
 fn usage() {
     eprintln!("usage:");
     eprintln!(
-        "  cargo run -p aeon-instrument --bin live_cert_eval -- [--state-json path] [--adb-serial SERIAL] [--maps-file path] [--offline-cache] [--page-cache-dir path] [--file-root path] [--path-map <guest-prefix> <host-path>] [--pid <pid>] [--challenge <hex>] [--tid <tid>] [--pc <addr>] [--reg <name> <value>] [--max-blocks N] [--max-block-visits N] [--trace-range start end] [--missing-memory stop|symbolic] [--summary-only] [--stop-on-token] [--stop-on-non-concrete] [--verbose-trace] [--report-out path] [--sprintf-trace-out path]"
+        "  cargo run -p aeon-instrument --bin live_cert_eval -- [--state-json path] [--adb-serial SERIAL] [--maps-file path] [--offline-cache] [--page-cache-dir path] [--file-root path] [--path-map <guest-prefix> <host-path>] [--pid <pid>] [--challenge <hex>] [--tid <tid>] [--pc <addr>] [--reg <name> <value>] [--max-blocks N] [--max-block-visits N] [--trace-range start end] [--missing-memory stop|symbolic] [--summary-only] [--stop-on-token] [--stop-on-non-concrete] [--verbose-trace] [--report-out path] [--sprintf-trace-out path] [--enable-corridor-shims]"
     );
 }
 
@@ -377,6 +423,7 @@ struct Cli {
     verbose_trace: bool,
     report_out: Option<PathBuf>,
     sprintf_trace_out: Option<PathBuf>,
+    enable_corridor_shims: bool,
 }
 
 impl Cli {
@@ -408,6 +455,7 @@ impl Cli {
         let mut verbose_trace = false;
         let mut report_out = None;
         let mut sprintf_trace_out = None;
+        let mut enable_corridor_shims = false;
 
         let mut idx = 0usize;
         while idx < args.len() {
@@ -589,6 +637,10 @@ impl Cli {
                         })?));
                     idx += 2;
                 }
+                "--enable-corridor-shims" => {
+                    enable_corridor_shims = true;
+                    idx += 1;
+                }
                 other => return Err(format!("unknown option '{other}'")),
             }
         }
@@ -616,6 +668,7 @@ impl Cli {
             verbose_trace,
             report_out,
             sprintf_trace_out,
+            enable_corridor_shims,
         })
     }
 }
@@ -1563,6 +1616,7 @@ struct LiveReplaySetup {
     stop_on_token: bool,
     stop_on_non_concrete: bool,
     verbose_trace: bool,
+    enable_corridor_shims: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -2427,6 +2481,7 @@ fn run_replay(
         stop_on_token,
         stop_on_non_concrete,
         verbose_trace,
+        enable_corridor_shims: _,
     } = setup;
     let mut sprintf_trace = sprintf_trace_out
         .map(SprintfTraceSink::create)
@@ -3104,6 +3159,27 @@ fn maybe_execute_known_stub_with_io(
             return Ok(Some(StubOutcome { next_pc }));
         }
 
+        if file_offset == LIBC_MALLOC_OFFSET {
+            // Phase 1 shim: synthetic bump allocator.
+            // Returns a fresh pointer in a fixed synthetic heap region.
+            // The harness needs the maps.txt to declare an [anon:libc_synth_heap]
+            // region matching SYNTH_HEAP_BASE..SYNTH_HEAP_END so the returned
+            // pointer is readable/writable by subsequent stages.
+            use std::sync::atomic::{AtomicU64, Ordering};
+            const SYNTH_HEAP_BASE: u64 = 0x6f00_0000_0000;
+            static CURSOR: AtomicU64 = AtomicU64::new(SYNTH_HEAP_BASE);
+            let size = require_u64_reg(registers, Reg::X(0), "malloc", pc, "x0")?;
+            let next_pc = require_u64_reg(registers, Reg::X(30), "malloc", pc, "x30")?;
+            // 16-byte align the allocation
+            let aligned = (size + 15) & !15;
+            let ptr = CURSOR.fetch_add(aligned, Ordering::Relaxed);
+            if remote_debug_enabled() {
+                eprintln!("[shim] malloc({size}) -> 0x{ptr:x}");
+            }
+            write_u64_reg(registers, 0, ptr);
+            return Ok(Some(StubOutcome { next_pc }));
+        }
+
         if matches!(
             file_offset,
             LIBC_MEMCPY_OFFSET | LIBC_MEMCPY_INTERNAL_OFFSET
@@ -3250,6 +3326,318 @@ fn maybe_execute_known_stub_with_io(
             write_u64_reg(registers, 0, 0);
             return Ok(Some(StubOutcome { next_pc }));
         }
+    }
+
+    if corridor_shims_enabled() && is_jit_corridor_region(&region.path) {
+        if let Some(outcome) = maybe_execute_corridor_shim(
+            file_offset,
+            pc,
+            registers,
+            memory_overlay,
+            memory,
+        )? {
+            return Ok(Some(outcome));
+        }
+    }
+
+    Ok(None)
+}
+
+fn corridor_shims_enabled() -> bool {
+    matches!(
+        std::env::var("AEON_ENABLE_CORRIDOR_SHIMS").ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
+}
+
+fn is_jit_corridor_region(path: &str) -> bool {
+    path.starts_with("/memfd:jit-cache")
+        || path.starts_with("/jit-corridor")
+        || path.contains("dalvik-jit-code-cache")
+        || path == "/memfd:jit-cache (deleted)"
+        // Live device dumps the decrypted nmsscr blob as
+        // /data/data/<pkg>/files/<8hex> (deleted)
+        || (path.contains("/data/data/com.netmarble.thered/files/")
+            && path.ends_with(" (deleted)"))
+}
+
+/// Native shim dispatch for the cert-corridor hash wrappers.
+///
+/// **PIPELINE (cert-pipeline-table + cert-stage5-sha256-input-format REVISED):**
+///   PREPROC_A (0x1475a8) = SHA-256 (hex-encoded output)
+///   PREPROC_B (0x14b87c) = CRC32 (custom seed 0x7da213f4)
+///   xxHash64  (0x14ff50) = xxHash64 with CUSTOM IV (V1..V4 below)
+///   HASH2     (0x135658) = **MD5** (NOT SHA-256 as earlier readings; standard
+///                                   MD5 H+K reconstructed via movz/movk; the
+///                                   73KB body is a 4-parallel NEON SIMD MD5)
+///
+/// **STATUS (latest):**
+///   - xxHash64 stage is GROUND-TRUTH VERIFIED in cert-emu via custom IV:
+///     V1=0x20ebd81d0dc84fd7, V2=0x82b45e6b87dc8550,
+///     V3=0xc001b02e60079a01, V4=0x21ca367cda1bcf7a (standard PRIMEs).
+///     Recorded xxh64 0xbba6dcddaedd96d7 reproduces exactly. No shim
+///     needed — emulation handles it; IVs recorded for cross-tool parity.
+///   - CRC32 seed 0x7da213f4 confirmed.
+///   - HASH2 reclassified from SHA-256 to MD5 (cert-stage5-sha256-input-format).
+///     The 24 bytes at `ctx+0x70` are an HTTP Date header slice (e.g.
+///     `'te: Sun, 19 Apr 2026 18:'` for buffer_cert_0000). Cert is
+///     time-bound: same challenge + same session at different wall times
+///     produces different certs.
+///   - Cert output format (likely; cert-emu testing variants A-G):
+///     `[MD5(input) 16B] || [xxHash64_truncated 8B] = 24 bytes = 48 hex chars`
+///   - PREPROC_A shim is BEST-GUESS, untested end-to-end.
+///   - HASH2 shim NOW USES MD5; its end-to-end correctness still depends on
+///     locking the input/output offsets and how the xxHash64_truncated 8B
+///     get concatenated.
+///
+/// Call conventions are NOT YET LOCKED. The current implementation assumes:
+///   PREPROC_A (0x1475a8): SHA-256(src=x0[0..w1])  -> 64 ASCII hex chars at x3
+///   HASH2      (0x135658): MD5(x0+0x70 .. x0+0x88) -> 16 bytes at x0+0x20
+///                          (caller is presumed to have populated x0+0x30..+0x38
+///                           with the xxh64-truncated half from an earlier stage)
+/// These are best-guess defaults sourced from cert-stage0-preprocess-a's
+/// (x0/w1/w2/x3/w4) input/output convention and cert-output-write-address.
+/// A 10-line Frida probe at PREPROC_A entry — log (x0, x1, x2, x3, x8) and
+/// dump 64 B at the dst pointer before/after — will confirm or correct the
+/// signature, after which the constants below should be updated.
+///
+/// **DO NOT trust this shim's output as a cert** until cert-emu's local
+/// pipeline reproduces a known cert end-to-end against the MD5 hypothesis.
+fn maybe_execute_corridor_shim(
+    file_offset: u64,
+    pc: u64,
+    registers: &mut BTreeMap<Reg, Value>,
+    memory_overlay: &mut BTreeMap<MemoryCellId, Value>,
+    memory: &ProcMemory,
+) -> Result<Option<StubOutcome>, String> {
+    use sha2::{Digest, Sha256};
+
+    // Phase 1 corridor PLT shims — intercept libc-call PLT stubs in the
+    // corridor itself so the harness never has to step through libc internals.
+    // All offsets extracted from scripts/build_corridor_plt_table.py.
+    if file_offset == CORRIDOR_PLT_MALLOC_OFFSET {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static CURSOR: AtomicU64 = AtomicU64::new(0x6f00_0000_0000);
+        let size = require_u64_reg(registers, Reg::X(0), "plt:malloc", pc, "x0")?;
+        let next_pc = require_u64_reg(registers, Reg::X(30), "plt:malloc", pc, "x30")?;
+        let aligned = (size + 15) & !15;
+        let ptr = CURSOR.fetch_add(aligned, Ordering::Relaxed);
+        write_u64_reg(registers, 0, ptr);
+        return Ok(Some(StubOutcome { next_pc }));
+    }
+    if file_offset == CORRIDOR_PLT_CALLOC_OFFSET {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static CURSOR: AtomicU64 = AtomicU64::new(0x6f80_0000_0000);
+        let nmemb = require_u64_reg(registers, Reg::X(0), "plt:calloc", pc, "x0")?;
+        let size  = require_u64_reg(registers, Reg::X(1), "plt:calloc", pc, "x1")?;
+        let next_pc = require_u64_reg(registers, Reg::X(30), "plt:calloc", pc, "x30")?;
+        let total = nmemb.saturating_mul(size);
+        let aligned = (total + 15) & !15;
+        let ptr = CURSOR.fetch_add(aligned, Ordering::Relaxed);
+        if total > 0 && total <= MAX_STUB_BYTES {
+            stub_write_bytes(memory_overlay, ptr, &vec![0u8; total as usize]);
+        }
+        write_u64_reg(registers, 0, ptr);
+        return Ok(Some(StubOutcome { next_pc }));
+    }
+    if file_offset == CORRIDOR_PLT_FREE_OFFSET {
+        let next_pc = require_u64_reg(registers, Reg::X(30), "plt:free", pc, "x30")?;
+        write_u64_reg(registers, 0, 0);
+        return Ok(Some(StubOutcome { next_pc }));
+    }
+    if file_offset == CORRIDOR_PLT_MEMMOVE_OFFSET {
+        let dest = require_u64_reg(registers, Reg::X(0), "plt:memmove", pc, "x0")?;
+        let src  = require_u64_reg(registers, Reg::X(1), "plt:memmove", pc, "x1")?;
+        let len  = require_u64_reg(registers, Reg::X(2), "plt:memmove", pc, "x2")?;
+        let next_pc = require_u64_reg(registers, Reg::X(30), "plt:memmove", pc, "x30")?;
+        if len > MAX_STUB_BYTES {
+            return Err(format!("plt:memmove oversized {}", len));
+        }
+        let bytes = stub_read_bytes(memory_overlay, memory, src, len, "plt:memmove", pc)?;
+        stub_write_bytes(memory_overlay, dest, &bytes);
+        write_u64_reg(registers, 0, dest);
+        return Ok(Some(StubOutcome { next_pc }));
+    }
+    if file_offset == CORRIDOR_PLT_MEMCMP_OFFSET {
+        let a   = require_u64_reg(registers, Reg::X(0), "plt:memcmp", pc, "x0")?;
+        let b   = require_u64_reg(registers, Reg::X(1), "plt:memcmp", pc, "x1")?;
+        let len = require_u64_reg(registers, Reg::X(2), "plt:memcmp", pc, "x2")?;
+        let next_pc = require_u64_reg(registers, Reg::X(30), "plt:memcmp", pc, "x30")?;
+        if len > MAX_STUB_BYTES {
+            return Err(format!("plt:memcmp oversized {}", len));
+        }
+        let ba = stub_read_bytes(memory_overlay, memory, a, len, "plt:memcmp", pc)?;
+        let bb = stub_read_bytes(memory_overlay, memory, b, len, "plt:memcmp", pc)?;
+        let result: i32 = match ba.cmp(&bb) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        };
+        write_u64_reg(registers, 0, (result as u32) as u64);
+        return Ok(Some(StubOutcome { next_pc }));
+    }
+    if file_offset == CORRIDOR_PLT___STACK_CHK_FAIL_OFFSET {
+        // Don't abort emulation — silently return to caller.
+        let next_pc = require_u64_reg(registers, Reg::X(30), "plt:__stack_chk_fail", pc, "x30")?;
+        return Ok(Some(StubOutcome { next_pc }));
+    }
+    if file_offset == CORRIDOR_PLT_MEMSET_OFFSET {
+        let dest = require_u64_reg(registers, Reg::X(0), "plt:memset", pc, "x0")?;
+        let fill = require_u64_reg(registers, Reg::X(1), "plt:memset", pc, "x1")?;
+        let len  = require_u64_reg(registers, Reg::X(2), "plt:memset", pc, "x2")?;
+        let next_pc = require_u64_reg(registers, Reg::X(30), "plt:memset", pc, "x30")?;
+        if len > MAX_STUB_BYTES {
+            return Err(format!("plt:memset oversized {}", len));
+        }
+        stub_write_bytes(memory_overlay, dest, &vec![(fill & 0xff) as u8; len as usize]);
+        write_u64_reg(registers, 0, dest);
+        return Ok(Some(StubOutcome { next_pc }));
+    }
+    if file_offset == CORRIDOR_PLT_MEMCPY_OFFSET {
+        let dest = require_u64_reg(registers, Reg::X(0), "plt:memcpy", pc, "x0")?;
+        let src  = require_u64_reg(registers, Reg::X(1), "plt:memcpy", pc, "x1")?;
+        let len  = require_u64_reg(registers, Reg::X(2), "plt:memcpy", pc, "x2")?;
+        let next_pc = require_u64_reg(registers, Reg::X(30), "plt:memcpy", pc, "x30")?;
+        if len > MAX_STUB_BYTES {
+            return Err(format!("plt:memcpy oversized {}", len));
+        }
+        let bytes = stub_read_bytes(memory_overlay, memory, src, len, "plt:memcpy", pc)?;
+        stub_write_bytes(memory_overlay, dest, &bytes);
+        write_u64_reg(registers, 0, dest);
+        return Ok(Some(StubOutcome { next_pc }));
+    }
+    if file_offset == CORRIDOR_PLT_STRLEN_OFFSET {
+        let ptr = require_u64_reg(registers, Reg::X(0), "plt:strlen", pc, "x0")?;
+        let next_pc = require_u64_reg(registers, Reg::X(30), "plt:strlen", pc, "x30")?;
+        let len = stub_strlen(memory_overlay, memory, ptr, "plt:strlen", pc)?;
+        write_u64_reg(registers, 0, len);
+        return Ok(Some(StubOutcome { next_pc }));
+    }
+    if file_offset == CORRIDOR_PLT_STRCHR_OFFSET {
+        let ptr = require_u64_reg(registers, Reg::X(0), "plt:strchr", pc, "x0")?;
+        let needle = require_u64_reg(registers, Reg::X(1), "plt:strchr", pc, "x1")? as u8;
+        let next_pc = require_u64_reg(registers, Reg::X(30), "plt:strchr", pc, "x30")?;
+        let result = stub_strchr(memory_overlay, memory, ptr, needle, "plt:strchr", pc)?;
+        write_u64_reg(registers, 0, result);
+        return Ok(Some(StubOutcome { next_pc }));
+    }
+    if file_offset == CORRIDOR_PLT_STRCMP_OFFSET {
+        let a = require_u64_reg(registers, Reg::X(0), "plt:strcmp", pc, "x0")?;
+        let b = require_u64_reg(registers, Reg::X(1), "plt:strcmp", pc, "x1")?;
+        let next_pc = require_u64_reg(registers, Reg::X(30), "plt:strcmp", pc, "x30")?;
+        let result = stub_strcmp(memory_overlay, memory, a, b, "plt:strcmp", pc)?;
+        write_u64_reg(registers, 0, (result as u32) as u64);
+        return Ok(Some(StubOutcome { next_pc }));
+    }
+    // ---- Pipeline 2 plain-cert capture (pipeline2-output-format) ----
+    // At corridor+0x77fec (secret_string::assign), x1 points at a 65B temp
+    // buffer holding the PLAINTEXT cert just before AES-CBC encryption.
+    // Capture it, then perform the memcpy semantic so downstream observes
+    // a consistent destination value (skipping the encryption is fine for
+    // our cert-derivation purpose).
+    if file_offset == CORRIDOR_SECRET_STRING_ASSIGN_OFFSET
+        || file_offset == CORRIDOR_SECRET_STRING_ASSIGN_ALT_OFFSET
+    {
+        let dest = require_u64_reg(registers, Reg::X(0), "secret_string::assign", pc, "x0")?;
+        let src  = require_u64_reg(registers, Reg::X(1), "secret_string::assign", pc, "x1")?;
+        let len_raw = require_u64_reg(registers, Reg::X(2), "secret_string::assign", pc, "x2")?;
+        let next_pc = require_u64_reg(registers, Reg::X(30), "secret_string::assign", pc, "x30")?;
+        let len = (len_raw as usize).min(65);
+        let plaintext =
+            stub_read_bytes(memory_overlay, memory, src, len as u64, "secret_string::assign", pc)?;
+        // Emit clearly. Print both hex and printable ASCII view.
+        let hex: String = plaintext.iter().map(|b| format!("{:02X}", b)).collect();
+        let ascii: String = plaintext.iter()
+            .map(|b| if (0x20..=0x7e).contains(b) { *b as char } else { '.' })
+            .collect();
+        eprintln!("[CERT_PLAINTEXT_CAPTURED] pc=0x{:x} dest=0x{:x} src=0x{:x} len_raw={} len={} hex={} ascii={:?}",
+                  pc, dest, src, len_raw, len, hex, ascii);
+        // Auto-detect: scan ASCII hex chars starting at src up to 64 bytes —
+        // works around the w26-stays-0 bug where x2 underreports the true
+        // cert length but the 48-hex-char cert IS present at src.
+        if let Ok(scan) = stub_read_bytes(memory_overlay, memory, src, 96, "secret_string::assign", pc) {
+            let mut auto_len = 0usize;
+            for b in scan.iter() {
+                if (*b as char).is_ascii_hexdigit() { auto_len += 1; } else { break; }
+            }
+            if auto_len > len && auto_len > 0 {
+                let auto_bytes = &scan[..auto_len];
+                let auto_ascii: String = auto_bytes.iter().map(|b| *b as char).collect();
+                eprintln!("[CERT_PLAINTEXT_AUTO]     auto_len={} ascii={:?}", auto_len, auto_ascii);
+            }
+        }
+        // Still memcpy src→dest so the dispatcher observes a populated dest.
+        stub_write_bytes(memory_overlay, dest, &plaintext);
+        write_u64_reg(registers, 0, dest);
+        return Ok(Some(StubOutcome { next_pc }));
+    }
+
+    if file_offset == CORRIDOR_PLT_STRNCMP_OFFSET {
+        let a = require_u64_reg(registers, Reg::X(0), "plt:strncmp", pc, "x0")?;
+        let b = require_u64_reg(registers, Reg::X(1), "plt:strncmp", pc, "x1")?;
+        let len = require_u64_reg(registers, Reg::X(2), "plt:strncmp", pc, "x2")?;
+        let next_pc = require_u64_reg(registers, Reg::X(30), "plt:strncmp", pc, "x30")?;
+        let result = stub_strncmp(memory_overlay, memory, a, b, len, "plt:strncmp", pc)?;
+        write_u64_reg(registers, 0, (result as u32) as u64);
+        return Ok(Some(StubOutcome { next_pc }));
+    }
+
+    if file_offset == CORRIDOR_PREPROC_A_OFFSET {
+        let src_ptr = require_u64_reg(registers, Reg::X(0), "corridor_preproc_a", pc, "x0")?;
+        let src_len = require_u64_reg(registers, Reg::X(1), "corridor_preproc_a", pc, "x1")?;
+        let dst_ptr = require_u64_reg(registers, Reg::X(3), "corridor_preproc_a", pc, "x3")?;
+        let next_pc =
+            require_u64_reg(registers, Reg::X(30), "corridor_preproc_a", pc, "x30")?;
+        if src_len > MAX_STUB_BYTES {
+            return Err(format!(
+                "corridor_preproc_a stub at {} refused oversized length {}",
+                format_hex(pc),
+                src_len
+            ));
+        }
+        let bytes =
+            stub_read_bytes(memory_overlay, memory, src_ptr, src_len, "corridor_preproc_a", pc)?;
+        let digest = Sha256::digest(&bytes);
+        // Write 64 ASCII hex chars at dst_ptr (PREPROC_A's documented
+        // externally-visible form is hex-encoded SHA-256).
+        let mut hex_out = [0u8; 64];
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for (i, b) in digest.iter().enumerate() {
+            hex_out[i * 2]     = HEX[(b >> 4)  as usize];
+            hex_out[i * 2 + 1] = HEX[(b & 0xf) as usize];
+        }
+        stub_write_bytes(memory_overlay, dst_ptr, &hex_out);
+        // No return value documented; conservatively set x0 = 0 (success).
+        write_u64_reg(registers, 0, 0);
+        return Ok(Some(StubOutcome { next_pc }));
+    }
+
+    if file_offset == CORRIDOR_HASH2_OFFSET {
+        // HASH2 is MD5 (cert-stage5-sha256-input-format REVISED) — the 73 KB
+        // OLLVM-obfuscated body reconstructs standard MD5 H+K constants via
+        // movz/movk and runs a 4-parallel SIMD MD5. Scalar MD5 produces the
+        // same digest semantics.
+        use md5::{Digest as Md5Digest, Md5};
+        let x0 = require_u64_reg(registers, Reg::X(0), "corridor_hash2", pc, "x0")?;
+        let next_pc =
+            require_u64_reg(registers, Reg::X(30), "corridor_hash2", pc, "x30")?;
+        // 24 bytes at x0+0x70 = HTTP Date header slice; output is 16-byte MD5
+        // digest written at x0+0x20. The upper half of the 32-byte cert struct
+        // (x0+0x30..+0x40) is left untouched here on the assumption that an
+        // earlier stage populated the xxHash64-truncated 8 bytes there — per
+        // the cert-output-format hypothesis [MD5 16B || xxh64_trunc 8B].
+        let input = stub_read_bytes(
+            memory_overlay,
+            memory,
+            x0.wrapping_add(0x70),
+            24,
+            "corridor_hash2",
+            pc,
+        )?;
+        let digest = Md5::digest(&input);
+        stub_write_bytes(memory_overlay, x0.wrapping_add(0x20), digest.as_slice());
+        write_u64_reg(registers, 0, 0);
+        return Ok(Some(StubOutcome { next_pc }));
     }
 
     Ok(None)
