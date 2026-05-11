@@ -92,6 +92,12 @@ const VDSO_RT_SIGRETURN_OFFSET: u64 = 0x888;
 // until a Frida probe confirms which register is src/dst/len.
 const CORRIDOR_PREPROC_A_OFFSET: u64 = 0x1475a8;
 const CORRIDOR_HASH2_OFFSET: u64 = 0x135658;
+// xxHash64 with custom V1..V4 IV (verified by cert-emu's
+// nmss_local_cert_pipeline_candidate against the recorded
+// 0xbba6dcddaedd96d7 over xxh64_buf_0000000000000000.bin). Shimming this
+// function avoids the NEON shl.2d instruction at corridor+0x150304 that
+// aeon's lifter doesn't yet support.
+const CORRIDOR_XXHASH64_OFFSET: u64 = 0x14ff50;
 // Corridor-side PLT shims, extracted from nmsscr.dec's PLT-GOT relocations
 // via scripts/build_corridor_plt_table.py (362/363 symbols resolved).
 // Intercept at the corridor PLT BEFORE dispatch to libc — avoids needing
@@ -3403,6 +3409,83 @@ fn is_jit_corridor_region(path: &str) -> bool {
 ///
 /// **DO NOT trust this shim's output as a cert** until cert-emu's local
 /// pipeline reproduces a known cert end-to-end against the MD5 hypothesis.
+
+/// xxHash64 with the corridor's verified custom V1..V4 IV.
+/// Mirrors `nmss_xxh64_custom_iv` in nmss_emu_cert.py — produces
+/// 0xbba6dcddaedd96d7 over xxh64_buf_0000000000000000.bin (verified by
+/// cert-emu against the recorded xxh64_hash).
+fn xxhash64_custom_iv(data: &[u8]) -> u64 {
+    const PRIME1: u64 = 0x9E3779B185EBCA87;
+    const PRIME2: u64 = 0xC2B2AE3D27D4EB4F;
+    const PRIME3: u64 = 0x165667B19E3779F9;
+    const PRIME4: u64 = 0x85EBCA77C2B2AE63;
+    const PRIME5: u64 = 0x27D4EB2F165667C5;
+    const IV: [u64; 4] = [
+        0x20ebd81d0dc84fd7,
+        0x82b45e6b87dc8550,
+        0xc001b02e60079a01,
+        0x21ca367cda1bcf7a,
+    ];
+
+    fn rol(x: u64, r: u32) -> u64 { x.rotate_left(r) }
+    fn round_(acc: u64, lane: u64) -> u64 {
+        rol(acc.wrapping_add(lane.wrapping_mul(PRIME2)), 31).wrapping_mul(PRIME1)
+    }
+    fn merge(acc: u64, val: u64) -> u64 {
+        let v = round_(0, val);
+        (acc ^ v).wrapping_mul(PRIME1).wrapping_add(PRIME4)
+    }
+
+    let n = data.len();
+    let mut i = 0usize;
+    let mut h: u64;
+
+    if n >= 32 {
+        let (mut v1, mut v2, mut v3, mut v4) = (IV[0], IV[1], IV[2], IV[3]);
+        while i + 32 <= n {
+            v1 = round_(v1, u64::from_le_bytes(data[i..i + 8].try_into().unwrap()));
+            v2 = round_(v2, u64::from_le_bytes(data[i + 8..i + 16].try_into().unwrap()));
+            v3 = round_(v3, u64::from_le_bytes(data[i + 16..i + 24].try_into().unwrap()));
+            v4 = round_(v4, u64::from_le_bytes(data[i + 24..i + 32].try_into().unwrap()));
+            i += 32;
+        }
+        h = rol(v1, 1)
+            .wrapping_add(rol(v2, 7))
+            .wrapping_add(rol(v3, 12))
+            .wrapping_add(rol(v4, 18));
+        h = merge(h, v1);
+        h = merge(h, v2);
+        h = merge(h, v3);
+        h = merge(h, v4);
+    } else {
+        h = IV[2].wrapping_add(PRIME5);
+    }
+    h = h.wrapping_add(n as u64);
+    while i + 8 <= n {
+        let k1 = round_(0, u64::from_le_bytes(data[i..i + 8].try_into().unwrap()));
+        h ^= k1;
+        h = rol(h, 27).wrapping_mul(PRIME1).wrapping_add(PRIME4);
+        i += 8;
+    }
+    if i + 4 <= n {
+        let k = u32::from_le_bytes(data[i..i + 4].try_into().unwrap()) as u64;
+        h ^= k.wrapping_mul(PRIME1);
+        h = rol(h, 23).wrapping_mul(PRIME2).wrapping_add(PRIME3);
+        i += 4;
+    }
+    while i < n {
+        h ^= (data[i] as u64).wrapping_mul(PRIME5);
+        h = rol(h, 11).wrapping_mul(PRIME1);
+        i += 1;
+    }
+    h ^= h >> 33;
+    h = h.wrapping_mul(PRIME2);
+    h ^= h >> 29;
+    h = h.wrapping_mul(PRIME3);
+    h ^= h >> 32;
+    h
+}
+
 fn maybe_execute_corridor_shim(
     file_offset: u64,
     pc: u64,
@@ -3579,6 +3662,28 @@ fn maybe_execute_corridor_shim(
         let next_pc = require_u64_reg(registers, Reg::X(30), "plt:strncmp", pc, "x30")?;
         let result = stub_strncmp(memory_overlay, memory, a, b, len, "plt:strncmp", pc)?;
         write_u64_reg(registers, 0, (result as u32) as u64);
+        return Ok(Some(StubOutcome { next_pc }));
+    }
+
+    // xxHash64 with corridor's verified custom IV — shim to avoid the NEON
+    // shl.2d intrinsic at corridor+0x150304 that aeon doesn't lift.
+    // Call signature observed empirically: x0=src_ptr, x1=len.
+    // Hash src[0..len] with custom V1..V4 IV; return hash in x0.
+    // (Caller stores it where it needs; pattern matches typical one-shot
+    // xxh64(buf, len) signature.)
+    if file_offset == CORRIDOR_XXHASH64_OFFSET {
+        let src = require_u64_reg(registers, Reg::X(0), "xxh64", pc, "x0")?;
+        let len = require_u64_reg(registers, Reg::X(1), "xxh64", pc, "x1")?;
+        let next_pc = require_u64_reg(registers, Reg::X(30), "xxh64", pc, "x30")?;
+        if len > MAX_STUB_BYTES {
+            return Err(format!("xxh64 stub at {} refused oversized {}", format_hex(pc), len));
+        }
+        let bytes = stub_read_bytes(memory_overlay, memory, src, len, "xxh64", pc)?;
+        let h = xxhash64_custom_iv(&bytes);
+        write_u64_reg(registers, 0, h);
+        if remote_debug_enabled() {
+            eprintln!("[shim] xxh64(src=0x{:x}, len={}) -> 0x{:016x}", src, len, h);
+        }
         return Ok(Some(StubOutcome { next_pc }));
     }
 
