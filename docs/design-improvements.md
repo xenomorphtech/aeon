@@ -44,7 +44,7 @@ run with no backing store.
 `crates/aeon-jit/tests/differential.rs` runs 201 AArch64 snippets through
 Unicorn (the reference) and three engines over 35 input vectors: the
 interpreter, the JIT, and the JIT fed with IL reduced by
-`aeon_reduce::pipeline::reduce_block_local` (what `aeon-instrument` compiles).
+`aeon_reduce::pipeline::reduce_block_local`.
 It compares x0-x30, SP, NZCV, v0-v31 and a data region mapped at the same
 address everywhere. Snippets can branch, so the interpreter and the JIT are
 driven block by block. Engines known to disagree are listed in the test's
@@ -177,7 +177,7 @@ the view layer.
 
 ## 8. The block-local reducer changes behaviour, and its output is compiled
 
-Found by the differential test (item 2). `aeon-instrument` passes every block
+Found by the differential test (item 2). `aeon-instrument` passed every block
 through `aeon_reduce::pipeline::reduce_block_local` before compiling it, and
 that pipeline is not semantics-preserving. Causes identified so far:
 
@@ -205,11 +205,19 @@ copy forwarding invalidated by any write to a register the copy mentions, and
 no forwarding into intrinsic operands. The pass manager in item 7 is where
 per-pass differential validation belongs.
 
+**Status (2026-11-17): mitigated.** `aeon-instrument`'s translator now
+compiles the IL as lifted, so the compiled path no longer depends on the
+reducer. The reducer itself is unchanged: the differential test still runs
+the JIT on reduced IL and lists its 26 wrong results in `KNOWN`, and
+`jit_linear_sweep` still reduces, but only to display and round-trip IL. Any
+consumer that treats reduced IL as equivalent to the original (the analyses
+in `aeon`, `aeon-eval`) is exposed to the same causes.
+
 ## Order of work
 
 1, then 2: they fix a correctness risk rather than tidiness, and they make the
 JIT split in 3 mostly mechanical. Items 1 to 4 are done, and the differential
 test from item 2 covers scalar code, memory, branches and a sample of SIMD.
-Next: item 8, because it is a correctness bug in a shipping path; then SIMD
-coverage in the JIT (accept the statement form the lifter emits); then items 5
-and 6.
+Item 8 is mitigated for the compiled path. Next: SIMD coverage in the JIT
+(accept the statement form the lifter emits), making the reducer itself
+semantics-preserving, then items 5 and 6.

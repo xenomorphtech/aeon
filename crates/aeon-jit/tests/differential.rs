@@ -67,7 +67,8 @@ enum Engine {
     Interpreter,
     Jit,
     /// The JIT fed with IL that went through `aeon_reduce`'s block-local
-    /// pipeline first, as `aeon-instrument` does.
+    /// pipeline first. Nothing compiles reduced IL any more; this engine
+    /// tracks whether the reducer preserves behaviour.
     ReducedJit,
 }
 

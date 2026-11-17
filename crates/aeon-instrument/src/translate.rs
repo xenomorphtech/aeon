@@ -1,6 +1,5 @@
 use aeon::lifter;
 use aeon_jit::{JitConfig, ObjectCompiler};
-use aeon_reduce::pipeline::reduce_block_local;
 use aeonil::{Expr, Reg, Stmt, TrapKind};
 use object::build;
 use object::elf;
@@ -1373,13 +1372,16 @@ fn finalize_block(
     let return_addr = start + (current.raw_stmts.len() as u64 * 4);
     let transformed = transform_calls_and_rets(std::mem::take(&mut current.raw_stmts), return_addr);
     current.start = 0;
-    let reduced = reduce_block_local(transformed);
-    let trap = match reduced.as_slice() {
+    // Compile the IL as lifted. `aeon_reduce`'s block-local pipeline is for
+    // readable IL and does not preserve behaviour (it drops flag updates
+    // that are still read, among other things); see the `ReducedJit` entries
+    // in aeon-jit's differential test.
+    let trap = match transformed.as_slice() {
         [Stmt::Trap { kind, imm }] => Some((*kind, *imm)),
         _ => None,
     };
     compiler
-        .compile_block(start, &reduced)
+        .compile_block(start, &transformed)
         .map_err(|err| SkippedBlockRecord {
             source_block: format_hex(start),
             reason: err.to_string(),
