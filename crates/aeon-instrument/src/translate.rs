@@ -1709,7 +1709,7 @@ mod tests {
             .compile_block(
                 0x1000,
                 &[Stmt::Intrinsic {
-                    name: "fcmla.8h".to_string(),
+                    name: "fcmla.8h".into(),
                     operands: vec![
                         Expr::Reg(Reg::V(0)),
                         Expr::Reg(Reg::V(1)),

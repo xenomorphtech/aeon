@@ -404,7 +404,7 @@ fn main() {
         code_alias_base,
         trace_output: Some(trace_output.clone()),
         drain_interval: 8192,
-        unmapped_memory_mode: engine::UnmappedMemoryMode::Skip,
+        unmapped_memory_mode: aeon_instrument::engine::UnmappedMemoryMode::Skip,
         enable_block_batching: false,
         batch_size: 128,
     };

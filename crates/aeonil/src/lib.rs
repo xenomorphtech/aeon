@@ -1,5 +1,9 @@
 /// AeonIL — a BNIL-like intermediate language for ARM64.
 
+mod intrinsic;
+
+pub use intrinsic::{IntrinsicName, IntrinsicOp, VectorArrangement};
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Reg {
     X(u8),     // 64-bit general purpose
@@ -160,7 +164,7 @@ pub enum Expr {
 
     // Catch-all for complex/SIMD/rare operations
     Intrinsic {
-        name: String,
+        name: IntrinsicName,
         operands: Vec<Expr>,
     },
 }
@@ -199,7 +203,7 @@ pub enum Stmt {
         imm: u16,
     },
     Intrinsic {
-        name: String,
+        name: IntrinsicName,
         operands: Vec<Expr>,
     },
 }
@@ -341,7 +345,7 @@ pub fn e_cond_select(cond: Condition, t: Expr, f: Expr) -> Expr {
 }
 pub fn e_intrinsic(name: &str, ops: Vec<Expr>) -> Expr {
     Expr::Intrinsic {
-        name: name.to_string(),
+        name: name.into(),
         operands: ops,
     }
 }

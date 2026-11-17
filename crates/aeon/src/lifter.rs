@@ -1270,7 +1270,7 @@ fn lift_unary_intrinsic_with_arrangement(disasm: &str, operands: &[Operand], nam
 fn lift_intrinsic_all(operands: &[Operand], name: &str) -> Stmt {
     let ops: Vec<Expr> = operands.iter().map(|o| expr_from_operand(o)).collect();
     Stmt::Intrinsic {
-        name: name.to_string(),
+        name: name.into(),
         operands: ops,
     }
 }
@@ -1286,7 +1286,7 @@ fn lift_vector_immediate_intrinsic(disasm: &str, operands: &[Operand], name: &st
     }
     ops.extend(operands.iter().skip(1).map(expr_from_operand));
     Stmt::Intrinsic {
-        name: intrinsic_name_with_arrangement(disasm, name),
+        name: intrinsic_name_with_arrangement(disasm, name).into(),
         operands: ops,
     }
 }
@@ -1309,7 +1309,7 @@ fn lift_intrinsic_with_lane_operand(
         ops.push(expr);
     }
     Stmt::Intrinsic {
-        name: intrinsic_name_with_arrangement(disasm, name),
+        name: intrinsic_name_with_arrangement(disasm, name).into(),
         operands: ops,
     }
 }
@@ -1323,7 +1323,7 @@ fn lift_widening_lane_mul_intrinsic(disasm: &str, operands: &[Operand], name: &s
         .unwrap_or_else(|| expr_op(operands, 2));
     ops.push(scalar);
     Stmt::Intrinsic {
-        name: intrinsic_name_with_arrangement(disasm, name),
+        name: intrinsic_name_with_arrangement(disasm, name).into(),
         operands: ops,
     }
 }
@@ -1775,7 +1775,7 @@ fn expr_from_operand(op: &Operand) -> Expr {
         | Operand::MemExt { .. } => mem_to_addr(op),
 
         Operand::SysReg(sr) => Expr::Intrinsic {
-            name: format!("{}", sr),
+            name: format!("{}", sr).into(),
             operands: vec![],
         },
         Operand::MultiReg { regs, .. } => {
@@ -1784,7 +1784,7 @@ fn expr_from_operand(op: &Operand) -> Expr {
                 .filter_map(|r| r.and_then(|rr| reg_from_bad64(rr).map(Expr::Reg)))
                 .collect();
             Expr::Intrinsic {
-                name: "multi_reg".to_string(),
+                name: "multi_reg".into(),
                 operands: reg_exprs,
             }
         }
@@ -2185,7 +2185,7 @@ mod tests {
         assert_eq!(
             result.stmt,
             Stmt::Intrinsic {
-                name: "movi.2d".to_string(),
+                name: "movi.2d".into(),
                 operands: vec![Expr::Reg(Reg::V(0)), Expr::Imm(u64::MAX)],
             }
         );
@@ -2200,7 +2200,7 @@ mod tests {
         assert_eq!(
             result.stmt,
             Stmt::Intrinsic {
-                name: "cmeq.2s".to_string(),
+                name: "cmeq.2s".into(),
                 operands: vec![
                     Expr::Reg(Reg::V(1)),
                     Expr::Reg(Reg::V(0)),
@@ -2219,7 +2219,7 @@ mod tests {
         assert_eq!(
             result.stmt,
             Stmt::Intrinsic {
-                name: "bif.8b".to_string(),
+                name: "bif.8b".into(),
                 operands: vec![
                     Expr::Reg(Reg::V(2)),
                     Expr::Reg(Reg::V(0)),
@@ -2253,7 +2253,7 @@ mod tests {
         assert_eq!(
             result.stmt,
             Stmt::Intrinsic {
-                name: "add.2d".to_string(),
+                name: "add.2d".into(),
                 operands: vec![
                     Expr::Reg(Reg::V(0)),
                     Expr::Reg(Reg::V(1)),
@@ -2600,7 +2600,7 @@ mod tests {
         assert_eq!(
             result.stmt,
             Stmt::Intrinsic {
-                name: "sri.2d".to_string(),
+                name: "sri.2d".into(),
                 operands: vec![
                     Expr::Reg(Reg::V(24)),
                     Expr::Reg(Reg::V(23)),
@@ -2619,7 +2619,7 @@ mod tests {
         assert_eq!(
             result.stmt,
             Stmt::Intrinsic {
-                name: "sqshlu.2d".to_string(),
+                name: "sqshlu.2d".into(),
                 operands: vec![
                     Expr::Reg(Reg::V(24)),
                     Expr::Reg(Reg::V(30)),
@@ -2638,10 +2638,10 @@ mod tests {
         assert_eq!(
             result.stmt,
             Stmt::Intrinsic {
-                name: "ld1.4h".to_string(),
+                name: "ld1.4h".into(),
                 operands: vec![
                     Expr::Intrinsic {
-                        name: "multi_reg".to_string(),
+                        name: "multi_reg".into(),
                         operands: vec![Expr::Reg(Reg::V(31))],
                     },
                     Expr::Reg(Reg::X(3)),
@@ -2660,10 +2660,10 @@ mod tests {
         assert_eq!(
             result.stmt,
             Stmt::Intrinsic {
-                name: "st1.8h".to_string(),
+                name: "st1.8h".into(),
                 operands: vec![
                     Expr::Intrinsic {
-                        name: "multi_reg".to_string(),
+                        name: "multi_reg".into(),
                         operands: vec![Expr::Reg(Reg::V(31))],
                     },
                     Expr::Reg(Reg::X(16)),
@@ -2682,7 +2682,7 @@ mod tests {
         assert_eq!(
             result.stmt,
             Stmt::Intrinsic {
-                name: "uqrshrn2.4s".to_string(),
+                name: "uqrshrn2.4s".into(),
                 operands: vec![Expr::Reg(Reg::V(8)), Expr::Reg(Reg::V(24)), Expr::Imm(0x2)],
             }
         );
@@ -2697,7 +2697,7 @@ mod tests {
         assert_eq!(
             result.stmt,
             Stmt::Intrinsic {
-                name: "umull2.4s".to_string(),
+                name: "umull2.4s".into(),
                 operands: vec![
                     Expr::Reg(Reg::V(16)),
                     Expr::Reg(Reg::V(4)),
@@ -2716,7 +2716,7 @@ mod tests {
         assert_eq!(
             result.stmt,
             Stmt::Intrinsic {
-                name: "mla.8h".to_string(),
+                name: "mla.8h".into(),
                 operands: vec![
                     Expr::Reg(Reg::V(0)),
                     Expr::Reg(Reg::V(21)),
@@ -2735,7 +2735,7 @@ mod tests {
         assert_eq!(
             result.stmt,
             Stmt::Intrinsic {
-                name: "umlsl2.4s".to_string(),
+                name: "umlsl2.4s".into(),
                 operands: vec![
                     Expr::Reg(Reg::V(24)),
                     Expr::Reg(Reg::V(15)),
@@ -2754,7 +2754,7 @@ mod tests {
         assert_eq!(
             result.stmt,
             Stmt::Intrinsic {
-                name: "fcmla.8h".to_string(),
+                name: "fcmla.8h".into(),
                 operands: vec![
                     Expr::Reg(Reg::V(8)),
                     Expr::Reg(Reg::V(27)),
@@ -2774,7 +2774,7 @@ mod tests {
         assert_eq!(
             result.stmt,
             Stmt::Intrinsic {
-                name: "fmulx.2d".to_string(),
+                name: "fmulx.2d".into(),
                 operands: vec![
                     Expr::Reg(Reg::V(24)),
                     Expr::Reg(Reg::V(1)),

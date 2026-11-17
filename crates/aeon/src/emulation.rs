@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use aeonil::{Condition, Expr, Reg, Stmt};
+use aeonil::{Condition, Expr, IntrinsicName, IntrinsicOp, Reg, Stmt, VectorArrangement};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -94,11 +94,12 @@ pub fn execute_block(
     missing_memory_policy: MissingMemoryPolicy,
     step_budget: usize,
 ) -> BlockExecutionResult {
-    let mut executor = BlockExecutor::new(
+    let mut executor = Executor::new(
         initial_registers,
         initial_memory,
         backing,
         missing_memory_policy,
+        ExecMode::Block,
     );
     let mut steps_executed = 0usize;
 
@@ -124,23 +125,37 @@ struct Nzcv {
     v: bool,
 }
 
-struct Executor {
-    registers: BTreeMap<Reg, Value>,
-    memory: BTreeMap<MemoryCellId, Value>,
-    touched: BTreeSet<MemoryCellId>,
-    flags: Option<Nzcv>,
+/// What the two entry points treat differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecMode {
+    /// A straight-line snippet: control-flow statements are skipped and stack
+    /// slots keep their symbolic `StackSlot` identity.
+    Snippet,
+    /// One basic block: control flow ends the block and stack slots resolve
+    /// through SP when it is known.
+    Block,
 }
 
-struct BlockExecutor<'a> {
+struct Executor<'a> {
     registers: BTreeMap<Reg, Value>,
     memory: BTreeMap<MemoryCellId, Value>,
     flags: Option<Nzcv>,
     backing: &'a dyn BackingStore,
     missing_memory_policy: MissingMemoryPolicy,
+    mode: ExecMode,
     reads: Vec<MemoryReadObservation>,
     writes: Vec<MemoryWriteObservation>,
     next_pc: Option<u64>,
     stop: BlockStop,
+}
+
+/// Backing store for snippets, which only ever see memory they wrote.
+struct NoBacking;
+
+impl BackingStore for NoBacking {
+    fn load(&self, _addr: u64, _size: u8) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 pub fn execute_snippet(
@@ -148,7 +163,13 @@ pub fn execute_snippet(
     initial_registers: BTreeMap<Reg, Value>,
     step_budget: usize,
 ) -> ExecutionResult {
-    let mut executor = Executor::new(initial_registers);
+    let mut executor = Executor::new(
+        initial_registers,
+        BTreeMap::new(),
+        &NoBacking,
+        MissingMemoryPolicy::ContinueAsUnknown,
+        ExecMode::Snippet,
+    );
     let mut steps_executed = 0usize;
 
     for stmt in stmts {
@@ -160,8 +181,15 @@ pub fn execute_snippet(
     }
 
     let budget_exhausted = steps_executed < stmts.len();
-    let touched_memory = executor
-        .touched
+    let touched: BTreeSet<MemoryCellId> = executor
+        .reads
+        .iter()
+        .map(|read| &read.id)
+        .chain(executor.writes.iter().map(|write| &write.id))
+        .filter(|id| !matches!(id.location, MemoryLocation::Unknown))
+        .cloned()
+        .collect();
+    let touched_memory = touched
         .into_iter()
         .map(|id| MemoryCell {
             value: executor.memory.get(&id).cloned().unwrap_or(Value::Unknown),
@@ -177,578 +205,13 @@ pub fn execute_snippet(
     }
 }
 
-impl Executor {
-    fn new(initial_registers: BTreeMap<Reg, Value>) -> Self {
-        let mut executor = Self {
-            registers: BTreeMap::new(),
-            memory: BTreeMap::new(),
-            touched: BTreeSet::new(),
-            flags: None,
-        };
-
-        let mut delayed_x_regs = Vec::new();
-        for (reg, value) in initial_registers {
-            if matches!(reg, Reg::X(_)) {
-                delayed_x_regs.push((reg, value));
-            } else {
-                executor.write_reg(reg, value);
-            }
-        }
-        for (reg, value) in delayed_x_regs {
-            executor.write_reg(reg, value);
-        }
-
-        executor
-    }
-
-    fn execute_stmt(&mut self, stmt: &Stmt) {
-        match stmt {
-            Stmt::Assign { dst, src } => {
-                let value = self.eval_expr(src);
-                self.write_reg(dst.clone(), value);
-            }
-            Stmt::Store { addr, value, size } => {
-                if let Some(cell_id) = self.resolve_memory_cell(addr, *size) {
-                    let stored = mask_value(self.eval_expr(value), *size);
-                    self.touched.insert(cell_id.clone());
-                    write_memory_overlay(&mut self.memory, &cell_id, &stored);
-                }
-            }
-            Stmt::SetFlags { expr } => self.apply_flags(expr),
-            Stmt::Pair(lhs, rhs) => {
-                self.execute_stmt(lhs);
-                self.execute_stmt(rhs);
-            }
-            Stmt::Nop => panic_on_noop_stmt(stmt),
-            Stmt::Intrinsic { name, operands } => self.execute_stmt_intrinsic(name, operands),
-            Stmt::Branch { .. }
-            | Stmt::CondBranch { .. }
-            | Stmt::Call { .. }
-            | Stmt::Ret
-            | Stmt::Trap { .. } => {}
-            Stmt::Barrier(kind) => {
-                if !is_supported_barrier(kind) {
-                    panic_on_unsupported_stmt(stmt);
-                }
-            }
-        }
-    }
-
-    fn eval_expr(&mut self, expr: &Expr) -> Value {
-        match expr {
-            Expr::Reg(reg) => self.read_reg(reg),
-            Expr::Imm(value) | Expr::AdrpImm(value) | Expr::AdrImm(value) => Value::U64(*value),
-            Expr::FImm(value) => Value::F64(*value),
-            Expr::Load { addr, size } => {
-                let Some(cell_id) = self.resolve_memory_cell(addr, *size) else {
-                    return Value::Unknown;
-                };
-                self.touched.insert(cell_id.clone());
-                if let Some(value) = self.memory.get(&cell_id).cloned() {
-                    return value;
-                }
-                if let Some(bytes) = overlay_bytes_for_cell(&self.memory, &cell_id) {
-                    return decode_loaded_value(&bytes);
-                }
-                self.memory.entry(cell_id).or_insert(Value::Unknown).clone()
-            }
-            Expr::Add(lhs, rhs) => self.eval_binary_u64(lhs, rhs, u64::wrapping_add),
-            Expr::Sub(lhs, rhs) => self.eval_binary_u64(lhs, rhs, u64::wrapping_sub),
-            Expr::Mul(lhs, rhs) => self.eval_binary_u64(lhs, rhs, u64::wrapping_mul),
-            Expr::Div(lhs, rhs) | Expr::UDiv(lhs, rhs) => {
-                self.eval_binary_u64(lhs, rhs, |a, b| if b == 0 { 0 } else { a / b })
-            }
-            Expr::Neg(inner) => self.eval_unary_u64(inner, u64::wrapping_neg),
-            Expr::Abs(inner) => self.eval_unary_u64(inner, |value| {
-                if (value as i64) < 0 {
-                    (value as i64).wrapping_abs() as u64
-                } else {
-                    value
-                }
-            }),
-            Expr::And(lhs, rhs) => self.eval_binary_u64(lhs, rhs, |a, b| a & b),
-            Expr::Or(lhs, rhs) => self.eval_binary_u64(lhs, rhs, |a, b| a | b),
-            Expr::Xor(lhs, rhs) => self.eval_binary_u64(lhs, rhs, |a, b| a ^ b),
-            Expr::Not(inner) => self.eval_unary_u64(inner, |value| !value),
-            Expr::Shl(lhs, rhs) => {
-                self.eval_binary_u64(
-                    lhs,
-                    rhs,
-                    |a, b| {
-                        if b < 64 {
-                            a.wrapping_shl(b as u32)
-                        } else {
-                            0
-                        }
-                    },
-                )
-            }
-            Expr::Lsr(lhs, rhs) => {
-                self.eval_binary_u64(
-                    lhs,
-                    rhs,
-                    |a, b| {
-                        if b < 64 {
-                            a.wrapping_shr(b as u32)
-                        } else {
-                            0
-                        }
-                    },
-                )
-            }
-            Expr::Asr(lhs, rhs) => self.eval_binary_u64(lhs, rhs, |a, b| {
-                let shift = b.min(63) as u32;
-                ((a as i64) >> shift) as u64
-            }),
-            Expr::Ror(lhs, rhs) => {
-                self.eval_binary_u64(lhs, rhs, |a, b| a.rotate_right((b % 64) as u32))
-            }
-            Expr::SignExtend { src, from_bits } => {
-                self.eval_unary_u64(src, |value| sign_extend(value, *from_bits))
-            }
-            Expr::ZeroExtend { src, from_bits } => {
-                self.eval_unary_u64(src, |value| apply_mask(value, *from_bits))
-            }
-            Expr::Extract { src, lsb, width } => {
-                extract_value_bits(self.eval_expr(src), *lsb, *width)
-            }
-            Expr::Insert {
-                dst,
-                src,
-                lsb,
-                width,
-            } => {
-                let dst_value = self.eval_expr(dst);
-                let src_value = self.eval_expr(src);
-                match (dst_value.as_u64(), src_value.as_u64()) {
-                    (Some(dst_bits), Some(src_bits)) => {
-                        let mask = width_mask(*width) << *lsb as u32;
-                        let inserted = (dst_bits & !mask)
-                            | ((apply_mask(src_bits, *width) << *lsb as u32) & mask);
-                        Value::U64(inserted)
-                    }
-                    _ => Value::Unknown,
-                }
-            }
-            Expr::CondSelect {
-                cond,
-                if_true,
-                if_false,
-            } => match eval_condition(self.flags, *cond) {
-                Some(true) => self.eval_expr(if_true),
-                Some(false) => self.eval_expr(if_false),
-                None => Value::Unknown,
-            },
-            Expr::Compare { cond, lhs, rhs } => {
-                let lhs_value = self.eval_expr(lhs);
-                let rhs_value = self.eval_expr(rhs);
-                match (lhs_value.as_u64(), rhs_value.as_u64()) {
-                    (Some(lhs_bits), Some(rhs_bits)) => {
-                        match eval_compare(*cond, lhs_bits, rhs_bits) {
-                            Some(result) => Value::U64(u64::from(result)),
-                            None => Value::Unknown,
-                        }
-                    }
-                    _ => Value::Unknown,
-                }
-            }
-            Expr::StackSlot { offset, .. } => self
-                .read_reg(&Reg::SP)
-                .as_u64()
-                .map(|sp| Value::U64(sp.wrapping_add(*offset as u64)))
-                .unwrap_or(Value::Unknown),
-            Expr::Intrinsic { name, operands } if name == "movk" => {
-                let dst = operands
-                    .first()
-                    .map(|expr| self.eval_expr(expr))
-                    .and_then(|value| value.as_u64());
-                let src = operands
-                    .get(1)
-                    .map(|expr| self.eval_expr(expr))
-                    .and_then(|value| value.as_u64());
-                eval_movk_bits(dst, src)
-            }
-            Expr::Intrinsic { name, operands } if intrinsic_base_name(name) == "smulh" => {
-                eval_mul_high(
-                    operands.first().map(|expr| self.eval_expr(expr)),
-                    operands.get(1).map(|expr| self.eval_expr(expr)),
-                    true,
-                )
-            }
-            Expr::Intrinsic { name, operands } if intrinsic_base_name(name) == "umulh" => {
-                eval_mul_high(
-                    operands.first().map(|expr| self.eval_expr(expr)),
-                    operands.get(1).map(|expr| self.eval_expr(expr)),
-                    false,
-                )
-            }
-            Expr::Intrinsic { .. } => panic_on_unsupported_expr(expr),
-            Expr::Clz(inner) => self.eval_unary_with_width(inner, leading_zeros_for_width),
-            Expr::Cls(inner) => self.eval_unary_with_width(inner, leading_sign_bits_for_width),
-            Expr::Rev(inner) => self.eval_unary_with_width(inner, reverse_bytes_for_width),
-            Expr::Rbit(inner) => self.eval_unary_with_width(inner, reverse_bits_for_width),
-            Expr::MrsRead(_)
-            | Expr::FAdd(_, _)
-            | Expr::FSub(_, _)
-            | Expr::FMul(_, _)
-            | Expr::FDiv(_, _)
-            | Expr::FNeg(_)
-            | Expr::FAbs(_)
-            | Expr::FSqrt(_)
-            | Expr::FMax(_, _)
-            | Expr::FMin(_, _)
-            | Expr::FCvt(_)
-            | Expr::IntToFloat(_)
-            | Expr::FloatToInt(_) => panic_on_unsupported_expr(expr),
-        }
-    }
-
-    fn eval_binary_u64(&mut self, lhs: &Expr, rhs: &Expr, op: impl Fn(u64, u64) -> u64) -> Value {
-        let lhs_value = self.eval_expr(lhs);
-        let rhs_value = self.eval_expr(rhs);
-        match (lhs_value.as_u64(), rhs_value.as_u64()) {
-            (Some(lhs_bits), Some(rhs_bits)) => Value::U64(op(lhs_bits, rhs_bits)),
-            _ => Value::Unknown,
-        }
-    }
-
-    fn eval_unary_u64(&mut self, expr: &Expr, op: impl Fn(u64) -> u64) -> Value {
-        let value = self.eval_expr(expr);
-        match value.as_u64() {
-            Some(bits) => Value::U64(op(bits)),
-            None => Value::Unknown,
-        }
-    }
-
-    fn eval_unary_with_width(&mut self, expr: &Expr, op: impl Fn(u64, u8) -> u64) -> Value {
-        let value = self.eval_expr(expr);
-        let width = expr_bit_width(expr).unwrap_or(64);
-        match value.as_u64() {
-            Some(bits) => Value::U64(op(bits, width)),
-            None => Value::Unknown,
-        }
-    }
-
-    fn resolve_memory_cell(&mut self, expr: &Expr, size: u8) -> Option<MemoryCellId> {
-        let location = self.resolve_memory_location(expr)?;
-        Some(MemoryCellId { location, size })
-    }
-
-    fn resolve_memory_location(&mut self, expr: &Expr) -> Option<MemoryLocation> {
-        match expr {
-            Expr::Reg(Reg::W(index)) => self
-                .read_reg(&Reg::X(*index))
-                .as_u64()
-                .map(MemoryLocation::Absolute),
-            Expr::StackSlot { offset, .. } => Some(MemoryLocation::StackSlot(*offset)),
-            Expr::Add(lhs, rhs) => self.add_location(lhs, rhs, false),
-            Expr::Sub(lhs, rhs) => self.add_location(lhs, rhs, true),
-            _ => self.eval_expr(expr).as_u64().map(MemoryLocation::Absolute),
-        }
-    }
-
-    fn add_location(&mut self, lhs: &Expr, rhs: &Expr, subtract: bool) -> Option<MemoryLocation> {
-        if let Some(location) = self.resolve_memory_location(lhs) {
-            let delta = self.eval_expr(rhs).as_u64()? as i64;
-            return Some(offset_location(location, delta, subtract));
-        }
-        if !subtract {
-            if let Some(location) = self.resolve_memory_location(rhs) {
-                let delta = self.eval_expr(lhs).as_u64()? as i64;
-                return Some(offset_location(location, delta, false));
-            }
-        }
-        None
-    }
-
-    fn apply_flags(&mut self, expr: &Expr) {
-        let flags = self.compute_flags(expr);
-        self.flags = flags;
-        let stored = flags
-            .map(|nzcv| Value::U64(nzcv.pack()))
-            .unwrap_or(Value::Unknown);
-        self.registers.insert(Reg::Flags, stored);
-    }
-
-    fn compute_flags(&mut self, expr: &Expr) -> Option<Nzcv> {
-        match expr {
-            Expr::Imm(bits) => Some(Nzcv::from_bits(*bits)),
-            Expr::CondSelect {
-                cond,
-                if_true,
-                if_false,
-            } => match eval_condition(self.flags, *cond) {
-                Some(true) => self.compute_flags(if_true),
-                Some(false) => self.compute_flags(if_false),
-                None => None,
-            },
-            Expr::Add(lhs, rhs) => self.compute_add_flags(lhs, rhs),
-            Expr::Sub(lhs, rhs) => self.compute_sub_flags(lhs, rhs),
-            Expr::And(lhs, rhs) => self.compute_and_flags(lhs, rhs),
-            _ => None,
-        }
-    }
-
-    fn compute_add_flags(&mut self, lhs: &Expr, rhs: &Expr) -> Option<Nzcv> {
-        let bits = expr_bit_width(lhs)
-            .or_else(|| expr_bit_width(rhs))
-            .unwrap_or(64);
-        let mask = width_mask(bits);
-        let lhs_value = self.eval_expr(lhs).as_u64()? & mask;
-        let rhs_value = self.eval_expr(rhs).as_u64()? & mask;
-        let full = lhs_value as u128 + rhs_value as u128;
-        let result = lhs_value.wrapping_add(rhs_value) & mask;
-        let sign_bit = sign_bit(bits);
-        Some(Nzcv {
-            n: bits != 0 && (result & sign_bit) != 0,
-            z: result == 0,
-            c: full > mask as u128,
-            v: bits != 0 && (((!(lhs_value ^ rhs_value)) & (lhs_value ^ result)) & sign_bit) != 0,
-        })
-    }
-
-    fn compute_sub_flags(&mut self, lhs: &Expr, rhs: &Expr) -> Option<Nzcv> {
-        let bits = expr_bit_width(lhs)
-            .or_else(|| expr_bit_width(rhs))
-            .unwrap_or(64);
-        let mask = width_mask(bits);
-        let lhs_value = self.eval_expr(lhs).as_u64()? & mask;
-        let rhs_value = self.eval_expr(rhs).as_u64()? & mask;
-        let result = lhs_value.wrapping_sub(rhs_value) & mask;
-        let sign_bit = sign_bit(bits);
-        Some(Nzcv {
-            n: bits != 0 && (result & sign_bit) != 0,
-            z: result == 0,
-            c: lhs_value >= rhs_value,
-            v: bits != 0 && (((lhs_value ^ rhs_value) & (lhs_value ^ result)) & sign_bit) != 0,
-        })
-    }
-
-    fn compute_and_flags(&mut self, lhs: &Expr, rhs: &Expr) -> Option<Nzcv> {
-        let bits = expr_bit_width(lhs)
-            .or_else(|| expr_bit_width(rhs))
-            .unwrap_or(64);
-        let mask = width_mask(bits);
-        let lhs_value = self.eval_expr(lhs).as_u64()?;
-        let rhs_value = self.eval_expr(rhs).as_u64()?;
-        let result = (lhs_value & rhs_value) & mask;
-        let sign_bit = sign_bit(bits);
-        Some(Nzcv {
-            n: bits != 0 && (result & sign_bit) != 0,
-            z: result == 0,
-            c: false,
-            v: false,
-        })
-    }
-
-    fn execute_stmt_intrinsic(&mut self, name: &str, operands: &[Expr]) {
-        match intrinsic_base_name(name) {
-            "movi" => self.execute_vector_move_intrinsic(name, operands, false),
-            "mvni" => self.execute_vector_move_intrinsic(name, operands, true),
-            "dup" => self.execute_dup_intrinsic(name, operands),
-            "add" => self.execute_vector_add_intrinsic(name, operands),
-            "cmeq" => self.execute_cmeq_intrinsic(name, operands),
-            "bif" => self.execute_bif_intrinsic(name, operands),
-            "umov" => self.execute_umov_intrinsic(name, operands),
-            _ if crc32_intrinsic_info(name).is_some() => {
-                self.execute_crc32_intrinsic(name, operands)
-            }
-            _ => {
-                if !is_supported_stmt_intrinsic(name) {
-                    panic!(
-                        "aeon emulation encountered unsupported IL statement intrinsic `{name}`"
-                    );
-                }
-            }
-        }
-    }
-
-    fn execute_vector_move_intrinsic(&mut self, name: &str, operands: &[Expr], invert: bool) {
-        let imm = operands
-            .get(1)
-            .map(|expr| self.eval_expr(expr))
-            .and_then(|value| value.as_u64());
-        let Some(dst) = operands.first().and_then(expr_reg_operand) else {
-            panic!("aeon emulation expected a SIMD destination for `{name}`");
-        };
-        if matches!(dst, Reg::V(_) | Reg::Q(_)) {
-            let Some(arrangement) = parse_vector_arrangement(name) else {
-                panic!("aeon emulation is missing SIMD arrangement for `{name}`");
-            };
-            let value = imm
-                .map(|imm| arranged_immediate_vector(imm, arrangement, invert))
-                .map(Value::U128)
-                .unwrap_or(Value::Unknown);
-            write_arranged_vector_register(&mut self.registers, &dst, arrangement, value);
-            return;
-        }
-        let size = scalar_simd_size(&dst)
-            .unwrap_or_else(|| panic!("aeon emulation expected a SIMD destination for `{name}`"));
-        let value = imm
-            .map(|imm| {
-                let bits = if invert { !imm } else { imm };
-                scalar_or_unknown_value(Value::U64(bits), size)
-            })
-            .unwrap_or(Value::Unknown);
-        self.write_reg(dst, value);
-    }
-
-    fn execute_cmeq_intrinsic(&mut self, name: &str, operands: &[Expr]) {
-        let Some(arrangement) = parse_vector_arrangement(name) else {
-            panic!("aeon emulation is missing SIMD arrangement for `{name}`");
-        };
-        let Some(dst) = operands.first().and_then(vector_reg_from_expr) else {
-            panic!("aeon emulation expected a SIMD destination for `{name}`");
-        };
-        let lhs = operands
-            .get(1)
-            .map(|expr| {
-                let value = self.eval_expr(expr);
-                vector_operand_bytes(expr, value, arrangement)
-            })
-            .flatten();
-        let rhs = operands
-            .get(2)
-            .map(|expr| {
-                let value = self.eval_expr(expr);
-                vector_operand_bytes(expr, value, arrangement)
-            })
-            .flatten();
-        let value = match (lhs, rhs) {
-            (Some(lhs), Some(rhs)) => Value::U128(vector_cmeq(lhs, rhs, arrangement)),
-            _ => Value::Unknown,
-        };
-        write_arranged_vector_register(&mut self.registers, &dst, arrangement, value);
-    }
-
-    fn execute_dup_intrinsic(&mut self, name: &str, operands: &[Expr]) {
-        let Some(arrangement) = parse_vector_arrangement(name) else {
-            panic!("aeon emulation is missing SIMD arrangement for `{name}`");
-        };
-        let Some(dst) = operands.first().and_then(vector_reg_from_expr) else {
-            panic!("aeon emulation expected a SIMD destination for `{name}`");
-        };
-        let value = operands
-            .get(1)
-            .map(|expr| self.eval_expr(expr))
-            .and_then(|value| vector_dup(value, arrangement))
-            .map(Value::U128)
-            .unwrap_or(Value::Unknown);
-        write_arranged_vector_register(&mut self.registers, &dst, arrangement, value);
-    }
-
-    fn execute_vector_add_intrinsic(&mut self, name: &str, operands: &[Expr]) {
-        let Some(arrangement) = parse_vector_arrangement(name) else {
-            panic!("aeon emulation is missing SIMD arrangement for `{name}`");
-        };
-        let Some(dst) = operands.first().and_then(vector_reg_from_expr) else {
-            panic!("aeon emulation expected a SIMD destination for `{name}`");
-        };
-        let lhs = operands
-            .get(1)
-            .map(|expr| {
-                let value = self.eval_expr(expr);
-                vector_operand_bytes(expr, value, arrangement)
-            })
-            .flatten();
-        let rhs = operands
-            .get(2)
-            .map(|expr| {
-                let value = self.eval_expr(expr);
-                vector_operand_bytes(expr, value, arrangement)
-            })
-            .flatten();
-        let value = match (lhs, rhs) {
-            (Some(lhs), Some(rhs)) => Value::U128(vector_add(lhs, rhs, arrangement)),
-            _ => Value::Unknown,
-        };
-        write_arranged_vector_register(&mut self.registers, &dst, arrangement, value);
-    }
-
-    fn execute_bif_intrinsic(&mut self, name: &str, operands: &[Expr]) {
-        let Some(arrangement) = parse_vector_arrangement(name) else {
-            panic!("aeon emulation is missing SIMD arrangement for `{name}`");
-        };
-        let Some(dst) = operands.first().and_then(vector_reg_from_expr) else {
-            panic!("aeon emulation expected a SIMD destination for `{name}`");
-        };
-        let original_dst = self.eval_expr(operands.first().expect("bif destination operand"));
-        let src = operands
-            .get(1)
-            .map(|expr| {
-                let value = self.eval_expr(expr);
-                vector_operand_bytes(expr, value, arrangement)
-            })
-            .flatten();
-        let mask = operands
-            .get(2)
-            .map(|expr| {
-                let value = self.eval_expr(expr);
-                vector_operand_bytes(expr, value, arrangement)
-            })
-            .flatten();
-        let dst_bytes = vector_operand_bytes(
-            operands.first().expect("bif destination operand"),
-            original_dst,
-            arrangement,
-        );
-        let value = match (dst_bytes, src, mask) {
-            (Some(dst_bytes), Some(src), Some(mask)) => {
-                Value::U128(vector_bif(dst_bytes, src, mask, arrangement))
-            }
-            _ => Value::Unknown,
-        };
-        write_arranged_vector_register(&mut self.registers, &dst, arrangement, value);
-    }
-
-    fn execute_crc32_intrinsic(&mut self, name: &str, operands: &[Expr]) {
-        let Some(dst) = operands.first().and_then(expr_reg_operand) else {
-            panic!("aeon emulation expected a register destination for `{name}`");
-        };
-        let acc = operands
-            .get(1)
-            .map(|expr| self.eval_expr(expr))
-            .and_then(|value| value.as_u64());
-        let src = operands
-            .get(2)
-            .map(|expr| self.eval_expr(expr))
-            .and_then(|value| value.as_u64());
-        let value = match (acc, src, crc32_intrinsic_info(name)) {
-            (Some(acc), Some(src), Some((poly, width))) => {
-                Value::U64(crc32_update(acc as u32, src, width, poly) as u64)
-            }
-            _ => Value::Unknown,
-        };
-        self.write_reg(dst, value);
-    }
-
-    fn execute_umov_intrinsic(&mut self, name: &str, operands: &[Expr]) {
-        let Some(dst) = operands.first().and_then(expr_reg_operand) else {
-            panic!("aeon emulation expected a register destination for `{name}`");
-        };
-        let value = operands
-            .get(1)
-            .map(|expr| self.eval_expr(expr))
-            .map(low_u64_value)
-            .unwrap_or(Value::Unknown);
-        self.write_reg(dst, value);
-    }
-
-    fn read_reg(&self, reg: &Reg) -> Value {
-        read_register_value(&self.registers, reg)
-    }
-
-    fn write_reg(&mut self, reg: Reg, value: Value) {
-        write_register_value(&mut self.registers, &mut self.flags, reg, value);
-    }
-}
-
-impl<'a> BlockExecutor<'a> {
+impl<'a> Executor<'a> {
     fn new(
         initial_registers: BTreeMap<Reg, Value>,
         initial_memory: BTreeMap<MemoryCellId, Value>,
         backing: &'a dyn BackingStore,
         missing_memory_policy: MissingMemoryPolicy,
+        mode: ExecMode,
     ) -> Self {
         let mut executor = Self {
             registers: BTreeMap::new(),
@@ -756,6 +219,7 @@ impl<'a> BlockExecutor<'a> {
             flags: None,
             backing,
             missing_memory_policy,
+            mode,
             reads: Vec::new(),
             writes: Vec::new(),
             next_pc: None,
@@ -789,7 +253,20 @@ impl<'a> BlockExecutor<'a> {
         }
     }
 
+    /// Returns `false` once the block has stopped. Snippets never stop.
     fn execute_stmt(&mut self, stmt: &Stmt) -> bool {
+        if self.mode == ExecMode::Snippet
+            && matches!(
+                stmt,
+                Stmt::Branch { .. }
+                    | Stmt::CondBranch { .. }
+                    | Stmt::Call { .. }
+                    | Stmt::Ret
+                    | Stmt::Trap { .. }
+            )
+        {
+            return true;
+        }
         match stmt {
             Stmt::Assign { dst, src } => {
                 let value = self.eval_expr(src);
@@ -1014,7 +491,7 @@ impl<'a> BlockExecutor<'a> {
                 .as_u64()
                 .map(|sp| Value::U64(sp.wrapping_add(*offset as u64)))
                 .unwrap_or(Value::Unknown),
-            Expr::Intrinsic { name, operands } if name == "movk" => {
+            Expr::Intrinsic { name, operands } if name.op() == IntrinsicOp::Movk => {
                 let dst = operands
                     .first()
                     .map(|expr| self.eval_expr(expr))
@@ -1025,14 +502,14 @@ impl<'a> BlockExecutor<'a> {
                     .and_then(|value| value.as_u64());
                 eval_movk_bits(dst, src)
             }
-            Expr::Intrinsic { name, operands } if intrinsic_base_name(name) == "smulh" => {
+            Expr::Intrinsic { name, operands } if name.op() == IntrinsicOp::Smulh => {
                 eval_mul_high(
                     operands.first().map(|expr| self.eval_expr(expr)),
                     operands.get(1).map(|expr| self.eval_expr(expr)),
                     true,
                 )
             }
-            Expr::Intrinsic { name, operands } if intrinsic_base_name(name) == "umulh" => {
+            Expr::Intrinsic { name, operands } if name.op() == IntrinsicOp::Umulh => {
                 eval_mul_high(
                     operands.first().map(|expr| self.eval_expr(expr)),
                     operands.get(1).map(|expr| self.eval_expr(expr)),
@@ -1178,11 +655,14 @@ impl<'a> BlockExecutor<'a> {
                 .read_reg(&Reg::X(*index))
                 .as_u64()
                 .map(MemoryLocation::Absolute),
-            Expr::StackSlot { offset, .. } => self
-                .read_reg(&Reg::SP)
-                .as_u64()
-                .map(|sp| MemoryLocation::Absolute(sp.wrapping_add(*offset as u64)))
-                .or(Some(MemoryLocation::StackSlot(*offset))),
+            Expr::StackSlot { offset, .. } => match self.mode {
+                ExecMode::Snippet => Some(MemoryLocation::StackSlot(*offset)),
+                ExecMode::Block => self
+                    .read_reg(&Reg::SP)
+                    .as_u64()
+                    .map(|sp| MemoryLocation::Absolute(sp.wrapping_add(*offset as u64)))
+                    .or(Some(MemoryLocation::StackSlot(*offset))),
+            },
             Expr::Add(lhs, rhs) => self.add_location(lhs, rhs, false),
             Expr::Sub(lhs, rhs) => self.add_location(lhs, rhs, true),
             _ => self.eval_expr(expr).as_u64().map(MemoryLocation::Absolute),
@@ -1283,20 +763,20 @@ impl<'a> BlockExecutor<'a> {
         })
     }
 
-    fn execute_stmt_intrinsic(&mut self, name: &str, operands: &[Expr]) -> bool {
-        match intrinsic_base_name(name) {
-            "movi" => self.execute_vector_move_intrinsic(name, operands, false),
-            "mvni" => self.execute_vector_move_intrinsic(name, operands, true),
-            "dup" => self.execute_dup_intrinsic(name, operands),
-            "add" => self.execute_vector_add_intrinsic(name, operands),
-            "cmeq" => self.execute_cmeq_intrinsic(name, operands),
-            "bif" => self.execute_bif_intrinsic(name, operands),
-            "umov" => self.execute_umov_intrinsic(name, operands),
-            _ if crc32_intrinsic_info(name).is_some() => {
+    fn execute_stmt_intrinsic(&mut self, name: &IntrinsicName, operands: &[Expr]) -> bool {
+        match name.op() {
+            IntrinsicOp::Movi => self.execute_vector_move_intrinsic(name, operands, false),
+            IntrinsicOp::Mvni => self.execute_vector_move_intrinsic(name, operands, true),
+            IntrinsicOp::Dup => self.execute_dup_intrinsic(name, operands),
+            IntrinsicOp::Add => self.execute_vector_add_intrinsic(name, operands),
+            IntrinsicOp::Cmeq => self.execute_cmeq_intrinsic(name, operands),
+            IntrinsicOp::Bif => self.execute_bif_intrinsic(name, operands),
+            IntrinsicOp::Umov => self.execute_umov_intrinsic(name, operands),
+            op if crc32_intrinsic_info(op).is_some() => {
                 self.execute_crc32_intrinsic(name, operands)
             }
-            _ => {
-                if !is_supported_stmt_intrinsic(name) {
+            op => {
+                if !is_supported_stmt_intrinsic(op) {
                     panic!(
                         "aeon emulation encountered unsupported IL statement intrinsic `{name}`"
                     );
@@ -1306,7 +786,7 @@ impl<'a> BlockExecutor<'a> {
         true
     }
 
-    fn execute_vector_move_intrinsic(&mut self, name: &str, operands: &[Expr], invert: bool) {
+    fn execute_vector_move_intrinsic(&mut self, name: &IntrinsicName, operands: &[Expr], invert: bool) {
         let imm = operands
             .get(1)
             .map(|expr| self.eval_expr(expr))
@@ -1315,7 +795,7 @@ impl<'a> BlockExecutor<'a> {
             panic!("aeon emulation expected a SIMD destination for `{name}`");
         };
         if matches!(dst, Reg::V(_) | Reg::Q(_)) {
-            let Some(arrangement) = parse_vector_arrangement(name) else {
+            let Some(arrangement) = name.arrangement() else {
                 panic!("aeon emulation is missing SIMD arrangement for `{name}`");
             };
             let value = imm
@@ -1336,8 +816,8 @@ impl<'a> BlockExecutor<'a> {
         self.write_reg(dst, value);
     }
 
-    fn execute_cmeq_intrinsic(&mut self, name: &str, operands: &[Expr]) {
-        let Some(arrangement) = parse_vector_arrangement(name) else {
+    fn execute_cmeq_intrinsic(&mut self, name: &IntrinsicName, operands: &[Expr]) {
+        let Some(arrangement) = name.arrangement() else {
             panic!("aeon emulation is missing SIMD arrangement for `{name}`");
         };
         let Some(dst) = operands.first().and_then(vector_reg_from_expr) else {
@@ -1364,8 +844,8 @@ impl<'a> BlockExecutor<'a> {
         write_arranged_vector_register(&mut self.registers, &dst, arrangement, value);
     }
 
-    fn execute_dup_intrinsic(&mut self, name: &str, operands: &[Expr]) {
-        let Some(arrangement) = parse_vector_arrangement(name) else {
+    fn execute_dup_intrinsic(&mut self, name: &IntrinsicName, operands: &[Expr]) {
+        let Some(arrangement) = name.arrangement() else {
             panic!("aeon emulation is missing SIMD arrangement for `{name}`");
         };
         let Some(dst) = operands.first().and_then(vector_reg_from_expr) else {
@@ -1380,8 +860,8 @@ impl<'a> BlockExecutor<'a> {
         write_arranged_vector_register(&mut self.registers, &dst, arrangement, value);
     }
 
-    fn execute_vector_add_intrinsic(&mut self, name: &str, operands: &[Expr]) {
-        let Some(arrangement) = parse_vector_arrangement(name) else {
+    fn execute_vector_add_intrinsic(&mut self, name: &IntrinsicName, operands: &[Expr]) {
+        let Some(arrangement) = name.arrangement() else {
             panic!("aeon emulation is missing SIMD arrangement for `{name}`");
         };
         let Some(dst) = operands.first().and_then(vector_reg_from_expr) else {
@@ -1408,8 +888,8 @@ impl<'a> BlockExecutor<'a> {
         write_arranged_vector_register(&mut self.registers, &dst, arrangement, value);
     }
 
-    fn execute_bif_intrinsic(&mut self, name: &str, operands: &[Expr]) {
-        let Some(arrangement) = parse_vector_arrangement(name) else {
+    fn execute_bif_intrinsic(&mut self, name: &IntrinsicName, operands: &[Expr]) {
+        let Some(arrangement) = name.arrangement() else {
             panic!("aeon emulation is missing SIMD arrangement for `{name}`");
         };
         let Some(dst) = operands.first().and_then(vector_reg_from_expr) else {
@@ -1444,7 +924,7 @@ impl<'a> BlockExecutor<'a> {
         write_arranged_vector_register(&mut self.registers, &dst, arrangement, value);
     }
 
-    fn execute_crc32_intrinsic(&mut self, name: &str, operands: &[Expr]) {
+    fn execute_crc32_intrinsic(&mut self, name: &IntrinsicName, operands: &[Expr]) {
         let Some(dst) = operands.first().and_then(expr_reg_operand) else {
             panic!("aeon emulation expected a register destination for `{name}`");
         };
@@ -1456,7 +936,7 @@ impl<'a> BlockExecutor<'a> {
             .get(2)
             .map(|expr| self.eval_expr(expr))
             .and_then(|value| value.as_u64());
-        let value = match (acc, src, crc32_intrinsic_info(name)) {
+        let value = match (acc, src, crc32_intrinsic_info(name.op())) {
             (Some(acc), Some(src), Some((poly, width))) => {
                 Value::U64(crc32_update(acc as u32, src, width, poly) as u64)
             }
@@ -1465,7 +945,7 @@ impl<'a> BlockExecutor<'a> {
         self.write_reg(dst, value);
     }
 
-    fn execute_umov_intrinsic(&mut self, name: &str, operands: &[Expr]) {
+    fn execute_umov_intrinsic(&mut self, name: &IntrinsicName, operands: &[Expr]) {
         let Some(dst) = operands.first().and_then(expr_reg_operand) else {
             panic!("aeon emulation expected a register destination for `{name}`");
         };
@@ -1508,39 +988,6 @@ impl Value {
             _ => None,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct VectorArrangement {
-    lane_bits: u8,
-    lanes: u8,
-    active_bytes: u8,
-}
-
-fn intrinsic_base_name(name: &str) -> &str {
-    name.split_once('.').map(|(base, _)| base).unwrap_or(name)
-}
-
-fn parse_vector_arrangement(name: &str) -> Option<VectorArrangement> {
-    let (_, suffix) = name.split_once('.')?;
-    let split = suffix.find(|ch: char| !ch.is_ascii_digit())?;
-    let lanes = suffix[..split].parse::<u8>().ok()?;
-    let lane_bits = match suffix[split..].chars().next()? {
-        'b' => 8,
-        'h' => 16,
-        's' => 32,
-        'd' => 64,
-        _ => return None,
-    };
-    let active_bytes = lanes.checked_mul(lane_bits / 8)?;
-    if active_bytes == 0 || active_bytes > 16 {
-        return None;
-    }
-    Some(VectorArrangement {
-        lane_bits,
-        lanes,
-        active_bytes,
-    })
 }
 
 fn vector_reg_from_expr(expr: &Expr) -> Option<Reg> {
@@ -1853,7 +1300,7 @@ fn low_u64_value(value: Value) -> Value {
 
 fn arranged_immediate_vector(imm: u64, arrangement: VectorArrangement, invert: bool) -> u128 {
     let lane_bytes = usize::from(arrangement.lane_bits / 8);
-    let active_bytes = usize::from(arrangement.active_bytes);
+    let active_bytes = usize::from(arrangement.active_bytes());
     let lane_mask = match arrangement.lane_bits {
         0 => 0,
         1..=63 => (1u64 << arrangement.lane_bits) - 1,
@@ -1893,14 +1340,14 @@ fn vector_operand_bytes(
                     bytes[start..start + lane_bytes].copy_from_slice(&bits[..lane_bytes]);
                 }
             } else {
-                let low = arrangement.active_bytes.min(8) as usize;
+                let low = arrangement.active_bytes().min(8) as usize;
                 bytes[..low].copy_from_slice(&bits.to_le_bytes()[..low]);
             }
             Some(bytes)
         }
         Value::F64(value) => {
             let mut bytes = [0u8; 16];
-            let low = arrangement.active_bytes.min(8) as usize;
+            let low = arrangement.active_bytes().min(8) as usize;
             bytes[..low].copy_from_slice(&value.to_bits().to_le_bytes()[..low]);
             Some(bytes)
         }
@@ -1977,7 +1424,7 @@ fn vector_bif(
     arrangement: VectorArrangement,
 ) -> u128 {
     let mut result = [0u8; 16];
-    let active_bytes = usize::from(arrangement.active_bytes);
+    let active_bytes = usize::from(arrangement.active_bytes());
     for index in 0..active_bytes {
         result[index] = (dst[index] & mask[index]) | (src[index] & !mask[index]);
     }
@@ -1994,7 +1441,7 @@ fn write_arranged_vector_register(
         return;
     };
 
-    if arrangement.active_bytes == 16 {
+    if arrangement.active_bytes() == 16 {
         clear_all_simd_aliases(registers, index);
         registers.insert(Reg::V(index), canonical_vector_value(value));
         return;
@@ -2011,7 +1458,7 @@ fn write_arranged_vector_register(
         registers.insert(Reg::V(index), Value::Unknown);
         return;
     };
-    let active_bytes = usize::from(arrangement.active_bytes);
+    let active_bytes = usize::from(arrangement.active_bytes());
     existing[..active_bytes].copy_from_slice(&updated[..active_bytes]);
     clear_all_simd_aliases(registers, index);
     registers.insert(Reg::V(index), Value::U128(u128::from_le_bytes(existing)));
@@ -2269,16 +1716,16 @@ fn normalize_to_width(value: u64, width: u8) -> u64 {
     }
 }
 
-fn crc32_intrinsic_info(name: &str) -> Option<(u32, usize)> {
-    match intrinsic_base_name(name) {
-        "crc32b" => Some((0xedb8_8320, 1)),
-        "crc32h" => Some((0xedb8_8320, 2)),
-        "crc32w" => Some((0xedb8_8320, 4)),
-        "crc32x" => Some((0xedb8_8320, 8)),
-        "crc32cb" => Some((0x82f6_3b78, 1)),
-        "crc32ch" => Some((0x82f6_3b78, 2)),
-        "crc32cw" => Some((0x82f6_3b78, 4)),
-        "crc32cx" => Some((0x82f6_3b78, 8)),
+fn crc32_intrinsic_info(op: IntrinsicOp) -> Option<(u32, usize)> {
+    match op {
+        IntrinsicOp::Crc32b => Some((0xedb8_8320, 1)),
+        IntrinsicOp::Crc32h => Some((0xedb8_8320, 2)),
+        IntrinsicOp::Crc32w => Some((0xedb8_8320, 4)),
+        IntrinsicOp::Crc32x => Some((0xedb8_8320, 8)),
+        IntrinsicOp::Crc32cb => Some((0x82f6_3b78, 1)),
+        IntrinsicOp::Crc32ch => Some((0x82f6_3b78, 2)),
+        IntrinsicOp::Crc32cw => Some((0x82f6_3b78, 4)),
+        IntrinsicOp::Crc32cx => Some((0x82f6_3b78, 8)),
         _ => None,
     }
 }
@@ -2323,19 +1770,19 @@ fn is_supported_barrier(kind: &str) -> bool {
     matches!(kind, "dmb" | "dsb" | "isb")
 }
 
-fn is_supported_stmt_intrinsic(name: &str) -> bool {
+fn is_supported_stmt_intrinsic(op: IntrinsicOp) -> bool {
     matches!(
-        name,
-        "nop"
-            | "yield"
-            | "hint"
-            | "paciasp"
-            | "autiasp"
-            | "bti"
-            | "xpaclri"
-            | "prfm"
-            | "prfum"
-            | "clrex"
+        op,
+        IntrinsicOp::Nop
+            | IntrinsicOp::Yield
+            | IntrinsicOp::Hint
+            | IntrinsicOp::Paciasp
+            | IntrinsicOp::Autiasp
+            | IntrinsicOp::Bti
+            | IntrinsicOp::Xpaclri
+            | IntrinsicOp::Prfm
+            | IntrinsicOp::Prfum
+            | IntrinsicOp::Clrex
     )
 }
 
@@ -2679,7 +2126,7 @@ mod tests {
             &[Stmt::Assign {
                 dst: Reg::X(0),
                 src: Expr::Intrinsic {
-                    name: "movk".to_string(),
+                    name: "movk".into(),
                     operands: vec![Expr::Imm(0x1122_3344_0000_7788), Expr::Imm(0x55aa_0000)],
                 },
             }],
@@ -2819,7 +2266,7 @@ mod tests {
             &[Stmt::Assign {
                 dst: Reg::X(0),
                 src: Expr::Intrinsic {
-                    name: "movk".to_string(),
+                    name: "movk".into(),
                     operands: vec![Expr::Imm(0x8899_aabb_0000_ccdd), Expr::Imm(0x1234_0000)],
                 },
             }],
@@ -2848,14 +2295,14 @@ mod tests {
                 Stmt::Assign {
                     dst: Reg::X(0),
                     src: Expr::Intrinsic {
-                        name: "umulh".to_string(),
+                        name: "umulh".into(),
                         operands: vec![Expr::Imm(u64::MAX), Expr::Imm(2)],
                     },
                 },
                 Stmt::Assign {
                     dst: Reg::X(1),
                     src: Expr::Intrinsic {
-                        name: "smulh".to_string(),
+                        name: "smulh".into(),
                         operands: vec![Expr::Imm(u64::MAX), Expr::Imm(2)],
                     },
                 },
@@ -2988,15 +2435,15 @@ mod tests {
         let result = execute_block(
             &[
                 Stmt::Intrinsic {
-                    name: "movi.2d".to_string(),
+                    name: "movi.2d".into(),
                     operands: vec![Expr::Reg(Reg::V(0)), Expr::Imm(u64::MAX)],
                 },
                 Stmt::Intrinsic {
-                    name: "movi.2d".to_string(),
+                    name: "movi.2d".into(),
                     operands: vec![Expr::Reg(Reg::V(1)), Expr::Imm(u64::MAX)],
                 },
                 Stmt::Intrinsic {
-                    name: "movi.2d".to_string(),
+                    name: "movi.2d".into(),
                     operands: vec![Expr::Reg(Reg::V(2)), Expr::Imm(u64::MAX)],
                 },
                 Stmt::Assign {
@@ -3004,7 +2451,7 @@ mod tests {
                     src: Expr::Imm(0x4433_2211_ffff_ffff),
                 },
                 Stmt::Intrinsic {
-                    name: "cmeq.2s".to_string(),
+                    name: "cmeq.2s".into(),
                     operands: vec![
                         Expr::Reg(Reg::V(1)),
                         Expr::Reg(Reg::V(0)),
@@ -3012,7 +2459,7 @@ mod tests {
                     ],
                 },
                 Stmt::Intrinsic {
-                    name: "bif.8b".to_string(),
+                    name: "bif.8b".into(),
                     operands: vec![
                         Expr::Reg(Reg::V(2)),
                         Expr::Reg(Reg::V(0)),
@@ -3062,7 +2509,7 @@ mod tests {
         let result = execute_block(
             &[
                 Stmt::Intrinsic {
-                    name: "movi.2d".to_string(),
+                    name: "movi.2d".into(),
                     operands: vec![Expr::Reg(Reg::V(0)), Expr::Imm(u64::MAX)],
                 },
                 Stmt::Assign {
@@ -3106,7 +2553,7 @@ mod tests {
 
         let result = execute_block(
             &[Stmt::Intrinsic {
-                name: "cmeq.2s".to_string(),
+                name: "cmeq.2s".into(),
                 operands: vec![
                     Expr::Reg(Reg::V(1)),
                     Expr::Reg(Reg::V(0)),
@@ -3143,7 +2590,7 @@ mod tests {
 
         let result = execute_block(
             &[Stmt::Intrinsic {
-                name: "umov".to_string(),
+                name: "umov".into(),
                 operands: vec![Expr::Reg(Reg::W(26)), Expr::Reg(Reg::H(0))],
             }],
             BTreeMap::from([(Reg::V(0), Value::U128(u128::from_le_bytes(lane_bytes)))]),
@@ -3203,7 +2650,7 @@ mod tests {
 
         let result = execute_block(
             &[Stmt::Intrinsic {
-                name: "dup.2d".to_string(),
+                name: "dup.2d".into(),
                 operands: vec![Expr::Reg(Reg::V(1)), Expr::Reg(Reg::X(11))],
             }],
             BTreeMap::from([(Reg::X(11), Value::U64(0x1122_3344_5566_7788))]),
@@ -3229,7 +2676,7 @@ mod tests {
 
         let result = execute_block(
             &[Stmt::Intrinsic {
-                name: "add.2d".to_string(),
+                name: "add.2d".into(),
                 operands: vec![
                     Expr::Reg(Reg::V(0)),
                     Expr::Reg(Reg::V(1)),
@@ -3259,7 +2706,7 @@ mod tests {
 
         let result = execute_block(
             &[Stmt::Intrinsic {
-                name: "movi".to_string(),
+                name: "movi".into(),
                 operands: vec![Expr::Reg(Reg::D(0)), Expr::Imm(0x0000_0000_ffff_ffff)],
             }],
             BTreeMap::new(),
@@ -3330,7 +2777,7 @@ mod tests {
         let result = execute_block(
             &[
                 Stmt::Intrinsic {
-                    name: "crc32cx".to_string(),
+                    name: "crc32cx".into(),
                     operands: vec![
                         Expr::Reg(Reg::W(0)),
                         Expr::Reg(Reg::W(1)),
@@ -3338,7 +2785,7 @@ mod tests {
                     ],
                 },
                 Stmt::Intrinsic {
-                    name: "crc32w".to_string(),
+                    name: "crc32w".into(),
                     operands: vec![
                         Expr::Reg(Reg::W(3)),
                         Expr::Reg(Reg::W(4)),
@@ -3377,7 +2824,7 @@ mod tests {
         let result = execute_block(
             &[
                 Stmt::Intrinsic {
-                    name: "crc32cb".to_string(),
+                    name: "crc32cb".into(),
                     operands: vec![
                         Expr::Reg(Reg::W(0)),
                         Expr::Reg(Reg::W(1)),
@@ -3385,7 +2832,7 @@ mod tests {
                     ],
                 },
                 Stmt::Intrinsic {
-                    name: "crc32ch".to_string(),
+                    name: "crc32ch".into(),
                     operands: vec![
                         Expr::Reg(Reg::W(3)),
                         Expr::Reg(Reg::W(4)),
@@ -3423,7 +2870,7 @@ mod tests {
 
         let result = execute_block(
             &[Stmt::Intrinsic {
-                name: "crc32cw".to_string(),
+                name: "crc32cw".into(),
                 operands: vec![
                     Expr::Reg(Reg::W(0)),
                     Expr::Reg(Reg::W(1)),
@@ -3487,7 +2934,7 @@ mod tests {
 
         let _ = execute_block(
             &[Stmt::Intrinsic {
-                name: "msr".to_string(),
+                name: "msr".into(),
                 operands: vec![],
             }],
             BTreeMap::new(),

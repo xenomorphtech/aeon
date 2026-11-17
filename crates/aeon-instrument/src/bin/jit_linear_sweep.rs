@@ -688,17 +688,17 @@ mod tests {
             Stmt::Assign {
                 dst: Reg::X(8),
                 src: Expr::Intrinsic {
-                    name: "movk".to_string(),
+                    name: "movk".into(),
                     operands: vec![Expr::Reg(Reg::X(8)), Expr::Imm(0xace0_0000)],
                 },
             },
             Stmt::Assign {
                 dst: Reg::X(8),
                 src: Expr::Intrinsic {
-                    name: "movk".to_string(),
+                    name: "movk".into(),
                     operands: vec![
                         Expr::Intrinsic {
-                            name: "movk".to_string(),
+                            name: "movk".into(),
                             operands: vec![Expr::Reg(Reg::X(8)), Expr::Imm(0xace0_0000)],
                         },
                         Expr::Imm(0x76_0000_0000),
@@ -1966,7 +1966,7 @@ fn format_assign_arm64(dst: &Reg, src: &Expr) -> Option<String> {
     match src {
         Expr::Reg(src_reg) => Some(format!("mov {}, {}", format_reg(dst), format_reg(src_reg))),
         Expr::Imm(value) => Some(format!("mov {}, #0x{value:x}", format_reg(dst))),
-        Expr::Intrinsic { name, operands } if name == "movk" => {
+        Expr::Intrinsic { name, operands } if name.op() == aeonil::IntrinsicOp::Movk => {
             format_movk_assign_arm64(dst, operands)
         }
         Expr::Load { addr, size } => Some(format!(

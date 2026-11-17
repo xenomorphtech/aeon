@@ -113,7 +113,7 @@ pub fn fold_expr(expr: &Expr) -> Expr {
             }
             _ => folded,
         },
-        Expr::Intrinsic { name, operands } if name == "movk" && operands.len() == 2 => {
+        Expr::Intrinsic { name, operands } if name.op() == aeonil::IntrinsicOp::Movk && operands.len() == 2 => {
             match (&operands[0], &operands[1]) {
                 (Expr::Imm(dst), Expr::Imm(src)) => {
                     fold_movk(*dst, *src).map(Expr::Imm).unwrap_or(folded)
@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn fold_movk_intrinsic_with_shifted_immediate() {
         let expr = Expr::Intrinsic {
-            name: "movk".to_string(),
+            name: "movk".into(),
             operands: vec![Expr::Imm(0x7140), e_shl(Expr::Imm(0xace0), Expr::Imm(16))],
         };
         assert_eq!(fold_expr(&expr), Expr::Imm(0xace0_7140));
@@ -285,10 +285,10 @@ mod tests {
     #[test]
     fn fold_nested_movk_chain_expr() {
         let expr = Expr::Intrinsic {
-            name: "movk".to_string(),
+            name: "movk".into(),
             operands: vec![
                 Expr::Intrinsic {
-                    name: "movk".to_string(),
+                    name: "movk".into(),
                     operands: vec![Expr::Imm(0x7140), e_shl(Expr::Imm(0xace0), Expr::Imm(16))],
                 },
                 e_shl(Expr::Imm(0x76), Expr::Imm(32)),

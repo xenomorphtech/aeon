@@ -877,7 +877,7 @@ fn normalize_stmt(stmt: &Stmt) -> Value {
         Stmt::Intrinsic { name, operands } => {
             json!([
                 "intrinsic",
-                name,
+                name.as_str(),
                 operands.iter().map(normalize_expr).collect::<Vec<_>>()
             ])
         }
@@ -981,7 +981,7 @@ fn normalize_expr(expr: &Expr) -> Value {
         Expr::Intrinsic { name, operands } => {
             json!([
                 "intrinsic",
-                name,
+                name.as_str(),
                 operands.iter().map(normalize_expr).collect::<Vec<_>>()
             ])
         }

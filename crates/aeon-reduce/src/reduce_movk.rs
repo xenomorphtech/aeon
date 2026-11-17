@@ -86,7 +86,7 @@ pub(crate) fn resolve_movk_chains_with_stats(stmts: Vec<Stmt>) -> (Vec<Stmt>, us
             Stmt::Assign {
                 dst,
                 src: Expr::Intrinsic { name, operands },
-            } if name == "movk" && operands.len() == 2 => {
+            } if name.op() == aeonil::IntrinsicOp::Movk && operands.len() == 2 => {
                 // operands[0] is Reg(dst) — the old value
                 // operands[1] is the shifted immediate
                 if let Some(Expr::Imm(old_val)) = env.lookup(dst).cloned() {

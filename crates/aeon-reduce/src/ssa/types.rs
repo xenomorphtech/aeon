@@ -154,7 +154,7 @@ pub enum SsaExpr {
     },
     MrsRead(String),
     Intrinsic {
-        name: String,
+        name: aeonil::IntrinsicName,
         operands: Vec<SsaExpr>,
     },
     Phi(Vec<(BlockId, SsaVar)>),
@@ -210,7 +210,7 @@ pub enum SsaStmt {
         imm: u16,
     },
     Intrinsic {
-        name: String,
+        name: aeonil::IntrinsicName,
         operands: Vec<SsaExpr>,
     },
     Pair(Box<SsaStmt>, Box<SsaStmt>),

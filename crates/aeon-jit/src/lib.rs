@@ -1,4 +1,6 @@
-use aeonil::{BranchCond, Condition, Expr, Reg, Stmt, TrapKind};
+use aeonil::{
+    BranchCond, Condition, Expr, IntrinsicName, IntrinsicOp, Reg, Stmt, TrapKind, VectorArrangement,
+};
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::immediates::{Ieee32, Ieee64};
 use cranelift_codegen::ir::types::{self, F64X2, I16X8, I32X4, I64X2, I8X16};
@@ -2766,33 +2768,33 @@ impl LoweringState {
         module: &mut impl Module,
         builder: &mut FunctionBuilder<'_>,
         imports: &Imports,
-        name: &str,
+        name: &IntrinsicName,
         operands: &[Expr],
         hint: Option<Type>,
     ) -> Result<LoweredValue, JitError> {
-        match intrinsic_base_name(name) {
-            "scvtf" | "ucvtf" | "fcvtzs" | "fcvtzu" => {
+        match name.op() {
+            IntrinsicOp::Scvtf | IntrinsicOp::Ucvtf | IntrinsicOp::Fcvtzs | IntrinsicOp::Fcvtzu => {
                 self.lower_vector_conversion_intrinsic(module, builder, imports, name, operands)
             }
             // Bitwise vector operations (arrangement-independent)
-            "and" => self.lower_simd_binop(module, builder, imports, operands, |b, a, c| {
+            IntrinsicOp::And => self.lower_simd_binop(module, builder, imports, operands, |b, a, c| {
                 b.ins().band(a, c)
             }),
-            "orr" => self.lower_simd_binop(module, builder, imports, operands, |b, a, c| {
+            IntrinsicOp::Orr => self.lower_simd_binop(module, builder, imports, operands, |b, a, c| {
                 b.ins().bor(a, c)
             }),
-            "eor" => self.lower_simd_binop(module, builder, imports, operands, |b, a, c| {
+            IntrinsicOp::Eor => self.lower_simd_binop(module, builder, imports, operands, |b, a, c| {
                 b.ins().bxor(a, c)
             }),
-            "orn" => self.lower_simd_binop(module, builder, imports, operands, |b, a, c| {
+            IntrinsicOp::Orn => self.lower_simd_binop(module, builder, imports, operands, |b, a, c| {
                 let not_c = b.ins().bnot(c);
                 b.ins().bor(a, not_c)
             }),
-            "bic" => self.lower_simd_binop(module, builder, imports, operands, |b, a, c| {
+            IntrinsicOp::Bic => self.lower_simd_binop(module, builder, imports, operands, |b, a, c| {
                 let not_c = b.ins().bnot(c);
                 b.ins().band(a, not_c)
             }),
-            "bsl" => {
+            IntrinsicOp::Bsl => {
                 // BSL: bitselect - result = (op1 & mask) | (op2 & ~mask)
                 // operands: [mask, op1, op2]
                 if operands.len() < 3 {
@@ -2809,7 +2811,7 @@ impl LoweringState {
                     ty: I8X16,
                 })
             }
-            "bit" => {
+            IntrinsicOp::Bit => {
                 // BIT: dst = (src & mask) | (dst & ~mask)  (insert if bit set)
                 // operands: [dst, src, mask]
                 if operands.len() < 3 {
@@ -2826,7 +2828,7 @@ impl LoweringState {
                     ty: I8X16,
                 })
             }
-            "bif" => {
+            IntrinsicOp::Bif => {
                 // BIF: dst = (dst & mask) | (src & ~mask)  (insert if bit clear)
                 // operands: [dst, src, mask]
                 if operands.len() < 3 {
@@ -2844,7 +2846,7 @@ impl LoweringState {
                     ty: I8X16,
                 })
             }
-            "mvn" | "not" => {
+            IntrinsicOp::Mvn | IntrinsicOp::Not => {
                 if operands.is_empty() {
                     return Err(JitError::UnsupportedExpr("not operand count"));
                 }
@@ -2856,7 +2858,7 @@ impl LoweringState {
                 })
             }
             // FP rounding intrinsics
-            "frintz" => self.lower_float_rounding_intrinsic(
+            IntrinsicOp::Frintz => self.lower_float_rounding_intrinsic(
                 module,
                 builder,
                 imports,
@@ -2864,7 +2866,7 @@ impl LoweringState {
                 hint,
                 |b, v| b.ins().trunc(v),
             ),
-            "frintm" => self.lower_float_rounding_intrinsic(
+            IntrinsicOp::Frintm => self.lower_float_rounding_intrinsic(
                 module,
                 builder,
                 imports,
@@ -2872,7 +2874,7 @@ impl LoweringState {
                 hint,
                 |b, v| b.ins().floor(v),
             ),
-            "frintp" => self.lower_float_rounding_intrinsic(
+            IntrinsicOp::Frintp => self.lower_float_rounding_intrinsic(
                 module,
                 builder,
                 imports,
@@ -2880,7 +2882,7 @@ impl LoweringState {
                 hint,
                 |b, v| b.ins().ceil(v),
             ),
-            "frintn" | "frinta" | "frintx" => self.lower_float_rounding_intrinsic(
+            IntrinsicOp::Frintn | IntrinsicOp::Frinta | IntrinsicOp::Frintx => self.lower_float_rounding_intrinsic(
                 module,
                 builder,
                 imports,
@@ -2890,7 +2892,7 @@ impl LoweringState {
             ),
             // FNMADD: -(a*b) + c  →  fneg(fma(a, b, fneg(c)))
             // Actually: FNMADD rd, rn, rm, ra = -(rn*rm) - ra
-            "fnmadd" => {
+            IntrinsicOp::Fnmadd => {
                 if operands.len() < 3 {
                     return Err(JitError::UnsupportedExpr("fnmadd operand count"));
                 }
@@ -2911,7 +2913,7 @@ impl LoweringState {
             }
             // FNMSUB: (a*b) - c
             // Actually: FNMSUB rd, rn, rm, ra = rn*rm - ra
-            "fnmsub" => {
+            IntrinsicOp::Fnmsub => {
                 if operands.len() < 3 {
                     return Err(JitError::UnsupportedExpr("fnmsub operand count"));
                 }
@@ -2929,7 +2931,7 @@ impl LoweringState {
                 })
             }
             // Byte reversal within halfwords/words
-            "rev16" => {
+            IntrinsicOp::Rev16 => {
                 // REV16: reverse bytes within each 16-bit halfword
                 if operands.is_empty() {
                     return Err(JitError::UnsupportedExpr("rev16 operand count"));
@@ -2959,7 +2961,7 @@ impl LoweringState {
                     ty,
                 })
             }
-            "rev32" => {
+            IntrinsicOp::Rev32 => {
                 // REV32: reverse bytes within each 32-bit word (for 64-bit registers)
                 if operands.is_empty() {
                     return Err(JitError::UnsupportedExpr("rev32 operand count"));
@@ -2985,7 +2987,7 @@ impl LoweringState {
                     })
                 }
             }
-            "cnt" => {
+            IntrinsicOp::Cnt => {
                 // CNT: population count (count set bits)
                 if operands.is_empty() {
                     return Err(JitError::UnsupportedExpr("cnt operand count"));
@@ -2998,7 +3000,7 @@ impl LoweringState {
                     ty,
                 })
             }
-            "ngc" => {
+            IntrinsicOp::Ngc => {
                 // NGC: negate with carry: Rd = 0 - Rm - !C
                 // In the simplified form: Rd = -Rm - 1 + C
                 if operands.is_empty() {
@@ -3020,7 +3022,7 @@ impl LoweringState {
                 })
             }
             // Carry arithmetic
-            "adc" => {
+            IntrinsicOp::Adc => {
                 // ADC: Rd = Rn + Rm + C
                 if operands.len() < 2 {
                     return Err(JitError::UnsupportedExpr("adc operand count"));
@@ -3039,7 +3041,7 @@ impl LoweringState {
                     ty,
                 })
             }
-            "sbc" => {
+            IntrinsicOp::Sbc => {
                 // SBC: Rd = Rn - Rm - !C = Rn + ~Rm + C
                 if operands.len() < 2 {
                     return Err(JitError::UnsupportedExpr("sbc operand count"));
@@ -3060,7 +3062,7 @@ impl LoweringState {
                 })
             }
             // Multiply high
-            "smulh" => {
+            IntrinsicOp::Smulh => {
                 // SMULH: Rd = (sext(Rn) * sext(Rm)) >> 64
                 if operands.len() < 2 {
                     return Err(JitError::UnsupportedExpr("smulh operand count"));
@@ -3078,7 +3080,7 @@ impl LoweringState {
                     ty: types::I64,
                 })
             }
-            "umulh" => {
+            IntrinsicOp::Umulh => {
                 // UMULH: Rd = (Rn * Rm) >> 64 (unsigned)
                 if operands.len() < 2 {
                     return Err(JitError::UnsupportedExpr("umulh operand count"));
@@ -3095,7 +3097,7 @@ impl LoweringState {
                     ty: types::I64,
                 })
             }
-            "movk" => {
+            IntrinsicOp::Movk => {
                 // MOVK: insert 16-bit immediate at a shifted position, keep other bits.
                 // operands[0] = Expr::Reg(Rd) (current value)
                 // operands[1] = shifted immediate (already has LSL applied)
@@ -3172,19 +3174,20 @@ impl LoweringState {
         module: &mut impl Module,
         builder: &mut FunctionBuilder<'_>,
         imports: &Imports,
-        name: &str,
+        name: &IntrinsicName,
         operands: &[Expr],
     ) -> Result<LoweredValue, JitError> {
         if operands.is_empty() {
             return Err(JitError::UnsupportedExpr("vector conversion operand count"));
         }
-        let arrangement = intrinsic_arrangement(name)
+        let arrangement = name
+            .suffix()
             .ok_or(JitError::UnsupportedExpr("vector conversion arrangement"))?;
         let src = self.lower_expr(module, builder, imports, &operands[0], Some(I8X16))?;
         let src = self.coerce_value(builder, src, I8X16)?;
 
-        match (intrinsic_base_name(name), arrangement) {
-            ("scvtf", "2d") => {
+        match (name.op(), arrangement) {
+            (IntrinsicOp::Scvtf, "2d") => {
                 let ints = self.bitcast_value(builder, I64X2, src.value, src.ty);
                 let zero = builder.ins().f64const(Ieee64::with_float(0.0));
                 let mut floats = builder.ins().splat(F64X2, zero);
@@ -3198,7 +3201,7 @@ impl LoweringState {
                     ty: I8X16,
                 })
             }
-            ("ucvtf", "2d") => {
+            (IntrinsicOp::Ucvtf, "2d") => {
                 let ints = self.bitcast_value(builder, I64X2, src.value, src.ty);
                 let zero = builder.ins().f64const(Ieee64::with_float(0.0));
                 let mut floats = builder.ins().splat(F64X2, zero);
@@ -3212,7 +3215,7 @@ impl LoweringState {
                     ty: I8X16,
                 })
             }
-            ("fcvtzs", "2d") => {
+            (IntrinsicOp::Fcvtzs, "2d") => {
                 let floats = self.bitcast_value(builder, F64X2, src.value, src.ty);
                 let zero = builder.ins().iconst(types::I64, 0);
                 let mut ints = builder.ins().splat(I64X2, zero);
@@ -3226,7 +3229,7 @@ impl LoweringState {
                     ty: I8X16,
                 })
             }
-            ("fcvtzu", "2d") => {
+            (IntrinsicOp::Fcvtzu, "2d") => {
                 let floats = self.bitcast_value(builder, F64X2, src.value, src.ty);
                 let zero = builder.ins().iconst(types::I64, 0);
                 let mut ints = builder.ins().splat(I64X2, zero);
@@ -3270,13 +3273,13 @@ impl LoweringState {
         module: &mut impl Module,
         builder: &mut FunctionBuilder<'_>,
         imports: &Imports,
-        name: &str,
+        name: &IntrinsicName,
         operands: &[Expr],
     ) -> Result<(), JitError> {
-        match intrinsic_base_name(name) {
-            "nop" | "yield" | "hint" | "paciasp" | "autiasp" | "bti" | "xpaclri" | "prfm"
-            | "prfum" | "clrex" => Ok(()),
-            "ushr" => self.lower_vector_shift_stmt_intrinsic(
+        match name.op() {
+            IntrinsicOp::Nop | IntrinsicOp::Yield | IntrinsicOp::Hint | IntrinsicOp::Paciasp | IntrinsicOp::Autiasp | IntrinsicOp::Bti | IntrinsicOp::Xpaclri | IntrinsicOp::Prfm
+            | IntrinsicOp::Prfum | IntrinsicOp::Clrex => Ok(()),
+            IntrinsicOp::Ushr => self.lower_vector_shift_stmt_intrinsic(
                 module,
                 builder,
                 imports,
@@ -3284,7 +3287,7 @@ impl LoweringState {
                 operands,
                 VectorShiftKind::Ushr,
             ),
-            "urshr" => self.lower_vector_shift_stmt_intrinsic(
+            IntrinsicOp::Urshr => self.lower_vector_shift_stmt_intrinsic(
                 module,
                 builder,
                 imports,
@@ -3292,7 +3295,7 @@ impl LoweringState {
                 operands,
                 VectorShiftKind::Urshr,
             ),
-            "usra" => self.lower_vector_shift_stmt_intrinsic(
+            IntrinsicOp::Usra => self.lower_vector_shift_stmt_intrinsic(
                 module,
                 builder,
                 imports,
@@ -3300,7 +3303,7 @@ impl LoweringState {
                 operands,
                 VectorShiftKind::Usra,
             ),
-            "ursra" => self.lower_vector_shift_stmt_intrinsic(
+            IntrinsicOp::Ursra => self.lower_vector_shift_stmt_intrinsic(
                 module,
                 builder,
                 imports,
@@ -3308,7 +3311,7 @@ impl LoweringState {
                 operands,
                 VectorShiftKind::Ursra,
             ),
-            "sli" => self.lower_vector_shift_stmt_intrinsic(
+            IntrinsicOp::Sli => self.lower_vector_shift_stmt_intrinsic(
                 module,
                 builder,
                 imports,
@@ -3316,7 +3319,7 @@ impl LoweringState {
                 operands,
                 VectorShiftKind::Sli,
             ),
-            "sri" => self.lower_vector_shift_stmt_intrinsic(
+            IntrinsicOp::Sri => self.lower_vector_shift_stmt_intrinsic(
                 module,
                 builder,
                 imports,
@@ -3324,7 +3327,7 @@ impl LoweringState {
                 operands,
                 VectorShiftKind::Sri,
             ),
-            "sqshlu" => self.lower_vector_shift_stmt_intrinsic(
+            IntrinsicOp::Sqshlu => self.lower_vector_shift_stmt_intrinsic(
                 module,
                 builder,
                 imports,
@@ -3332,7 +3335,7 @@ impl LoweringState {
                 operands,
                 VectorShiftKind::Sqshlu,
             ),
-            "uqshl" => self.lower_vector_shift_stmt_intrinsic(
+            IntrinsicOp::Uqshl => self.lower_vector_shift_stmt_intrinsic(
                 module,
                 builder,
                 imports,
@@ -3340,7 +3343,7 @@ impl LoweringState {
                 operands,
                 VectorShiftKind::Uqshl,
             ),
-            "uxtl" => self.lower_vector_shift_stmt_intrinsic(
+            IntrinsicOp::Uxtl => self.lower_vector_shift_stmt_intrinsic(
                 module,
                 builder,
                 imports,
@@ -3348,7 +3351,7 @@ impl LoweringState {
                 operands,
                 VectorShiftKind::Uxtl,
             ),
-            "ushll2" => self.lower_vector_shift_stmt_intrinsic(
+            IntrinsicOp::Ushll2 => self.lower_vector_shift_stmt_intrinsic(
                 module,
                 builder,
                 imports,
@@ -3356,44 +3359,44 @@ impl LoweringState {
                 operands,
                 VectorShiftKind::Ushll2,
             ),
-            "ld1" => {
+            IntrinsicOp::Ld1 => {
                 self.lower_ldst1_stmt_intrinsic(module, builder, imports, name, operands, true)
             }
-            "st1" => {
+            IntrinsicOp::St1 => {
                 self.lower_ldst1_stmt_intrinsic(module, builder, imports, name, operands, false)
             }
-            "movi" => self.lower_vector_immediate_stmt_intrinsic(builder, name, operands, false),
-            "mvni" => self.lower_vector_immediate_stmt_intrinsic(builder, name, operands, true),
-            "uqrshrn2" => {
+            IntrinsicOp::Movi => self.lower_vector_immediate_stmt_intrinsic(builder, name, operands, false),
+            IntrinsicOp::Mvni => self.lower_vector_immediate_stmt_intrinsic(builder, name, operands, true),
+            IntrinsicOp::Uqrshrn2 => {
                 self.lower_uqrshrn2_stmt_intrinsic(module, builder, imports, name, operands)
             }
-            "fcmla" => self.lower_fcmla_stmt_intrinsic(module, builder, imports, name, operands),
-            "fmulx" => self.lower_fmulx_stmt_intrinsic(module, builder, imports, name, operands),
-            "sqrdmlah" => {
+            IntrinsicOp::Fcmla => self.lower_fcmla_stmt_intrinsic(module, builder, imports, name, operands),
+            IntrinsicOp::Fmulx => self.lower_fmulx_stmt_intrinsic(module, builder, imports, name, operands),
+            IntrinsicOp::Sqrdmlah => {
                 self.lower_sqrdmlx_stmt_intrinsic(module, builder, imports, name, operands, false)
             }
-            "sqrdmlsh" => {
+            IntrinsicOp::Sqrdmlsh => {
                 self.lower_sqrdmlx_stmt_intrinsic(module, builder, imports, name, operands, true)
             }
-            "mla" => {
+            IntrinsicOp::Mla => {
                 self.lower_vector_mul_acc_intrinsic(module, builder, imports, name, operands, false)
             }
-            "mls" => {
+            IntrinsicOp::Mls => {
                 self.lower_vector_mul_acc_intrinsic(module, builder, imports, name, operands, true)
             }
-            "umull2" => {
+            IntrinsicOp::Umull2 => {
                 self.lower_widening_lane_mul_intrinsic(module, builder, imports, operands, false)
             }
-            "umlal2" => self.lower_widening_lane_mul_acc_intrinsic(
+            IntrinsicOp::Umlal2 => self.lower_widening_lane_mul_acc_intrinsic(
                 module, builder, imports, operands, false, false,
             ),
-            "umlsl2" => self.lower_widening_lane_mul_acc_intrinsic(
+            IntrinsicOp::Umlsl2 => self.lower_widening_lane_mul_acc_intrinsic(
                 module, builder, imports, operands, false, true,
             ),
-            "smull2" => {
+            IntrinsicOp::Smull2 => {
                 self.lower_widening_lane_mul_intrinsic(module, builder, imports, operands, true)
             }
-            "msr" => {
+            IntrinsicOp::Msr => {
                 // MSR nzcv, Xn  →  write flags from register
                 // operands: [sysreg_intrinsic, value_expr]
                 if operands.len() >= 2 {
@@ -3420,7 +3423,7 @@ impl LoweringState {
                 }
                 Err(JitError::UnsupportedStmt("msr target"))
             }
-            "fccmp" | "fccmpe" => {
+            IntrinsicOp::Fccmp | IntrinsicOp::Fccmpe => {
                 // FCCMP Sn, Sm, #nzcv, cond → if cond then flags=fcmp(Sn,Sm) else flags=nzcv
                 // operands: [Sn, Sm, nzcv_imm, cond_imm]
                 if operands.len() >= 4 {
@@ -3467,7 +3470,7 @@ impl LoweringState {
             }
             // Bitfield operations: lift_intrinsic_all passes all operands
             // including destination, so operands[0] is the dest register.
-            "ubfx" => {
+            IntrinsicOp::Ubfx => {
                 // UBFX Rd, Rn, #lsb, #width → Rd = (Rn >> lsb) & mask(width)
                 self.lower_bitfield_stmt(
                     module,
@@ -3483,7 +3486,7 @@ impl LoweringState {
                     },
                 )
             }
-            "ubfiz" => {
+            IntrinsicOp::Ubfiz => {
                 // UBFIZ Rd, Rn, #lsb, #width → Rd = (Rn & mask(width)) << lsb
                 self.lower_bitfield_stmt(
                     module,
@@ -3499,7 +3502,7 @@ impl LoweringState {
                     },
                 )
             }
-            "sbfx" => {
+            IntrinsicOp::Sbfx => {
                 // SBFX Rd, Rn, #lsb, #width → Rd = sign_extend((Rn >> lsb)[width-1:0])
                 self.lower_bitfield_stmt(
                     module,
@@ -3518,7 +3521,7 @@ impl LoweringState {
                     },
                 )
             }
-            "sbfiz" => {
+            IntrinsicOp::Sbfiz => {
                 // SBFIZ Rd, Rn, #lsb, #width → Rd = sign_extend(Rn[width-1:0]) << lsb
                 self.lower_bitfield_stmt(
                     module,
@@ -3537,7 +3540,7 @@ impl LoweringState {
                     },
                 )
             }
-            "bfi" => {
+            IntrinsicOp::Bfi => {
                 // BFI Rd, Rn, #lsb, #width → Rd[lsb+width-1:lsb] = Rn[width-1:0]
                 // This reads the current Rd and inserts bits from Rn
                 if operands.len() < 4 {
@@ -3565,7 +3568,7 @@ impl LoweringState {
                     },
                 )
             }
-            "bfxil" => {
+            IntrinsicOp::Bfxil => {
                 // BFXIL Rd, Rn, #lsb, #width → Rd[width-1:0] = Rn[lsb+width-1:lsb]
                 if operands.len() < 4 {
                     return Err(JitError::UnsupportedStmt("bfxil operand count"));
@@ -3591,7 +3594,7 @@ impl LoweringState {
                     },
                 )
             }
-            "extr" => {
+            IntrinsicOp::Extr => {
                 // EXTR Rd, Rn, Rm, #shift → Rd = (Rn:Rm >> shift)[reg_size-1:0]
                 if operands.len() < 4 {
                     return Err(JitError::UnsupportedStmt("extr operand count"));
@@ -3632,7 +3635,7 @@ impl LoweringState {
         module: &mut impl Module,
         builder: &mut FunctionBuilder<'_>,
         imports: &Imports,
-        name: &str,
+        name: &IntrinsicName,
         operands: &[Expr],
         subtract: bool,
     ) -> Result<(), JitError> {
@@ -3643,7 +3646,7 @@ impl LoweringState {
             Expr::Reg(reg) => reg.clone(),
             _ => return Err(JitError::UnsupportedStmt("vector mul-acc dest")),
         };
-        let layout = parse_vector_arrangement(name)
+        let layout = name.arrangement()
             .ok_or(JitError::UnsupportedStmt("vector mul-acc arrangement"))?;
         let vec_ty = vector_type_for_layout(layout)?;
         let lane_ty = vector_lane_type(layout.lane_bits)?;
@@ -3689,7 +3692,7 @@ impl LoweringState {
         module: &mut impl Module,
         builder: &mut FunctionBuilder<'_>,
         imports: &Imports,
-        name: &str,
+        name: &IntrinsicName,
         operands: &[Expr],
         subtract: bool,
     ) -> Result<(), JitError> {
@@ -3700,7 +3703,7 @@ impl LoweringState {
             Expr::Reg(reg) => reg.clone(),
             _ => return Err(JitError::UnsupportedStmt("sqrdmlx dest")),
         };
-        let layout = parse_vector_arrangement(name)
+        let layout = name.arrangement()
             .ok_or(JitError::UnsupportedStmt("sqrdmlx arrangement"))?;
         if (layout.lanes, layout.lane_bits) != (8, 16) {
             return Err(JitError::UnsupportedStmt("sqrdmlx arrangement"));
@@ -3754,7 +3757,7 @@ impl LoweringState {
     fn lower_vector_immediate_stmt_intrinsic(
         &mut self,
         builder: &mut FunctionBuilder<'_>,
-        name: &str,
+        name: &IntrinsicName,
         operands: &[Expr],
         invert: bool,
     ) -> Result<(), JitError> {
@@ -3765,7 +3768,7 @@ impl LoweringState {
             Expr::Reg(reg) => reg.clone(),
             _ => return Err(JitError::UnsupportedStmt("vector immediate dest")),
         };
-        let layout = parse_vector_arrangement(name)
+        let layout = name.arrangement()
             .ok_or(JitError::UnsupportedStmt("vector immediate arrangement"))?;
         let vec_ty = vector_type_for_layout(layout)?;
         let lane_ty = vector_lane_type(layout.lane_bits)?;
@@ -3801,7 +3804,7 @@ impl LoweringState {
         module: &mut impl Module,
         builder: &mut FunctionBuilder<'_>,
         imports: &Imports,
-        name: &str,
+        name: &IntrinsicName,
         operands: &[Expr],
     ) -> Result<(), JitError> {
         if operands.len() < 3 {
@@ -3811,7 +3814,7 @@ impl LoweringState {
             Expr::Reg(reg) => reg.clone(),
             _ => return Err(JitError::UnsupportedStmt("uqrshrn2 dest")),
         };
-        let layout = parse_vector_arrangement(name)
+        let layout = name.arrangement()
             .ok_or(JitError::UnsupportedStmt("uqrshrn2 arrangement"))?;
         if (layout.lanes, layout.lane_bits) != (4, 32) {
             return Err(JitError::UnsupportedStmt("uqrshrn2 arrangement"));
@@ -3877,7 +3880,7 @@ impl LoweringState {
         _module: &mut impl Module,
         builder: &mut FunctionBuilder<'_>,
         imports: &Imports,
-        name: &str,
+        name: &IntrinsicName,
         operands: &[Expr],
     ) -> Result<(), JitError> {
         if operands.len() < 4 {
@@ -3892,7 +3895,7 @@ impl LoweringState {
             _ => return Err(JitError::UnsupportedStmt("fcmla src")),
         };
         let layout =
-            parse_vector_arrangement(name).ok_or(JitError::UnsupportedStmt("fcmla arrangement"))?;
+            name.arrangement().ok_or(JitError::UnsupportedStmt("fcmla arrangement"))?;
         if (layout.lanes, layout.lane_bits) != (8, 16) {
             return Err(JitError::UnsupportedStmt("fcmla arrangement"));
         }
@@ -3967,7 +3970,7 @@ impl LoweringState {
         module: &mut impl Module,
         builder: &mut FunctionBuilder<'_>,
         imports: &Imports,
-        name: &str,
+        name: &IntrinsicName,
         operands: &[Expr],
     ) -> Result<(), JitError> {
         if operands.len() < 3 {
@@ -3978,7 +3981,7 @@ impl LoweringState {
             _ => return Err(JitError::UnsupportedStmt("fmulx dest")),
         };
         let layout =
-            parse_vector_arrangement(name).ok_or(JitError::UnsupportedStmt("fmulx arrangement"))?;
+            name.arrangement().ok_or(JitError::UnsupportedStmt("fmulx arrangement"))?;
         if (layout.lanes, layout.lane_bits) != (2, 64) {
             return Err(JitError::UnsupportedStmt("fmulx arrangement"));
         }
@@ -4026,14 +4029,14 @@ impl LoweringState {
         module: &mut impl Module,
         builder: &mut FunctionBuilder<'_>,
         imports: &Imports,
-        name: &str,
+        name: &IntrinsicName,
         operands: &[Expr],
         is_load: bool,
     ) -> Result<(), JitError> {
         if operands.len() < 2 {
             return Err(JitError::UnsupportedStmt("ld1/st1 operand count"));
         }
-        let layout = parse_vector_arrangement(name)
+        let layout = name.arrangement()
             .ok_or(JitError::UnsupportedStmt("ld1/st1 arrangement"))?;
         let byte_len = u8::try_from((u16::from(layout.lanes) * u16::from(layout.lane_bits)) / 8)
             .map_err(|_| JitError::UnsupportedStmt("ld1/st1 byte length"))?;
@@ -4322,7 +4325,7 @@ impl LoweringState {
         module: &mut impl Module,
         builder: &mut FunctionBuilder<'_>,
         imports: &Imports,
-        name: &str,
+        name: &IntrinsicName,
         operands: &[Expr],
         kind: VectorShiftKind,
     ) -> Result<(), JitError> {
@@ -4333,7 +4336,7 @@ impl LoweringState {
             Expr::Reg(reg) => reg.clone(),
             _ => return Err(JitError::UnsupportedStmt("vector shift dest")),
         };
-        let layout = parse_vector_arrangement(name)
+        let layout = name.arrangement()
             .ok_or(JitError::UnsupportedStmt("vector shift arrangement"))?;
         let vec_ty = vector_type_for_layout(layout)?;
         let lane_ty = vector_lane_type(layout.lane_bits)?;
@@ -5303,12 +5306,6 @@ enum SimdKind {
 }
 
 #[derive(Clone, Copy)]
-struct ParsedVectorArrangement {
-    lanes: u8,
-    lane_bits: u8,
-}
-
-#[derive(Clone, Copy)]
 enum VectorShiftKind {
     Ushr,
     Urshr,
@@ -5334,31 +5331,6 @@ fn reg_type(reg: &Reg) -> Result<Type, JitError> {
     }
 }
 
-fn intrinsic_base_name(name: &str) -> &str {
-    name.split('.').next().unwrap_or(name)
-}
-
-fn intrinsic_arrangement(name: &str) -> Option<&str> {
-    name.split_once('.').map(|(_, arrangement)| arrangement)
-}
-
-fn parse_vector_arrangement(name: &str) -> Option<ParsedVectorArrangement> {
-    let arrangement = intrinsic_arrangement(name)?;
-    let split = arrangement
-        .char_indices()
-        .find(|(_, c)| !c.is_ascii_digit())
-        .map(|(index, _)| index)?;
-    let lanes = arrangement[..split].parse::<u8>().ok()?;
-    let lane_bits = match &arrangement[split..] {
-        "b" => 8,
-        "h" => 16,
-        "s" => 32,
-        "d" => 64,
-        _ => return None,
-    };
-    Some(ParsedVectorArrangement { lanes, lane_bits })
-}
-
 fn vector_lane_type(bits: u8) -> Result<Type, JitError> {
     match bits {
         8 => Ok(types::I8),
@@ -5369,7 +5341,7 @@ fn vector_lane_type(bits: u8) -> Result<Type, JitError> {
     }
 }
 
-fn vector_type_for_layout(layout: ParsedVectorArrangement) -> Result<Type, JitError> {
+fn vector_type_for_layout(layout: VectorArrangement) -> Result<Type, JitError> {
     match (layout.lanes, layout.lane_bits) {
         (16, 8) => Ok(I8X16),
         (8, 16) => Ok(I16X8),
@@ -5383,7 +5355,7 @@ fn parse_single_multi_reg_operand(expr: &Expr) -> Option<Reg> {
     let Expr::Intrinsic { name, operands } = expr else {
         return None;
     };
-    if name != "multi_reg" || operands.len() != 1 {
+    if name.op() != IntrinsicOp::MultiReg || operands.len() != 1 {
         return None;
     }
     match &operands[0] {
@@ -5890,10 +5862,10 @@ mod tests {
         let mut compiler = JitCompiler::new(JitConfig::default());
         // MSR nzcv, x0 → write flags from x0 bits [31:28]
         let stmts = vec![Stmt::Intrinsic {
-            name: "msr".to_string(),
+            name: "msr".into(),
             operands: vec![
                 Expr::Intrinsic {
-                    name: "nzcv".to_string(),
+                    name: "nzcv".into(),
                     operands: vec![],
                 },
                 Expr::Reg(Reg::X(0)),
@@ -5965,10 +5937,10 @@ mod tests {
             .compile_block(
                 0x1000,
                 &[Stmt::Intrinsic {
-                    name: "msr".to_string(),
+                    name: "msr".into(),
                     operands: vec![
                         Expr::Intrinsic {
-                            name: "tpidr_el0".to_string(),
+                            name: "tpidr_el0".into(),
                             operands: vec![],
                         },
                         Expr::Reg(Reg::X(0)),
@@ -5985,7 +5957,7 @@ mod tests {
         let stmts = vec![Stmt::Assign {
             dst: Reg::V(2),
             src: Expr::Intrinsic {
-                name: "and".to_string(),
+                name: "and".into(),
                 operands: vec![Expr::Reg(Reg::V(0)), Expr::Reg(Reg::V(1))],
             },
         }];
@@ -6008,7 +5980,7 @@ mod tests {
         let stmts = vec![Stmt::Assign {
             dst: Reg::V(2),
             src: Expr::Intrinsic {
-                name: "orr".to_string(),
+                name: "orr".into(),
                 operands: vec![Expr::Reg(Reg::V(0)), Expr::Reg(Reg::V(1))],
             },
         }];
@@ -6031,7 +6003,7 @@ mod tests {
         let stmts = vec![Stmt::Assign {
             dst: Reg::V(2),
             src: Expr::Intrinsic {
-                name: "eor".to_string(),
+                name: "eor".into(),
                 operands: vec![Expr::Reg(Reg::V(0)), Expr::Reg(Reg::V(1))],
             },
         }];
@@ -6054,7 +6026,7 @@ mod tests {
         let stmts = vec![Stmt::Assign {
             dst: Reg::V(2),
             src: Expr::Intrinsic {
-                name: "bic".to_string(),
+                name: "bic".into(),
                 operands: vec![Expr::Reg(Reg::V(0)), Expr::Reg(Reg::V(1))],
             },
         }];
@@ -6077,7 +6049,7 @@ mod tests {
         let stmts = vec![Stmt::Assign {
             dst: Reg::V(2),
             src: Expr::Intrinsic {
-                name: "orn".to_string(),
+                name: "orn".into(),
                 operands: vec![Expr::Reg(Reg::V(0)), Expr::Reg(Reg::V(1))],
             },
         }];
@@ -6100,7 +6072,7 @@ mod tests {
         let stmts = vec![Stmt::Assign {
             dst: Reg::V(1),
             src: Expr::Intrinsic {
-                name: "not".to_string(),
+                name: "not".into(),
                 operands: vec![Expr::Reg(Reg::V(0))],
             },
         }];
@@ -6123,7 +6095,7 @@ mod tests {
         let stmts = vec![Stmt::Assign {
             dst: Reg::V(3),
             src: Expr::Intrinsic {
-                name: "bsl".to_string(),
+                name: "bsl".into(),
                 operands: vec![
                     Expr::Reg(Reg::V(0)), // mask
                     Expr::Reg(Reg::V(1)), // if bit set
@@ -6150,7 +6122,7 @@ mod tests {
     fn simd_ushr_2d_shifts_each_lane() {
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![Stmt::Intrinsic {
-            name: "ushr.2d".to_string(),
+            name: "ushr.2d".into(),
             operands: vec![Expr::Reg(Reg::V(0)), Expr::Reg(Reg::V(1)), Expr::Imm(8)],
         }];
         let code = compiler.compile_block(0x1000, &stmts).expect("compile");
@@ -6174,7 +6146,7 @@ mod tests {
     fn simd_usra_2d_accumulates_shifted_lanes() {
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![Stmt::Intrinsic {
-            name: "usra.2d".to_string(),
+            name: "usra.2d".into(),
             operands: vec![Expr::Reg(Reg::V(0)), Expr::Reg(Reg::V(1)), Expr::Imm(4)],
         }];
         let code = compiler.compile_block(0x1000, &stmts).expect("compile");
@@ -6197,7 +6169,7 @@ mod tests {
     fn simd_sli_2d_inserts_low_bits_from_destination() {
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![Stmt::Intrinsic {
-            name: "sli.2d".to_string(),
+            name: "sli.2d".into(),
             operands: vec![Expr::Reg(Reg::V(0)), Expr::Reg(Reg::V(1)), Expr::Imm(8)],
         }];
         let code = compiler.compile_block(0x1000, &stmts).expect("compile");
@@ -6217,7 +6189,7 @@ mod tests {
     fn simd_sri_2d_inserts_high_bits_from_destination() {
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![Stmt::Intrinsic {
-            name: "sri.2d".to_string(),
+            name: "sri.2d".into(),
             operands: vec![Expr::Reg(Reg::V(0)), Expr::Reg(Reg::V(1)), Expr::Imm(8)],
         }];
         let code = compiler.compile_block(0x1000, &stmts).expect("compile");
@@ -6237,7 +6209,7 @@ mod tests {
     fn simd_sqshlu_2d_saturates_negative_and_overflowing_lanes() {
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![Stmt::Intrinsic {
-            name: "sqshlu.2d".to_string(),
+            name: "sqshlu.2d".into(),
             operands: vec![Expr::Reg(Reg::V(0)), Expr::Reg(Reg::V(1)), Expr::Imm(4)],
         }];
         let code = compiler.compile_block(0x1000, &stmts).expect("compile");
@@ -6258,7 +6230,7 @@ mod tests {
     fn simd_uqshl_2d_saturates_unsigned_overflowing_lanes() {
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![Stmt::Intrinsic {
-            name: "uqshl.2d".to_string(),
+            name: "uqshl.2d".into(),
             operands: vec![Expr::Reg(Reg::V(0)), Expr::Reg(Reg::V(1)), Expr::Imm(4)],
         }];
         let code = compiler.compile_block(0x1000, &stmts).expect("compile");
@@ -6279,7 +6251,7 @@ mod tests {
     fn simd_uxtl_8h_zero_extends_lower_bytes() {
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![Stmt::Intrinsic {
-            name: "uxtl.8h".to_string(),
+            name: "uxtl.8h".into(),
             operands: vec![Expr::Reg(Reg::V(0)), Expr::Reg(Reg::V(1))],
         }];
         let code = compiler.compile_block(0x1000, &stmts).expect("compile");
@@ -6307,7 +6279,7 @@ mod tests {
     fn simd_ushll2_2d_zero_extends_upper_words_and_shifts() {
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![Stmt::Intrinsic {
-            name: "ushll2.2d".to_string(),
+            name: "ushll2.2d".into(),
             operands: vec![Expr::Reg(Reg::V(0)), Expr::Reg(Reg::V(1)), Expr::Imm(1)],
         }];
         let code = compiler.compile_block(0x1000, &stmts).expect("compile");
@@ -6329,7 +6301,7 @@ mod tests {
     fn simd_sqrdmlah_8h_rounds_multiplies_and_accumulates() {
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![Stmt::Intrinsic {
-            name: "sqrdmlah.8h".to_string(),
+            name: "sqrdmlah.8h".into(),
             operands: vec![
                 Expr::Reg(Reg::V(0)),
                 Expr::Reg(Reg::V(1)),
@@ -6369,7 +6341,7 @@ mod tests {
     fn simd_sqrdmlsh_8h_rounds_multiplies_and_subtracts() {
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![Stmt::Intrinsic {
-            name: "sqrdmlsh.8h".to_string(),
+            name: "sqrdmlsh.8h".into(),
             operands: vec![
                 Expr::Reg(Reg::V(0)),
                 Expr::Reg(Reg::V(1)),
@@ -6409,7 +6381,7 @@ mod tests {
     fn simd_stmt_movi_16b_splats_immediate() {
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![Stmt::Intrinsic {
-            name: "movi.16b".to_string(),
+            name: "movi.16b".into(),
             operands: vec![Expr::Reg(Reg::V(0)), Expr::Imm(0x5a)],
         }];
         let code = compiler.compile_block(0x1000, &stmts).expect("compile");
@@ -6424,7 +6396,7 @@ mod tests {
     fn simd_uqrshrn2_4s_rounds_narrows_into_upper_half() {
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![Stmt::Intrinsic {
-            name: "uqrshrn2.4s".to_string(),
+            name: "uqrshrn2.4s".into(),
             operands: vec![Expr::Reg(Reg::V(8)), Expr::Reg(Reg::V(24)), Expr::Imm(2)],
         }];
         let code = compiler.compile_block(0x1000, &stmts).expect("compile");
@@ -6450,7 +6422,7 @@ mod tests {
     fn simd_fmulx_2d_multiplies_each_lane_by_scalar_lane() {
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![Stmt::Intrinsic {
-            name: "fmulx.2d".to_string(),
+            name: "fmulx.2d".into(),
             operands: vec![
                 Expr::Reg(Reg::V(24)),
                 Expr::Reg(Reg::V(1)),
@@ -6503,7 +6475,7 @@ mod tests {
         for rotation in [0x0_u64, 0x5a, 0xb4, 0x10e] {
             let mut compiler = JitCompiler::new(JitConfig::default());
             let stmts = vec![Stmt::Intrinsic {
-                name: "fcmla.8h".to_string(),
+                name: "fcmla.8h".into(),
                 operands: vec![
                     Expr::Reg(Reg::V(0)),
                     Expr::Reg(Reg::V(1)),
@@ -6540,7 +6512,7 @@ mod tests {
             .compile_block(
                 0x1000,
                 &[Stmt::Intrinsic {
-                    name: "fcmla.8h".to_string(),
+                    name: "fcmla.8h".into(),
                     operands: vec![
                         Expr::Reg(Reg::V(0)),
                         Expr::Reg(Reg::V(1)),
@@ -6561,10 +6533,10 @@ mod tests {
     fn simd_ld1_8b_loads_low_half_and_updates_base() {
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![Stmt::Intrinsic {
-            name: "ld1.8b".to_string(),
+            name: "ld1.8b".into(),
             operands: vec![
                 Expr::Intrinsic {
-                    name: "multi_reg".to_string(),
+                    name: "multi_reg".into(),
                     operands: vec![Expr::Reg(Reg::V(31))],
                 },
                 Expr::Reg(Reg::X(3)),
@@ -6589,10 +6561,10 @@ mod tests {
     fn simd_st1_8h_stores_full_vector_and_updates_base() {
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![Stmt::Intrinsic {
-            name: "st1.8h".to_string(),
+            name: "st1.8h".into(),
             operands: vec![
                 Expr::Intrinsic {
-                    name: "multi_reg".to_string(),
+                    name: "multi_reg".into(),
                     operands: vec![Expr::Reg(Reg::V(31))],
                 },
                 Expr::Reg(Reg::X(16)),
@@ -6615,7 +6587,7 @@ mod tests {
     fn simd_mla_8h_multiplies_by_scalar_lane_and_accumulates() {
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![Stmt::Intrinsic {
-            name: "mla.8h".to_string(),
+            name: "mla.8h".into(),
             operands: vec![
                 Expr::Reg(Reg::V(0)),
                 Expr::Reg(Reg::V(1)),
@@ -6655,7 +6627,7 @@ mod tests {
     fn simd_mls_8h_multiplies_by_scalar_lane_and_subtracts() {
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![Stmt::Intrinsic {
-            name: "mls.8h".to_string(),
+            name: "mls.8h".into(),
             operands: vec![
                 Expr::Reg(Reg::V(0)),
                 Expr::Reg(Reg::V(1)),
@@ -6698,7 +6670,7 @@ mod tests {
     fn simd_umlal2_4s_accumulates_upper_half_products() {
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![Stmt::Intrinsic {
-            name: "umlal2.4s".to_string(),
+            name: "umlal2.4s".into(),
             operands: vec![
                 Expr::Reg(Reg::V(0)),
                 Expr::Reg(Reg::V(1)),
@@ -6734,7 +6706,7 @@ mod tests {
     fn simd_umlsl2_4s_subtracts_upper_half_products() {
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![Stmt::Intrinsic {
-            name: "umlsl2.4s".to_string(),
+            name: "umlsl2.4s".into(),
             operands: vec![
                 Expr::Reg(Reg::V(0)),
                 Expr::Reg(Reg::V(1)),
@@ -6772,7 +6744,7 @@ mod tests {
         let stmts = vec![Stmt::Assign {
             dst: Reg::D(1),
             src: Expr::Intrinsic {
-                name: "frintz".to_string(),
+                name: "frintz".into(),
                 operands: vec![Expr::Reg(Reg::D(0))],
             },
         }];
@@ -6802,7 +6774,7 @@ mod tests {
         let stmts = vec![Stmt::Assign {
             dst: Reg::D(1),
             src: Expr::Intrinsic {
-                name: "frintm".to_string(),
+                name: "frintm".into(),
                 operands: vec![Expr::Reg(Reg::D(0))],
             },
         }];
@@ -6826,7 +6798,7 @@ mod tests {
         let stmts = vec![Stmt::Assign {
             dst: Reg::D(1),
             src: Expr::Intrinsic {
-                name: "frintp".to_string(),
+                name: "frintp".into(),
                 operands: vec![Expr::Reg(Reg::D(0))],
             },
         }];
@@ -6851,7 +6823,7 @@ mod tests {
         let stmts = vec![Stmt::Assign {
             dst: Reg::D(3),
             src: Expr::Intrinsic {
-                name: "fnmadd".to_string(),
+                name: "fnmadd".into(),
                 operands: vec![
                     Expr::Reg(Reg::D(0)),
                     Expr::Reg(Reg::D(1)),
@@ -6885,7 +6857,7 @@ mod tests {
         let stmts = vec![Stmt::Assign {
             dst: Reg::D(3),
             src: Expr::Intrinsic {
-                name: "fnmsub".to_string(),
+                name: "fnmsub".into(),
                 operands: vec![
                     Expr::Reg(Reg::D(0)),
                     Expr::Reg(Reg::D(1)),
@@ -7140,7 +7112,7 @@ mod tests {
         let stmts = vec![Stmt::Assign {
             dst: Reg::W(0),
             src: Expr::Intrinsic {
-                name: "rev16".to_string(),
+                name: "rev16".into(),
                 operands: vec![Expr::Reg(Reg::W(1))],
             },
         }];
@@ -7163,7 +7135,7 @@ mod tests {
         let stmts = vec![Stmt::Assign {
             dst: Reg::W(0),
             src: Expr::Intrinsic {
-                name: "rev32".to_string(),
+                name: "rev32".into(),
                 operands: vec![Expr::Reg(Reg::W(1))],
             },
         }];
@@ -7186,7 +7158,7 @@ mod tests {
         let stmts = vec![Stmt::Assign {
             dst: Reg::W(0),
             src: Expr::Intrinsic {
-                name: "cnt".to_string(),
+                name: "cnt".into(),
                 operands: vec![Expr::Reg(Reg::W(1))],
             },
         }];
@@ -7222,7 +7194,7 @@ mod tests {
             Stmt::Assign {
                 dst: Reg::W(0),
                 src: Expr::Intrinsic {
-                    name: "movk".to_string(),
+                    name: "movk".into(),
                     operands: vec![
                         Expr::Reg(Reg::W(0)),
                         Expr::Shl(Box::new(Expr::Imm(0x5555)), Box::new(Expr::Imm(16))),
@@ -7246,7 +7218,7 @@ mod tests {
         let mut compiler = JitCompiler::new(JitConfig::default());
         // UBFX W0, W1, #4, #8 → extract 8 bits starting at bit 4
         let stmts = vec![Stmt::Intrinsic {
-            name: "ubfx".to_string(),
+            name: "ubfx".into(),
             operands: vec![
                 Expr::Reg(Reg::W(0)),
                 Expr::Reg(Reg::W(1)),
@@ -7272,7 +7244,7 @@ mod tests {
         let mut compiler = JitCompiler::new(JitConfig::default());
         // SBFX W0, W1, #4, #8 → signed extract
         let stmts = vec![Stmt::Intrinsic {
-            name: "sbfx".to_string(),
+            name: "sbfx".into(),
             operands: vec![
                 Expr::Reg(Reg::W(0)),
                 Expr::Reg(Reg::W(1)),
@@ -7304,7 +7276,7 @@ mod tests {
         let mut compiler = JitCompiler::new(JitConfig::default());
         // EXTR W0, W1, W2, #16 → (W1:W2 >> 16)[31:0]
         let stmts = vec![Stmt::Intrinsic {
-            name: "extr".to_string(),
+            name: "extr".into(),
             operands: vec![
                 Expr::Reg(Reg::W(0)),
                 Expr::Reg(Reg::W(1)),
@@ -7454,7 +7426,7 @@ mod tests {
         // UBFIZ X0, X1, #8, #4  → X0 = (X1 & 0xF) << 8
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![Stmt::Intrinsic {
-            name: "ubfiz".to_string(),
+            name: "ubfiz".into(),
             operands: vec![
                 Expr::Reg(Reg::X(0)),
                 Expr::Reg(Reg::X(1)),
@@ -7475,7 +7447,7 @@ mod tests {
         // SBFIZ X0, X1, #4, #8  → X0 = sign_extend(X1[7:0]) << 4
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![Stmt::Intrinsic {
-            name: "sbfiz".to_string(),
+            name: "sbfiz".into(),
             operands: vec![
                 Expr::Reg(Reg::X(0)),
                 Expr::Reg(Reg::X(1)),
@@ -7507,7 +7479,7 @@ mod tests {
         // BFI X0, X1, #8, #4  → X0[11:8] = X1[3:0], other bits preserved
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![Stmt::Intrinsic {
-            name: "bfi".to_string(),
+            name: "bfi".into(),
             operands: vec![
                 Expr::Reg(Reg::X(0)),
                 Expr::Reg(Reg::X(1)),
@@ -7530,7 +7502,7 @@ mod tests {
         // BFXIL X0, X1, #8, #4  → X0[3:0] = X1[11:8], other bits preserved
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![Stmt::Intrinsic {
-            name: "bfxil".to_string(),
+            name: "bfxil".into(),
             operands: vec![
                 Expr::Reg(Reg::X(0)),
                 Expr::Reg(Reg::X(1)),
@@ -7666,7 +7638,7 @@ mod tests {
         let stmts = vec![Stmt::Assign {
             dst: Reg::V(0),
             src: Expr::Intrinsic {
-                name: "ucvtf.2d".to_string(),
+                name: "ucvtf.2d".into(),
                 operands: vec![Expr::Reg(Reg::V(1))],
             },
         }];
@@ -7692,7 +7664,7 @@ mod tests {
         let stmts = vec![Stmt::Assign {
             dst: Reg::V(0),
             src: Expr::Intrinsic {
-                name: "fcvtzu.2d".to_string(),
+                name: "fcvtzu.2d".into(),
                 operands: vec![Expr::Reg(Reg::V(1))],
             },
         }];
@@ -7713,7 +7685,7 @@ mod tests {
     fn umull2_4s_multiplies_upper_half_u16_lanes_by_scalar_lane() {
         let mut compiler = JitCompiler::new(JitConfig::default());
         let stmts = vec![Stmt::Intrinsic {
-            name: "umull2.4s".to_string(),
+            name: "umull2.4s".into(),
             operands: vec![
                 Expr::Reg(Reg::V(0)),
                 Expr::Reg(Reg::V(1)),
@@ -7859,7 +7831,7 @@ mod tests {
             Stmt::Assign {
                 dst: Reg::W(0),
                 src: Expr::Intrinsic {
-                    name: "adc".to_string(),
+                    name: "adc".into(),
                     operands: vec![Expr::Reg(Reg::W(0)), Expr::Reg(Reg::W(1))],
                 },
             },
@@ -7894,7 +7866,7 @@ mod tests {
             Stmt::Assign {
                 dst: Reg::W(0),
                 src: Expr::Intrinsic {
-                    name: "sbc".to_string(),
+                    name: "sbc".into(),
                     operands: vec![Expr::Reg(Reg::W(0)), Expr::Reg(Reg::W(1))],
                 },
             },
@@ -7921,7 +7893,7 @@ mod tests {
         let stmts = vec![Stmt::Assign {
             dst: Reg::X(2),
             src: Expr::Intrinsic {
-                name: "umulh".to_string(),
+                name: "umulh".into(),
                 operands: vec![Expr::Reg(Reg::X(0)), Expr::Reg(Reg::X(1))],
             },
         }];
@@ -7960,7 +7932,7 @@ mod tests {
         let stmts = vec![Stmt::Assign {
             dst: Reg::X(2),
             src: Expr::Intrinsic {
-                name: "smulh".to_string(),
+                name: "smulh".into(),
                 operands: vec![Expr::Reg(Reg::X(0)), Expr::Reg(Reg::X(1))],
             },
         }];
@@ -8014,7 +7986,7 @@ mod tests {
             Stmt::Assign {
                 dst: Reg::X(0),
                 src: Expr::Intrinsic {
-                    name: "ngc".to_string(),
+                    name: "ngc".into(),
                     operands: vec![Expr::Reg(Reg::X(1))],
                 },
             },
@@ -8251,7 +8223,7 @@ mod tests {
             stmts.push(Stmt::Assign {
                 dst: Reg::V(i),
                 src: Expr::Intrinsic {
-                    name: "and".to_string(),
+                    name: "and".into(),
                     operands: vec![Expr::Reg(Reg::V(i)), Expr::Reg(Reg::V(i))],
                 },
             });
@@ -8512,7 +8484,7 @@ mod tests {
             stmts.push(Stmt::Assign {
                 dst: Reg::V(i),
                 src: Expr::Intrinsic {
-                    name: "and".to_string(),
+                    name: "and".into(),
                     operands: vec![Expr::Reg(Reg::V(i)), Expr::Reg(Reg::V((i + 1) % 32))],
                 },
             });
