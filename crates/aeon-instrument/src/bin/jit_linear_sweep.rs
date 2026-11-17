@@ -7,7 +7,6 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-const DEFAULT_BASE: u64 = 0x9b5f_e000;
 const DEFAULT_INSTRUCTION_LIMIT: usize = 0x50_000;
 const MAX_BLOCK_INSNS: usize = 256;
 
@@ -176,22 +175,21 @@ impl Config {
     where
         I: Iterator<Item = String>,
     {
-        let mut input = PathBuf::from("capture/manual/jit_exec_alias_0x9b5fe000.bin");
-        let mut output =
-            PathBuf::from("capture/manual/jit_exec_alias_0x9b5fe000.first_0x50000_blocks.il.jsonl");
-        let mut base = DEFAULT_BASE;
+        let mut input = None;
+        let mut output = None;
+        let mut base = None;
         let mut instructions = DEFAULT_INSTRUCTION_LIMIT;
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--input" => {
-                    input = PathBuf::from(next_arg(&mut args, "--input")?);
+                    input = Some(PathBuf::from(next_arg(&mut args, "--input")?));
                 }
                 "--output" => {
-                    output = PathBuf::from(next_arg(&mut args, "--output")?);
+                    output = Some(PathBuf::from(next_arg(&mut args, "--output")?));
                 }
                 "--base" => {
-                    base = parse_u64(&next_arg(&mut args, "--base")?)?;
+                    base = Some(parse_u64(&next_arg(&mut args, "--base")?)?);
                 }
                 "--instructions" => {
                     instructions = parse_usize(&next_arg(&mut args, "--instructions")?)?;
@@ -205,6 +203,10 @@ impl Config {
                 }
             }
         }
+
+        let input = input.ok_or("missing required argument: --input")?;
+        let base = base.ok_or("missing required argument: --base")?;
+        let output = output.unwrap_or_else(|| input.with_extension("blocks.il.jsonl"));
 
         Ok(Self {
             input,
@@ -2417,6 +2419,6 @@ fn format_bytes_le(word: u32) -> String {
 
 fn print_usage() {
     eprintln!(
-        "usage: jit_linear_sweep [--input PATH] [--output PATH] [--base ADDR] [--instructions COUNT]"
+        "usage: jit_linear_sweep --input PATH --base ADDR [--output PATH] [--instructions COUNT]"
     );
 }

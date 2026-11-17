@@ -95,7 +95,7 @@ With Phase 2 Extended (+ Batch):
 | Workload | Current | Phase 2 | Target |
 |----------|---------|---------|--------|
 | Loop-heavy (loops_cond) | 1× | 2× | 4× |
-| Breadth-heavy (NMSS) | 1× | 1.8× | 2.5× |
+| Breadth-heavy | 1× | 1.8× | 2.5× |
 | Sequential (hello) | 1× | 1.0× | 1.0× |
 | Average mixed | 1× | 1.5-2× | 2-3× |
 

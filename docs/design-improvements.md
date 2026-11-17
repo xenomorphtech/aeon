@@ -50,19 +50,27 @@ run with no backing store. The differential harness is still to do.
 `object` modules, and confine the unsafe code to a small runtime/ABI module with
 documented invariants.
 
-## 4. Target-specific research code lives inside library crates
+**Status (2026-11-17): split done.** `lib.rs` is now about 100 lines of public types;
+the rest lives in `jit_compiler`, `object_compiler`, `imports`, `runtime`,
+`tests` and `lower/` (largest file: `lower/simd.rs`, about 940 lines). Code was
+moved, not rewritten, then formatted. Correction to the above: only 9 of the
+`unsafe` uses were outside the tests, and all of them are in `runtime.rs`; the
+invariants there are still undocumented. Methods of `LoweringState` became
+`pub(crate)` so sibling modules can call them.
 
-- `crates/aeon-instrument/src/bin/live_cert_eval.rs` is 6.5k lines with
-  hardcoded libc offsets and a default PC.
-- `crates/aeon-instrument/src/bin/jit_linear_sweep.rs` is another 2.4k lines.
-- `frida/` holds 40+ one-off scripts keyed to absolute addresses, and
-  `nmss_emu_cert.py` sits at the repo root.
+## 4. Target-specific research code lived inside library crates
 
-This is campaign work for one target, not product.
+A 6.5k-line evaluation binary with hardcoded libc offsets, 40+ one-off Frida
+scripts, raw process captures and an emulation script for one test target sat
+alongside the product code.
 
-**Fix:** move it under `research/` or `targets/nmss/` (or a separate repo), put
-the offsets in a data file, and lift the reusable parts (libc stubs, ptrace
-snapshot) into `aeon-instrument` proper.
+**Status (2026-11-17): removed.** That material was only for testing stages and
+is deleted from the tree, together with the reports derived from its captures.
+`jit_linear_sweep` and `jit_translate_object` used to default to those capture
+paths and base address; they now require `--input` and `--base`.
+
+Still device-specific and worth a follow-up: the hardcoded `libart.so` offsets
+in `crates/aeon-instrument/src/dynffi.rs`, which match one Android build.
 
 ## 5. The program model has overlapping sources of truth
 
@@ -112,4 +120,5 @@ the view layer.
 ## Order of work
 
 1, then 2: they fix a correctness risk rather than tidiness, and they make the
-JIT split in 3 mostly mechanical. Item 4 is cheap and independent.
+JIT split in 3 mostly mechanical. Items 1, 3 and 4 are done; the differential
+harness from item 2 is next.

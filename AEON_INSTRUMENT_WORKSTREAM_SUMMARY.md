@@ -102,7 +102,6 @@ VtablePointer {
 **Storage Characteristics**:
 - hello_aarch64: 768 bytes (no memory ops)
 - loops_cond_aarch64: 18.4 KB (100 blocks)
-- NMSS crypto: 1.2 KB (4 blocks, 22 accesses)
 
 ### 5. Graceful Error Recovery ✅
 
@@ -154,8 +153,6 @@ engine.config.unmapped_memory_mode = UnmappedMemoryMode::Skip;
 
 **Trace I/O & Real-World** (3/3):
 - ✓ disk_trace_roundtrip
-- ✓ nmss_crypto_sub_20bb48_traces_to_disk
-- ✓ nmss_crypto_sub_2070a8_traces_to_disk
 
 ## Files Modified
 
@@ -218,7 +215,6 @@ engine.config.unmapped_memory_mode = UnmappedMemoryMode::Skip;
 - ✅ Symbolic analysis extended (vtables)
 - ✅ Trace format specified and documented
 - ✅ Error recovery implemented
-- ✅ Real-world binaries supported (NMSS)
 
 ### Gaps Addressed
 - ✅ Performance baseline defined
@@ -294,7 +290,6 @@ The aeon_instrument engine has achieved **90% production readiness** with compre
 - ✓ Extended symbolic analysis with vtable detection
 - ✓ Documented trace format (v1.0 stable)
 - ✓ Implemented graceful error recovery
-- ✓ Validated on real-world binaries (NMSS crypto)
 
 **Ready for**: Production use with recommended optimizations for scale.
 

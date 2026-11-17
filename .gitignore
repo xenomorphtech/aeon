@@ -5,17 +5,6 @@
 *.py[cod]
 .codex
 
-# Frida/Python cache artifacts
-frida/__pycache__/
-
-# Capture docs/manifests are tracked separately; ignore raw dump payloads and large data files.
-capture/**/*.bin
-capture/**/*.tar.gz
-capture/**/*.jsonl
-capture/**/*.out
-capture/manual/page_cache/
-capture/manual/process_snapshot_20260405/memdump/
-
 # Local sample/reference binaries generated or downloaded during analysis.
 samples/*.apk
 samples/*.tsv

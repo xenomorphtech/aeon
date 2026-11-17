@@ -1,8 +1,7 @@
 use aeon_instrument::translate::{
     compact_map_jsonl_path, compact_map_path, format_compact_map_jsonl, format_trap_block_log,
     link_object_with, load_symbol_map, rebase_text_symbol_map, translate_blob, trap_log_path,
-    FullMapMetadata, TranslationArtifactKind, TranslationConfig, TranslationMode, DEFAULT_BASE,
-    DEFAULT_DEST, DEFAULT_INPUT, DEFAULT_OUTPUT_ELF, DEFAULT_OUTPUT_MAP, DEFAULT_OUTPUT_OBJ,
+    FullMapMetadata, TranslationArtifactKind, TranslationConfig, TranslationMode, DEFAULT_DEST,
 };
 use std::env;
 use std::fs;
@@ -126,13 +125,13 @@ impl Config {
     where
         I: Iterator<Item = String>,
     {
-        let mut input = PathBuf::from(DEFAULT_INPUT);
-        let mut output_obj = PathBuf::from(DEFAULT_OUTPUT_OBJ);
-        let mut output_elf = PathBuf::from(DEFAULT_OUTPUT_ELF);
-        let mut output_map = PathBuf::from(DEFAULT_OUTPUT_MAP);
+        let mut input = None;
+        let mut output_obj = None;
+        let mut output_elf = None;
+        let mut output_map = None;
         let mut output_compact_map = None;
         let mut output_compact_map_jsonl = None;
-        let mut base = DEFAULT_BASE;
+        let mut base = None;
         let mut dest = DEFAULT_DEST;
         let mut instructions = None;
         let mut mode = TranslationMode::Full;
@@ -141,10 +140,16 @@ impl Config {
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
-                "--input" => input = PathBuf::from(next_arg(&mut args, "--input")?),
-                "--output-obj" => output_obj = PathBuf::from(next_arg(&mut args, "--output-obj")?),
-                "--output-elf" => output_elf = PathBuf::from(next_arg(&mut args, "--output-elf")?),
-                "--output-map" => output_map = PathBuf::from(next_arg(&mut args, "--output-map")?),
+                "--input" => input = Some(PathBuf::from(next_arg(&mut args, "--input")?)),
+                "--output-obj" => {
+                    output_obj = Some(PathBuf::from(next_arg(&mut args, "--output-obj")?))
+                }
+                "--output-elf" => {
+                    output_elf = Some(PathBuf::from(next_arg(&mut args, "--output-elf")?))
+                }
+                "--output-map" => {
+                    output_map = Some(PathBuf::from(next_arg(&mut args, "--output-map")?))
+                }
                 "--output-compact-map" => {
                     output_compact_map =
                         Some(PathBuf::from(next_arg(&mut args, "--output-compact-map")?))
@@ -153,7 +158,7 @@ impl Config {
                     output_compact_map_jsonl =
                         Some(PathBuf::from(next_arg(&mut args, "--output-compact-map-jsonl")?))
                 }
-                "--base" => base = parse_u64(&next_arg(&mut args, "--base")?)?,
+                "--base" => base = Some(parse_u64(&next_arg(&mut args, "--base")?)?),
                 "--dest" => dest = parse_u64(&next_arg(&mut args, "--dest")?)?,
                 "--instructions" => {
                     instructions = Some(parse_usize(&next_arg(&mut args, "--instructions")?)?)
@@ -168,6 +173,14 @@ impl Config {
                 other => return Err(format!("unknown argument: {other}")),
             }
         }
+
+        let input = input.ok_or("missing required argument: --input")?;
+        let base = base.ok_or("missing required argument: --base")?;
+        // Outputs default to sidecars of the input: `<input stem>.translated.*`.
+        let sidecar = |ext: &str| input.with_extension(format!("translated.{ext}"));
+        let output_obj = output_obj.unwrap_or_else(|| sidecar("o"));
+        let output_elf = output_elf.unwrap_or_else(|| sidecar("elf"));
+        let output_map = output_map.unwrap_or_else(|| sidecar("map.json"));
 
         Ok(Self {
             input,
@@ -225,7 +238,7 @@ fn parse_mode(value: &str) -> Result<TranslationMode, String> {
 
 fn print_usage() {
     eprintln!(
-        "usage: jit_translate_object [--input BIN] [--base ADDR] [--dest ADDR] [--instructions N] [--mode full|branch-only] [--output-obj PATH] [--output-elf PATH] [--output-map PATH] [--output-compact-map PATH] [--output-compact-map-jsonl PATH] [--linker PATH] [--skip-link]"
+        "usage: jit_translate_object --input BIN --base ADDR [--dest ADDR] [--instructions N] [--mode full|branch-only] [--output-obj PATH] [--output-elf PATH] [--output-map PATH] [--output-compact-map PATH] [--output-compact-map-jsonl PATH] [--linker PATH] [--skip-link]"
     );
 }
 
@@ -237,7 +250,15 @@ mod tests {
     #[test]
     fn default_compact_map_is_sidecar_to_output_map() {
         let config = Config::parse(
-            ["--output-map".to_string(), "/tmp/out.map.json".to_string()].into_iter(),
+            [
+                "--input".to_string(),
+                "/tmp/in.bin".to_string(),
+                "--base".to_string(),
+                "0x1000".to_string(),
+                "--output-map".to_string(),
+                "/tmp/out.map.json".to_string(),
+            ]
+            .into_iter(),
         )
         .expect("parse");
         assert_eq!(
@@ -254,6 +275,10 @@ mod tests {
     fn parse_skip_link_and_linker() {
         let config = Config::parse(
             [
+                "--input".to_string(),
+                "/tmp/in.bin".to_string(),
+                "--base".to_string(),
+                "0x1000".to_string(),
                 "--skip-link".to_string(),
                 "--linker".to_string(),
                 "/tmp/ld.lld".to_string(),
@@ -262,6 +287,7 @@ mod tests {
         )
         .expect("parse");
         assert!(config.skip_link);
+        assert_eq!(config.output_elf, PathBuf::from("/tmp/in.translated.elf"));
         assert_eq!(config.linker, Some(PathBuf::from("/tmp/ld.lld")));
     }
 }

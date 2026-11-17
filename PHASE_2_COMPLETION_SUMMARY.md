@@ -139,7 +139,6 @@ Example: 100 blocks with 50% repeat rate
 
 ### Tests & Examples
 - `crates/aeon-instrument/tests/engine_integration.rs` (2 config updates)
-- `crates/aeon-instrument/examples/frida_trace.rs` (1 config update)
 
 ## How to Use Phase 2 Optimizations
 
