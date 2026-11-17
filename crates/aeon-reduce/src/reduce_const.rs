@@ -6,6 +6,10 @@ use aeonil::{BranchCond, Expr, Stmt};
 
 /// Recursively fold constant expressions within an expression tree.
 pub fn fold_expr(expr: &Expr) -> Expr {
+    if let Some(folded) = fold_movk_clearing_a_field(expr) {
+        return folded;
+    }
+
     // First, recursively fold all sub-expressions
     let folded = expr.map_subexprs(|e| fold_expr(e));
 
@@ -35,7 +39,10 @@ pub fn fold_expr(expr: &Expr) -> Expr {
             _ => folded,
         },
         Expr::Div(a, b) => match (a.as_ref(), b.as_ref()) {
-            (Expr::Imm(a), Expr::Imm(b)) if *b != 0 => Expr::Imm(a.wrapping_div(*b)),
+            // Signed: `MIN / -1` wraps to `MIN`, as on the CPU.
+            (Expr::Imm(a), Expr::Imm(b)) if *b != 0 => {
+                Expr::Imm((*a as i64).wrapping_div(*b as i64) as u64)
+            }
             _ => folded,
         },
         Expr::UDiv(a, b) => match (a.as_ref(), b.as_ref()) {
@@ -75,34 +82,20 @@ pub fn fold_expr(expr: &Expr) -> Expr {
         },
 
         // --- Shifts ---
+        // A shift by a register takes the amount modulo the width, and that
+        // is what `Shl`/`Lsr`/`Asr` mean in every engine. Constants are only
+        // ever forwarded from X registers, so the width here is 64.
         Expr::Shl(a, b) => match (a.as_ref(), b.as_ref()) {
-            (Expr::Imm(a), Expr::Imm(b)) => {
-                if *b < 64 {
-                    Expr::Imm(a.wrapping_shl(*b as u32))
-                } else {
-                    Expr::Imm(0)
-                }
-            }
+            (Expr::Imm(a), Expr::Imm(b)) => Expr::Imm(a.wrapping_shl((*b % 64) as u32)),
             _ => folded,
         },
         Expr::Lsr(a, b) => match (a.as_ref(), b.as_ref()) {
-            (Expr::Imm(a), Expr::Imm(b)) => {
-                if *b < 64 {
-                    Expr::Imm(a.wrapping_shr(*b as u32))
-                } else {
-                    Expr::Imm(0)
-                }
-            }
+            (Expr::Imm(a), Expr::Imm(b)) => Expr::Imm(a.wrapping_shr((*b % 64) as u32)),
             _ => folded,
         },
         Expr::Asr(a, b) => match (a.as_ref(), b.as_ref()) {
             (Expr::Imm(a), Expr::Imm(b)) => {
-                if *b < 64 {
-                    Expr::Imm((*a as i64).wrapping_shr(*b as u32) as u64)
-                } else {
-                    // Arithmetic shift: all sign bits
-                    Expr::Imm((*a as i64).wrapping_shr(63) as u64)
-                }
+                Expr::Imm((*a as i64).wrapping_shr((*b % 64) as u32) as u64)
             }
             _ => folded,
         },
@@ -127,6 +120,35 @@ pub fn fold_expr(expr: &Expr) -> Expr {
     }
 }
 
+/// `movk x, #0, lsl #s` clears a 16-bit field. Its immediate is lifted as
+/// `Shl(Imm(0), Imm(s))`; folding that to `Imm(0)` would lose which field, so
+/// it is kept as written, or the whole `movk` is folded if the old value is
+/// known. Returns `None` for any other expression.
+fn fold_movk_clearing_a_field(expr: &Expr) -> Option<Expr> {
+    let Expr::Intrinsic { name, operands } = expr else {
+        return None;
+    };
+    if name.op() != aeonil::IntrinsicOp::Movk || operands.len() != 2 {
+        return None;
+    }
+    let Expr::Shl(value, shift) = &operands[1] else {
+        return None;
+    };
+    let (Expr::Imm(0), Expr::Imm(shift)) = (value.as_ref(), shift.as_ref()) else {
+        return None;
+    };
+    if *shift == 0 || *shift >= 64 {
+        return None;
+    }
+    Some(match fold_expr(&operands[0]) {
+        Expr::Imm(old) => Expr::Imm(old & !(0xffffu64 << shift)),
+        old => Expr::Intrinsic {
+            name: name.clone(),
+            operands: vec![old, operands[1].clone()],
+        },
+    })
+}
+
 fn fold_movk(dst: u64, src: u64) -> Option<u64> {
     let shift = if src == 0 {
         0
@@ -140,6 +162,29 @@ fn fold_movk(dst: u64, src: u64) -> Option<u64> {
     let imm16 = (src >> shift) & 0xffff;
     let mask = 0xffffu64 << shift;
     Some((dst & !mask) | ((imm16 << shift) & mask))
+}
+
+/// Applies `f` to the operands of a flag-setting expression, leaving the
+/// expression's own shape alone.
+///
+/// The top-level operator of a `SetFlags` says how the flags are computed:
+/// `Sub(x, 0)` sets carry, `Add(x, 0)` clears it, an `Imm` is a literal
+/// NZCV, and a `CondSelect` picks between two such expressions (`ccmp`).
+/// Simplifying `Sub(x, 0)` to `x`, or `Sub(5, 5)` to `0`, would change them.
+pub(crate) fn map_flag_operands(expr: &Expr, f: &dyn Fn(&Expr) -> Expr) -> Expr {
+    match expr {
+        Expr::CondSelect {
+            cond,
+            if_true,
+            if_false,
+        } => Expr::CondSelect {
+            cond: *cond,
+            if_true: Box::new(map_flag_operands(if_true, f)),
+            if_false: Box::new(map_flag_operands(if_false, f)),
+        },
+        Expr::Imm(_) => expr.clone(),
+        other => other.map_subexprs(|operand| f(operand)),
+    }
 }
 
 /// Fold expressions inside a `BranchCond`.
@@ -171,7 +216,7 @@ fn fold_stmt(stmt: Stmt) -> Stmt {
             size,
         },
         Stmt::SetFlags { expr } => Stmt::SetFlags {
-            expr: fold_expr(&expr),
+            expr: map_flag_operands(&expr, &fold_expr),
         },
         Stmt::CondBranch {
             cond,

@@ -392,6 +392,101 @@ pub const CASES: &[Case] = &[
         words: &[0x10000069, 0xd61f0120, 0xd2800028, 0xd280004a],
     },
     Case {
+        name: "const_w_shift",
+        asm: "mov w1, #-1; lsr w8, w1, #4; asr w9, w1, #4; mov w2, #0x80000000; asr w10, w2, #8; ror w11, w2, #4; lsr x12, x1, #4",
+        words: &[0x12800001, 0x53047c28, 0x13047c29, 0x52b00002, 0x13087c4a, 0x1382104b, 0xd344fc2c],
+    },
+    Case {
+        name: "const_w_shift_reg",
+        asm: "mov w1, #-1; mov w2, #36; lsr w8, w1, w2; lsl w9, w1, w2; asr w10, w1, w2; mov x3, #-1; mov x4, #68; lsr x11, x3, x4",
+        words: &[0x12800001, 0x52800482, 0x1ac22428, 0x1ac22029, 0x1ac2282a, 0x92800003, 0xd2800884, 0x9ac4246b],
+    },
+    Case {
+        name: "const_div",
+        asm: "mov w1, #-6; mov w2, #4; sdiv w8, w1, w2; udiv w9, w1, w2; mov x3, #-6; mov x4, #4; sdiv x10, x3, x4; udiv x11, x3, x4",
+        words: &[0x128000a1, 0x52800082, 0x1ac20c28, 0x1ac20829, 0x928000a3, 0xd2800084, 0x9ac40c6a, 0x9ac4086b],
+    },
+    Case {
+        name: "const_copy_redefined",
+        asm: "mov x1, #5; mov x2, x1; mov x1, #7; add x8, x2, x1; mov x9, x2; mov x3, x0; add x0, x0, #1; mov x10, x3",
+        words: &[0xd28000a1, 0xaa0103e2, 0xd28000e1, 0x8b010048, 0xaa0203e9, 0xaa0003e3, 0x91000400, 0xaa0303ea],
+    },
+    Case {
+        name: "const_w_alias",
+        asm: "mov x1, #-1; mov w1, #5; add x8, x1, #1; mov x2, #0x56780000; movk x2, #0x1234, lsl #32; add w2, w2, #1; add x9, x2, #0",
+        words: &[0x92800001, 0x528000a1, 0x91000428, 0xd2aacf02, 0xf2c24682, 0x11000442, 0x91000049],
+    },
+    Case {
+        name: "const_adr",
+        asm: "adr x1, .; add x8, x1, #0x10; sub x9, x1, #4; mov x1, x0; add x10, x1, #0x10",
+        words: &[0x10000001, 0x91004028, 0xd1001029, 0xaa0003e1, 0x9100402a],
+    },
+    Case {
+        name: "movk_chain",
+        asm: "mov x8, #0x1234; movk x8, #0x5678, lsl #16; movk x8, #0, lsl #32; movk x8, #0x9abc, lsl #48; mov w9, #0xffff; movk w9, #0, lsl #16; movk w9, #0x12",
+        words: &[0xd2824688, 0xf2aacf08, 0xf2c00008, 0xf2f35788, 0x529fffe9, 0x72a00009, 0x72800249],
+    },
+    Case {
+        name: "movk_after_intrinsic",
+        asm: "mov x8, #1; adcs x8, x0, x1; movk x8, #0x55, lsl #16; mov x9, #2; ld1 {v0.16b}, [x20], #16; mov x10, x20",
+        words: &[0xd2800028, 0xba010008, 0xf2a00aa8, 0xd2800049, 0x4cdf7280, 0xaa1403ea],
+    },
+    Case {
+        name: "tst_branch_conditions",
+        asm: "tst x0, x1; mov x8, #0; b.hi 1f; orr x8, x8, #1; 1: b.cs 2f; orr x8, x8, #2; 2: b.ge 3f; orr x8, x8, #4; 3: b.mi 4f; orr x8, x8, #8; 4: b.eq 5f; orr x8, x8, #16; 5: mov x9, x8",
+        words: &[0xea01001f, 0xd2800008, 0x54000048, 0xb2400108, 0x54000042, 0xb27f0108, 0x5400004a, 0xb27e0108, 0x54000044, 0xb27d0108, 0x54000040, 0xb27c0108, 0xaa0803e9],
+    },
+    Case {
+        name: "tst_w_branch_conditions",
+        asm: "tst w0, w1; mov x8, #0; b.mi 1f; orr x8, x8, #1; 1: b.gt 2f; orr x8, x8, #2; 2: b.ls 3f; orr x8, x8, #4; 3: mov x9, x8",
+        words: &[0x6a01001f, 0xd2800008, 0x54000044, 0xb2400108, 0x5400004c, 0xb27f0108, 0x54000049, 0xb27e0108, 0xaa0803e9],
+    },
+    Case {
+        name: "cmn_branch_conditions",
+        asm: "cmn x0, x1; mov x8, #0; b.ge 1f; orr x8, x8, #1; 1: b.cs 2f; orr x8, x8, #2; 2: b.vs 3f; orr x8, x8, #4; 3: b.eq 4f; orr x8, x8, #8; 4: b.mi 5f; orr x8, x8, #16; 5: mov x9, x8",
+        words: &[0xab01001f, 0xd2800008, 0x5400004a, 0xb2400108, 0x54000042, 0xb27f0108, 0x54000046, 0xb27e0108, 0x54000040, 0xb27d0108, 0x54000044, 0xb27c0108, 0xaa0803e9],
+    },
+    Case {
+        name: "cmn_w_branch_conditions",
+        asm: "cmn w0, w1; mov x8, #0; b.mi 1f; orr x8, x8, #1; 1: b.eq 2f; orr x8, x8, #2; 2: b.lt 3f; orr x8, x8, #4; 3: mov x9, x8",
+        words: &[0x2b01001f, 0xd2800008, 0x54000044, 0xb2400108, 0x54000040, 0xb27f0108, 0x5400004b, 0xb27e0108, 0xaa0803e9],
+    },
+    Case {
+        name: "cmp_operand_redefined",
+        asm: "cmp x0, x1; mov x0, x2; b.lt 1f; mov x8, #1; b 2f; 1: mov x8, #2; 2: mov x9, x8",
+        words: &[0xeb01001f, 0xaa0203e0, 0x5400006b, 0xd2800028, 0x14000002, 0xd2800048, 0xaa0803e9],
+    },
+    Case {
+        name: "cmp_w_operand_redefined",
+        asm: "cmp w0, w1; add x1, x1, #1; b.eq 1f; mov x8, #1; b 2f; 1: mov x8, #2; 2: mov x9, x8",
+        words: &[0x6b01001f, 0x91000421, 0x54000060, 0xd2800028, 0x14000002, 0xd2800048, 0xaa0803e9],
+    },
+    Case {
+        name: "cmp_operand_loaded_over",
+        asm: "str x0, [x20]; cmp x0, x1; ldr x0, [x20, #8]; b.hi 1f; mov x8, #1; b 2f; 1: mov x8, #2; 2: mov x9, x0",
+        words: &[0xf9000280, 0xeb01001f, 0xf9400680, 0x54000068, 0xd2800028, 0x14000002, 0xd2800048, 0xaa0003e9],
+    },
+    Case {
+        name: "flags_across_blocks",
+        asm: "cmp x0, x1; cbz x2, 1f; add x8, x2, #1; 1: cset x9, lt; csel x10, x0, x1, hi; b.ne 2f; mov x11, #1; 2: adc x12, x3, x4",
+        words: &[0xeb01001f, 0xb4000042, 0x91000448, 0x9a9fa7e9, 0x9a81800a, 0x54000041, 0xd280002b, 0x9a04006c],
+    },
+    Case {
+        name: "cmp_zero",
+        asm: "cmp x0, #0; cset x8, hi; cset x9, ge; cmn x1, #0; cset x10, cs; cmp w2, #0; b.ls 1f; mov x11, #1; 1: adds x12, x3, #0; cset x13, cs",
+        words: &[0xf100001f, 0x9a9f97e8, 0x9a9fb7e9, 0xb100003f, 0x9a9f37ea, 0x7100005f, 0x54000049, 0xd280002b, 0xb100006c, 0x9a9f37ed],
+    },
+    Case {
+        name: "cmp_known_constants",
+        asm: "mov x1, #5; cmp x1, #5; cset x8, eq; cset x9, cs; mov x2, #-1; cmn x2, #1; cset x10, cs; cset x11, eq; mov x3, #7; tst x3, #8; cset x12, eq; cmp x1, x3; ccmp x1, x2, #4, lo; cset x13, ne",
+        words: &[0xd28000a1, 0xf100143f, 0x9a9f17e8, 0x9a9f37e9, 0x92800002, 0xb100045f, 0x9a9f37ea, 0x9a9f17eb, 0xd28000e3, 0xf27d007f, 0x9a9f17ec, 0xeb03003f, 0xfa423024, 0x9a9f07ed],
+    },
+    Case {
+        name: "flags_overwritten",
+        asm: "cmp x0, x1; cmp x2, x3; cset x8, lt; adds x9, x0, x1; subs x10, x2, x3; cset x11, cs",
+        words: &[0xeb01001f, 0xeb03005f, 0x9a9fa7e8, 0xab010009, 0xeb03004a, 0x9a9f37eb],
+    },
+    Case {
         name: "br_ret",
         asm: "adr x30, 1f; ret; mov x8, #1; 1: mov x10, #2",
         words: &[0x1000007e, 0xd65f03c0, 0xd2800028, 0xd280004a],

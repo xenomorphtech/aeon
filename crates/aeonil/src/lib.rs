@@ -1,6 +1,7 @@
 /// AeonIL — a BNIL-like intermediate language for ARM64.
 
 mod intrinsic;
+pub mod simd;
 
 pub use intrinsic::{IntrinsicName, IntrinsicOp, VectorArrangement};
 

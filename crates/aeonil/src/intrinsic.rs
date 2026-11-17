@@ -126,6 +126,11 @@ intrinsic_ops! {
     Fcvtau => "fcvtau",
     Fcmla => "fcmla",
     Fmulx => "fmulx",
+    // Vector forms; the scalar forms are `Expr::FAdd` and friends.
+    Fadd => "fadd",
+    Fsub => "fsub",
+    Fmul => "fmul",
+    Fdiv => "fdiv",
 
     // SIMD bitwise
     And => "and",
@@ -146,6 +151,7 @@ intrinsic_ops! {
     Dup => "dup",
     Umov => "umov",
     Ld1 => "ld1",
+    Ld1r => "ld1r",
     St1 => "st1",
 
     // SIMD arithmetic and compare
@@ -167,12 +173,43 @@ intrinsic_ops! {
     Rev64 => "rev64",
     Mla => "mla",
     Mls => "mls",
+    Umull => "umull",
     Umull2 => "umull2",
-    Umlal2 => "umlal2",
-    Umlsl2 => "umlsl2",
+    Smull => "smull",
     Smull2 => "smull2",
+    Umlal => "umlal",
+    Umlal2 => "umlal2",
+    Smlal => "smlal",
+    Smlal2 => "smlal2",
+    Umlsl => "umlsl",
+    Umlsl2 => "umlsl2",
+    Smlsl => "smlsl",
+    Smlsl2 => "smlsl2",
     Sqrdmlah => "sqrdmlah",
     Sqrdmlsh => "sqrdmlsh",
+
+    // SIMD narrowing, permutes and table lookup
+    Xtn => "xtn",
+    Xtn2 => "xtn2",
+    Zip1 => "zip1",
+    Zip2 => "zip2",
+    Uzp1 => "uzp1",
+    Uzp2 => "uzp2",
+    Trn1 => "trn1",
+    Trn2 => "trn2",
+    Ext => "ext",
+    Tbl => "tbl",
+    Tbx => "tbx",
+
+    // SIMD reductions: one result from all lanes, or from adjacent pairs
+    Addv => "addv",
+    Umaxv => "umaxv",
+    Uminv => "uminv",
+    Smaxv => "smaxv",
+    Sminv => "sminv",
+    Uaddlv => "uaddlv",
+    Saddlv => "saddlv",
+    Addp => "addp",
 
     // SIMD shifts
     Shl => "shl",
@@ -186,7 +223,13 @@ intrinsic_ops! {
     Sqshlu => "sqshlu",
     Uqshl => "uqshl",
     Uxtl => "uxtl",
+    Uxtl2 => "uxtl2",
+    Sxtl => "sxtl",
+    Sxtl2 => "sxtl2",
+    Ushll => "ushll",
     Ushll2 => "ushll2",
+    Sshll => "sshll",
+    Sshll2 => "sshll2",
     Uqrshrn2 => "uqrshrn2",
 }
 

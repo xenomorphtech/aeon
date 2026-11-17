@@ -2,11 +2,11 @@
 //! 12-bit page offset into a fully-resolved 64-bit address constant, which
 //! downstream passes can use for direct memory references or symbol lookup.
 
-use aeonil::{BranchCond, Expr, Stmt};
+use aeonil::{BranchCond, Expr, Reg, Stmt};
 use std::cell::Cell;
 
-use crate::env::RegisterEnv;
-use crate::reduce_const::fold_expr;
+use crate::env::{regs_in, RegisterEnv};
+use crate::reduce_const::{fold_expr, map_flag_operands};
 
 fn fold_adr_add_with_count(expr: &Expr) -> (Expr, usize) {
     let count = Cell::new(0usize);
@@ -97,36 +97,48 @@ fn resolve_stmt_exprs_with_count(stmt: Stmt, env: &RegisterEnv) -> (Stmt, usize)
             )
         }
         Stmt::SetFlags { expr } => {
-            let (expr, count) = resolve_and_fold_with_count(&expr, env);
-            (Stmt::SetFlags { expr }, count)
+            // Only the operands: the operator decides how flags are set.
+            let count = Cell::new(0usize);
+            let expr = map_flag_operands(&expr, &|operand| {
+                let (operand, operand_count) = resolve_and_fold_with_count(operand, env);
+                count.set(count.get() + operand_count);
+                operand
+            });
+            (Stmt::SetFlags { expr }, count.get())
         }
         Stmt::Pair(a, b) => {
             let (a, a_count) = resolve_stmt_exprs_with_count(*a, env);
             let (b, b_count) = resolve_stmt_exprs_with_count(*b, env);
             (Stmt::Pair(Box::new(a), Box::new(b)), a_count + b_count)
         }
-        Stmt::Intrinsic { name, operands } => {
-            let mut count = 0usize;
-            let operands = operands
-                .iter()
-                .map(|e| {
-                    let (operand, operand_count) = resolve_and_fold_with_count(e, env);
-                    count += operand_count;
-                    operand
-                })
-                .collect();
-            (Stmt::Intrinsic { name, operands }, count)
-        }
+        // Statement intrinsics are left alone: an operand may be a register
+        // the intrinsic writes, and a constant cannot stand in for that.
         // Ret, Nop, Barrier, Trap: no expressions to resolve
         other => (other, 0),
     }
 }
 
-/// Forward-propagate ADRP/ADR values through register assignments and fold
-/// `Add(AdrpImm(page), Imm(offset))` into `Imm(page + offset)`.
+/// A value that may replace a read of the register it was assigned to.
+///
+/// Only 64-bit constants in X registers qualify. Anything else changes
+/// meaning when moved:
+/// - an expression over registers is wrong once one of them is redefined
+///   (`x29 = sp` after `sp` moved);
+/// - AeonIL infers an operation's width from its register operands, so a
+///   constant in place of a W register turns a 32-bit shift or division
+///   into a 64-bit one;
+/// - a float constant read through a general-purpose register is a bit
+///   pattern, not that float.
+fn is_forwardable(dst: &Reg, value: &Expr) -> bool {
+    matches!(dst, Reg::X(_)) && matches!(value, Expr::Imm(_) | Expr::AdrpImm(_) | Expr::AdrImm(_))
+}
+
+/// Forward-propagate ADRP/ADR values and other 64-bit constants through
+/// register assignments and fold `Add(AdrpImm(page), Imm(offset))` into
+/// `Imm(page + offset)`.
 ///
 /// This is the main entry point.  It walks the statement list in order,
-/// maintaining a `RegisterEnv` that maps registers to their known symbolic
+/// maintaining a `RegisterEnv` that maps X registers to their known constant
 /// values.  For each `Assign`, it resolves the source expression (substituting
 /// known register values), constant-folds, and then applies the ADRP+ADD
 /// pattern match.
@@ -143,7 +155,11 @@ pub(crate) fn resolve_adrp_add_with_stats(stmts: Vec<Stmt>) -> (Vec<Stmt>, usize
         match stmt {
             Stmt::Assign { dst, src } => {
                 let (folded, count) = resolve_and_fold_with_count(&src, &env);
-                env.assign(dst.clone(), folded.clone());
+                if is_forwardable(&dst, &folded) {
+                    env.assign(dst.clone(), folded.clone());
+                } else {
+                    env.remove(&dst);
+                }
                 result.push(Stmt::Assign { dst, src: folded });
                 resolutions += count;
             }
@@ -163,7 +179,16 @@ pub(crate) fn resolve_adrp_add_with_stats(stmts: Vec<Stmt>) -> (Vec<Stmt>, usize
                     target: resolved_target,
                 });
                 env.invalidate_caller_saved();
+                env.remove(&Reg::X(30));
                 resolutions += count;
+            }
+            Stmt::Intrinsic { name, operands } => {
+                // It may write any register it names (a destination, or the
+                // base of a post-indexed load).
+                for reg in operands.iter().flat_map(regs_in) {
+                    env.remove(&reg);
+                }
+                result.push(Stmt::Intrinsic { name, operands });
             }
             other => {
                 let (stmt, count) = resolve_stmt_exprs_with_count(other, &env);

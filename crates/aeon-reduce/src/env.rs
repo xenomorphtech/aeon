@@ -7,6 +7,55 @@ use std::collections::{HashMap, HashSet};
 
 use aeonil::{Expr, Reg};
 
+/// True if `pred` holds for `expr` or any expression nested in it.
+pub(crate) fn expr_any(expr: &Expr, pred: &dyn Fn(&Expr) -> bool) -> bool {
+    if pred(expr) {
+        return true;
+    }
+    let found = std::cell::Cell::new(false);
+    let _ = expr.map_subexprs(|sub| {
+        if !found.get() && expr_any(sub, pred) {
+            found.set(true);
+        }
+        sub.clone()
+    });
+    found.get()
+}
+
+/// Every register `expr` mentions, in no particular order.
+pub(crate) fn regs_in(expr: &Expr) -> Vec<Reg> {
+    fn walk(expr: &Expr, out: &RefCell<Vec<Reg>>) {
+        if let Expr::Reg(reg) = expr {
+            out.borrow_mut().push(reg.clone());
+        }
+        let _ = expr.map_subexprs(|sub| {
+            walk(sub, out);
+            sub.clone()
+        });
+    }
+    let out = RefCell::new(Vec::new());
+    walk(expr, &out);
+    out.into_inner()
+}
+
+/// True if writing `a` changes what reading `b` returns: the same register,
+/// or two views of one (`w3`/`x3`, `d5`/`v5`).
+pub(crate) fn regs_alias(a: &Reg, b: &Reg) -> bool {
+    fn slot(reg: &Reg) -> Option<(bool, u8)> {
+        match reg {
+            Reg::X(n) | Reg::W(n) => Some((false, *n)),
+            Reg::V(n) | Reg::Q(n) | Reg::D(n) | Reg::S(n) | Reg::H(n) | Reg::VByte(n) => {
+                Some((true, *n))
+            }
+            _ => None,
+        }
+    }
+    match (slot(a), slot(b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => a == b,
+    }
+}
+
 /// Forward symbolic register state tracker.
 /// Handles ARM64 W/X register aliasing: writing W(n) invalidates X(n) and vice versa.
 pub struct RegisterEnv {

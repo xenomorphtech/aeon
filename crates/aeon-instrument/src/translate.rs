@@ -1373,9 +1373,9 @@ fn finalize_block(
     let transformed = transform_calls_and_rets(std::mem::take(&mut current.raw_stmts), return_addr);
     current.start = 0;
     // Compile the IL as lifted. `aeon_reduce`'s block-local pipeline is for
-    // readable IL and does not preserve behaviour (it drops flag updates
-    // that are still read, among other things); see the `ReducedJit` entries
-    // in aeon-jit's differential test.
+    // readable IL; it gains nothing here, since Cranelift does its own
+    // folding, and it would put a second transformation between the lifter
+    // and the compiled code.
     let trap = match transformed.as_slice() {
         [Stmt::Trap { kind, imm }] => Some((*kind, *imm)),
         _ => None,

@@ -9,7 +9,7 @@ use aeonil::{Expr, Stmt};
 use crate::reduce_adrp::resolve_adrp_add_with_stats;
 use crate::reduce_const::fold_constants;
 use crate::reduce_ext::fold_extensions;
-use crate::reduce_flags::{eliminate_dead_flags, fuse_flags_with_stats};
+use crate::reduce_flags::{eliminate_dead_flags, eliminate_dead_flags_cfg, fuse_flags_with_stats};
 use crate::reduce_movk::resolve_movk_chains_with_stats;
 use crate::reduce_pair::flatten_pairs;
 use crate::reduce_stack::{detect_prologue, recognize_stack_frame, rewrite_stack_accesses};
@@ -89,6 +89,8 @@ pub fn reduce_function_cfg(instructions: &[(u64, Stmt, Vec<u64>)]) -> Cfg {
     for block in &mut cfg.blocks {
         block.stmts = reduce_block_local(std::mem::take(&mut block.stmts));
     }
+    // A block cannot tell whether its flags are read later; the function can.
+    eliminate_dead_flags_cfg(&mut cfg);
 
     let prologue = cfg
         .blocks
@@ -123,6 +125,7 @@ pub fn reduce_function_cfg_with_metrics(
         metrics.flag_fusions += block_metrics.flag_fusions;
         metrics.movk_chain_resolutions += block_metrics.movk_chain_resolutions;
     }
+    eliminate_dead_flags_cfg(&mut cfg);
 
     let prologue = cfg
         .blocks

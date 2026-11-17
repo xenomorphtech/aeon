@@ -26,8 +26,12 @@ pub fn optimize_ssa(func: &mut SsaFunction) {
         // 1. SCCP: propagate constants, identify dead branches
         changed |= sccp::run(func, &mut use_def);
 
-        // 2. Dead branch/block elimination
-        changed |= dead_branch::run(func, &mut use_def);
+        // 2. Dead branch/block elimination. Removing blocks renumbers the
+        // rest, and the use/def map locates statements by block id.
+        if dead_branch::run(func, &mut use_def) {
+            changed = true;
+            use_def = UseDefMap::build(func);
+        }
 
         // 3. Copy propagation + phi simplification
         changed |= copy_prop::run(func, &mut use_def);

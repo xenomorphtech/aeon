@@ -13,6 +13,7 @@ mod expr;
 mod flags;
 mod intrinsic_expr;
 mod intrinsic_stmt;
+mod lanes;
 mod regs;
 mod simd;
 
@@ -438,7 +439,6 @@ pub(crate) enum SimdKind {
 
 #[derive(Clone, Copy)]
 pub(crate) enum VectorShiftKind {
-    Ushr,
     Urshr,
     Usra,
     Ursra,
@@ -446,8 +446,6 @@ pub(crate) enum VectorShiftKind {
     Sri,
     Sqshlu,
     Uqshl,
-    Uxtl,
-    Ushll2,
 }
 
 pub(crate) fn reg_type(reg: &Reg) -> Result<Type, JitError> {

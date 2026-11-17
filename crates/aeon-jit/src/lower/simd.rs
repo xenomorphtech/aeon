@@ -1,7 +1,7 @@
 use crate::imports::Imports;
 use crate::lower::{
-    base_reg_operand, parse_single_multi_reg_operand, vector_lane_type, vector_type_for_layout,
-    LoweredValue, LoweringState, VectorShiftKind,
+    parse_single_multi_reg_operand, vector_lane_type, vector_type_for_layout, LoweredValue,
+    LoweringState, VectorShiftKind,
 };
 use crate::JitError;
 use aeonil::{Expr, IntrinsicName, Reg};
@@ -13,64 +13,6 @@ use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
 impl LoweringState {
-    pub(crate) fn lower_vector_mul_acc_intrinsic(
-        &mut self,
-        module: &mut impl Module,
-        builder: &mut FunctionBuilder<'_>,
-        imports: &Imports,
-        name: &IntrinsicName,
-        operands: &[Expr],
-        subtract: bool,
-    ) -> Result<(), JitError> {
-        if operands.len() < 3 {
-            return Err(JitError::UnsupportedStmt("vector mul-acc operand count"));
-        }
-        let dst_reg = match &operands[0] {
-            Expr::Reg(reg) => reg.clone(),
-            _ => return Err(JitError::UnsupportedStmt("vector mul-acc dest")),
-        };
-        let layout = name
-            .arrangement()
-            .ok_or(JitError::UnsupportedStmt("vector mul-acc arrangement"))?;
-        let vec_ty = vector_type_for_layout(layout)?;
-        let lane_ty = vector_lane_type(layout.lane_bits)?;
-
-        let dst = self.lower_expr(module, builder, imports, &operands[0], Some(I8X16))?;
-        let dst = self.coerce_value(builder, dst, I8X16)?;
-        let dst_vec = self.bitcast_value(builder, vec_ty, dst.value, dst.ty);
-
-        let src = self.lower_expr(module, builder, imports, &operands[1], Some(I8X16))?;
-        let src = self.coerce_value(builder, src, I8X16)?;
-        let src_vec = self.bitcast_value(builder, vec_ty, src.value, src.ty);
-
-        let scalar = self.lower_expr(module, builder, imports, &operands[2], Some(lane_ty))?;
-        let scalar = self.coerce_int(builder, scalar, lane_ty)?;
-
-        let zero_lane = self.zero_for_type(builder, lane_ty)?;
-        let mut out = builder.ins().splat(vec_ty, zero_lane);
-        for lane in 0..layout.lanes {
-            let acc = builder.ins().extractlane(dst_vec, lane);
-            let mul_lhs = builder.ins().extractlane(src_vec, lane);
-            let product = builder.ins().imul(mul_lhs, scalar.value);
-            let value = if subtract {
-                builder.ins().isub(acc, product)
-            } else {
-                builder.ins().iadd(acc, product)
-            };
-            out = builder.ins().insertlane(out, value, lane);
-        }
-
-        let result = self.bitcast_value(builder, I8X16, out, vec_ty);
-        self.write_reg(
-            builder,
-            &dst_reg,
-            LoweredValue {
-                value: result,
-                ty: I8X16,
-            },
-        )
-    }
-
     pub(crate) fn lower_sqrdmlx_stmt_intrinsic(
         &mut self,
         module: &mut impl Module,
@@ -129,52 +71,6 @@ impl LoweringState {
         }
 
         let result = self.bitcast_value(builder, I8X16, out, I16X8);
-        self.write_reg(
-            builder,
-            &dst_reg,
-            LoweredValue {
-                value: result,
-                ty: I8X16,
-            },
-        )
-    }
-
-    pub(crate) fn lower_vector_immediate_stmt_intrinsic(
-        &mut self,
-        builder: &mut FunctionBuilder<'_>,
-        name: &IntrinsicName,
-        operands: &[Expr],
-        invert: bool,
-    ) -> Result<(), JitError> {
-        if operands.len() < 2 {
-            return Err(JitError::UnsupportedStmt("vector immediate operand count"));
-        }
-        let dst_reg = match &operands[0] {
-            Expr::Reg(reg) => reg.clone(),
-            _ => return Err(JitError::UnsupportedStmt("vector immediate dest")),
-        };
-        let layout = name
-            .arrangement()
-            .ok_or(JitError::UnsupportedStmt("vector immediate arrangement"))?;
-        let vec_ty = vector_type_for_layout(layout)?;
-        let lane_ty = vector_lane_type(layout.lane_bits)?;
-        let imm = match operands[1] {
-            Expr::Imm(value) => value,
-            _ => return Err(JitError::UnsupportedStmt("vector immediate value")),
-        };
-        let lane_mask = if layout.lane_bits == 64 {
-            u64::MAX
-        } else {
-            (1u64 << layout.lane_bits) - 1
-        };
-        let lane_imm = if invert {
-            (!imm) & lane_mask
-        } else {
-            imm & lane_mask
-        };
-        let lane_value = self.iconst(builder, lane_ty, lane_imm)?;
-        let vec = builder.ins().splat(vec_ty, lane_value);
-        let result = self.bitcast_value(builder, I8X16, vec, vec_ty);
         self.write_reg(
             builder,
             &dst_reg,
@@ -510,204 +406,7 @@ impl LoweringState {
             }
         }
 
-        if let (Some(base_reg), Some(Expr::Imm(writeback))) =
-            (base_reg_operand(&operands[1]), operands.get(2))
-        {
-            let current = self.read_reg(builder, &base_reg)?;
-            let current = self.coerce_int(builder, current, self.pointer_type)?;
-            let value = builder.ins().iadd_imm(current.value, *writeback as i64);
-            self.write_reg(
-                builder,
-                &base_reg,
-                LoweredValue {
-                    value,
-                    ty: self.pointer_type,
-                },
-            )?;
-        }
-
-        Ok(())
-    }
-
-    pub(crate) fn lower_widening_lane_mul_acc_intrinsic(
-        &mut self,
-        module: &mut impl Module,
-        builder: &mut FunctionBuilder<'_>,
-        imports: &Imports,
-        operands: &[Expr],
-        signed: bool,
-        subtract: bool,
-    ) -> Result<(), JitError> {
-        if operands.len() < 3 {
-            return Err(JitError::UnsupportedStmt(
-                "widening lane mul-acc operand count",
-            ));
-        }
-        let dst_reg = match &operands[0] {
-            Expr::Reg(reg) => reg.clone(),
-            _ => return Err(JitError::UnsupportedStmt("widening lane mul-acc dest")),
-        };
-        let dst = self.lower_expr(module, builder, imports, &operands[0], Some(I8X16))?;
-        let dst = self.coerce_value(builder, dst, I8X16)?;
-        let src_vec = self.lower_expr(module, builder, imports, &operands[1], Some(I8X16))?;
-        let src_vec = self.coerce_value(builder, src_vec, I8X16)?;
-        let scalar_ty = self
-            .infer_expr_type(&operands[2])
-            .filter(|ty| ty.is_int())
-            .unwrap_or(types::I16);
-        let scalar = self.lower_expr(module, builder, imports, &operands[2], Some(scalar_ty))?;
-        let scalar = self.coerce_int(builder, scalar, scalar_ty)?;
-
-        let result = match scalar_ty {
-            types::I16 => {
-                let acc_vec = self.bitcast_value(builder, I32X4, dst.value, dst.ty);
-                let lanes = self.bitcast_value(builder, I16X8, src_vec.value, src_vec.ty);
-                let scalar = if signed {
-                    builder.ins().sextend(types::I32, scalar.value)
-                } else {
-                    builder.ins().uextend(types::I32, scalar.value)
-                };
-                let mut out = acc_vec;
-                for lane in 0..4 {
-                    let acc = builder.ins().extractlane(out, lane);
-                    let lane_value = builder.ins().extractlane(lanes, lane + 4);
-                    let lane_value = if signed {
-                        builder.ins().sextend(types::I32, lane_value)
-                    } else {
-                        builder.ins().uextend(types::I32, lane_value)
-                    };
-                    let product = builder.ins().imul(lane_value, scalar);
-                    let value = if subtract {
-                        builder.ins().isub(acc, product)
-                    } else {
-                        builder.ins().iadd(acc, product)
-                    };
-                    out = builder.ins().insertlane(out, value, lane);
-                }
-                self.bitcast_value(builder, I8X16, out, I32X4)
-            }
-            types::I32 => {
-                let acc_vec = self.bitcast_value(builder, I64X2, dst.value, dst.ty);
-                let lanes = self.bitcast_value(builder, I32X4, src_vec.value, src_vec.ty);
-                let scalar = if signed {
-                    builder.ins().sextend(types::I64, scalar.value)
-                } else {
-                    builder.ins().uextend(types::I64, scalar.value)
-                };
-                let mut out = acc_vec;
-                for lane in 0..2 {
-                    let acc = builder.ins().extractlane(out, lane);
-                    let lane_value = builder.ins().extractlane(lanes, lane + 2);
-                    let lane_value = if signed {
-                        builder.ins().sextend(types::I64, lane_value)
-                    } else {
-                        builder.ins().uextend(types::I64, lane_value)
-                    };
-                    let product = builder.ins().imul(lane_value, scalar);
-                    let value = if subtract {
-                        builder.ins().isub(acc, product)
-                    } else {
-                        builder.ins().iadd(acc, product)
-                    };
-                    out = builder.ins().insertlane(out, value, lane);
-                }
-                self.bitcast_value(builder, I8X16, out, I64X2)
-            }
-            _ => {
-                return Err(JitError::UnsupportedStmt(
-                    "widening lane mul-acc scalar width",
-                ))
-            }
-        };
-
-        self.write_reg(
-            builder,
-            &dst_reg,
-            LoweredValue {
-                value: result,
-                ty: I8X16,
-            },
-        )
-    }
-
-    pub(crate) fn lower_widening_lane_mul_intrinsic(
-        &mut self,
-        module: &mut impl Module,
-        builder: &mut FunctionBuilder<'_>,
-        imports: &Imports,
-        operands: &[Expr],
-        signed: bool,
-    ) -> Result<(), JitError> {
-        if operands.len() < 3 {
-            return Err(JitError::UnsupportedStmt("widening lane mul operand count"));
-        }
-        let dst_reg = match &operands[0] {
-            Expr::Reg(reg) => reg.clone(),
-            _ => return Err(JitError::UnsupportedStmt("widening lane mul dest")),
-        };
-        let src_vec = self.lower_expr(module, builder, imports, &operands[1], Some(I8X16))?;
-        let src_vec = self.coerce_value(builder, src_vec, I8X16)?;
-        let scalar_ty = self
-            .infer_expr_type(&operands[2])
-            .filter(|ty| ty.is_int())
-            .unwrap_or(types::I16);
-        let scalar = self.lower_expr(module, builder, imports, &operands[2], Some(scalar_ty))?;
-        let scalar = self.coerce_int(builder, scalar, scalar_ty)?;
-
-        let result = match scalar_ty {
-            types::I16 => {
-                let lanes = self.bitcast_value(builder, I16X8, src_vec.value, src_vec.ty);
-                let scalar = if signed {
-                    builder.ins().sextend(types::I32, scalar.value)
-                } else {
-                    builder.ins().uextend(types::I32, scalar.value)
-                };
-                let zero = builder.ins().iconst(types::I32, 0);
-                let mut out = builder.ins().splat(I32X4, zero);
-                for lane in 0..4 {
-                    let lane_value = builder.ins().extractlane(lanes, lane + 4);
-                    let lane_value = if signed {
-                        builder.ins().sextend(types::I32, lane_value)
-                    } else {
-                        builder.ins().uextend(types::I32, lane_value)
-                    };
-                    let product = builder.ins().imul(lane_value, scalar);
-                    out = builder.ins().insertlane(out, product, lane);
-                }
-                self.bitcast_value(builder, I8X16, out, I32X4)
-            }
-            types::I32 => {
-                let lanes = self.bitcast_value(builder, I32X4, src_vec.value, src_vec.ty);
-                let scalar = if signed {
-                    builder.ins().sextend(types::I64, scalar.value)
-                } else {
-                    builder.ins().uextend(types::I64, scalar.value)
-                };
-                let zero = builder.ins().iconst(types::I64, 0);
-                let mut out = builder.ins().splat(I64X2, zero);
-                for lane in 0..2 {
-                    let lane_value = builder.ins().extractlane(lanes, lane + 2);
-                    let lane_value = if signed {
-                        builder.ins().sextend(types::I64, lane_value)
-                    } else {
-                        builder.ins().uextend(types::I64, lane_value)
-                    };
-                    let product = builder.ins().imul(lane_value, scalar);
-                    out = builder.ins().insertlane(out, product, lane);
-                }
-                self.bitcast_value(builder, I8X16, out, I64X2)
-            }
-            _ => return Err(JitError::UnsupportedStmt("widening lane mul scalar width")),
-        };
-
-        self.write_reg(
-            builder,
-            &dst_reg,
-            LoweredValue {
-                value: result,
-                ty: I8X16,
-            },
-        )
+        self.lower_simd_writeback(module, builder, imports, operands)
     }
 
     pub(crate) fn lower_vector_shift_stmt_intrinsic(
@@ -736,75 +435,31 @@ impl LoweringState {
         let dst_input = self.coerce_value(builder, dst_input, I8X16)?;
         let dst_vec = self.bitcast_value(builder, vec_ty, dst_input.value, dst_input.ty);
 
-        let src_index = if matches!(kind, VectorShiftKind::Uxtl | VectorShiftKind::Ushll2) {
-            1
-        } else {
-            1
-        };
-        let src = self.lower_expr(module, builder, imports, &operands[src_index], Some(I8X16))?;
+        let src = self.lower_expr(module, builder, imports, &operands[1], Some(I8X16))?;
         let src = self.coerce_value(builder, src, I8X16)?;
 
-        let shift = match kind {
-            VectorShiftKind::Uxtl => 0,
-            VectorShiftKind::Ushll2 => match operands.get(2) {
-                Some(Expr::Imm(value)) => u8::try_from(*value)
-                    .map_err(|_| JitError::UnsupportedStmt("vector shift amount"))?,
-                _ => return Err(JitError::UnsupportedStmt("vector shift amount")),
-            },
-            _ => match operands.get(2) {
-                Some(Expr::Imm(value)) => u8::try_from(*value)
-                    .map_err(|_| JitError::UnsupportedStmt("vector shift amount"))?,
-                _ => return Err(JitError::UnsupportedStmt("vector shift amount")),
-            },
+        let shift = match operands.get(2) {
+            Some(Expr::Imm(value)) => u8::try_from(*value)
+                .map_err(|_| JitError::UnsupportedStmt("vector shift amount"))?,
+            _ => return Err(JitError::UnsupportedStmt("vector shift amount")),
         };
 
         let zero_lane = self.zero_for_type(builder, lane_ty)?;
         let mut out = builder.ins().splat(vec_ty, zero_lane);
-        match kind {
-            VectorShiftKind::Uxtl | VectorShiftKind::Ushll2 => {
-                let src_lane_bits = layout.lane_bits / 2;
-                let src_vec_ty = match src_lane_bits {
-                    8 => I8X16,
-                    16 => I16X8,
-                    32 => I32X4,
-                    _ => return Err(JitError::UnsupportedStmt("uxtl source layout")),
-                };
-                let src_vec = self.bitcast_value(builder, src_vec_ty, src.value, src.ty);
-                let start_lane = if matches!(kind, VectorShiftKind::Ushll2) {
-                    layout.lanes
-                } else {
-                    0
-                };
-                for lane in 0..layout.lanes {
-                    let value = builder.ins().extractlane(src_vec, lane + start_lane);
-                    let widened = builder.ins().uextend(lane_ty, value);
-                    let widened = if shift == 0 {
-                        widened
-                    } else if u32::from(shift) >= lane_ty.bits() {
-                        zero_lane
-                    } else {
-                        builder.ins().ishl_imm(widened, i64::from(shift))
-                    };
-                    out = builder.ins().insertlane(out, widened, lane);
-                }
-            }
-            _ => {
-                let src_vec = self.bitcast_value(builder, vec_ty, src.value, src.ty);
-                for lane in 0..layout.lanes {
-                    let src_lane = builder.ins().extractlane(src_vec, lane);
-                    let dst_lane = builder.ins().extractlane(dst_vec, lane);
-                    let value = self.lower_vector_shift_lane(
-                        builder,
-                        lane_ty,
-                        src_lane,
-                        dst_lane,
-                        layout.lane_bits,
-                        shift,
-                        kind,
-                    )?;
-                    out = builder.ins().insertlane(out, value, lane);
-                }
-            }
+        let src_vec = self.bitcast_value(builder, vec_ty, src.value, src.ty);
+        for lane in 0..layout.lanes {
+            let src_lane = builder.ins().extractlane(src_vec, lane);
+            let dst_lane = builder.ins().extractlane(dst_vec, lane);
+            let value = self.lower_vector_shift_lane(
+                builder,
+                lane_ty,
+                src_lane,
+                dst_lane,
+                layout.lane_bits,
+                shift,
+                kind,
+            )?;
+            out = builder.ins().insertlane(out, value, lane);
         }
 
         let result = self.bitcast_value(builder, I8X16, out, vec_ty);
@@ -853,7 +508,6 @@ impl LoweringState {
             };
 
         Ok(match kind {
-            VectorShiftKind::Ushr => shifted(builder, src_lane, shift),
             VectorShiftKind::Urshr => rounded_shift(builder, src_lane, shift)?,
             VectorShiftKind::Usra => {
                 let addend = shifted(builder, src_lane, shift);
@@ -938,9 +592,6 @@ impl LoweringState {
                         .icmp(IntCC::UnsignedGreaterThan, src_lane, threshold)
                 };
                 builder.ins().select(overflow, all_ones, shifted)
-            }
-            VectorShiftKind::Uxtl | VectorShiftKind::Ushll2 => {
-                unreachable!("uxtl/ushll2 handled separately")
             }
         })
     }

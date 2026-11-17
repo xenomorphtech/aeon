@@ -27,14 +27,55 @@ impl LoweringState {
             | IntrinsicOp::Prfm
             | IntrinsicOp::Prfum
             | IntrinsicOp::Clrex => Ok(()),
-            IntrinsicOp::Ushr => self.lower_vector_shift_stmt_intrinsic(
-                module,
-                builder,
-                imports,
-                name,
-                operands,
-                VectorShiftKind::Ushr,
-            ),
+            IntrinsicOp::Mov
+            | IntrinsicOp::Movi
+            | IntrinsicOp::Mvni
+            | IntrinsicOp::Dup
+            | IntrinsicOp::Not
+            | IntrinsicOp::Mvn
+            | IntrinsicOp::Neg
+            | IntrinsicOp::Abs
+            | IntrinsicOp::Cnt
+            | IntrinsicOp::And
+            | IntrinsicOp::Orr
+            | IntrinsicOp::Eor
+            | IntrinsicOp::Bic
+            | IntrinsicOp::Orn
+            | IntrinsicOp::Add
+            | IntrinsicOp::Sub
+            | IntrinsicOp::Mul
+            | IntrinsicOp::Cmeq
+            | IntrinsicOp::Cmhi
+            | IntrinsicOp::Cmhs
+            | IntrinsicOp::Cmgt
+            | IntrinsicOp::Cmge
+            | IntrinsicOp::Umax
+            | IntrinsicOp::Umin
+            | IntrinsicOp::Smax
+            | IntrinsicOp::Smin
+            | IntrinsicOp::Fadd
+            | IntrinsicOp::Fsub
+            | IntrinsicOp::Fmul
+            | IntrinsicOp::Fdiv
+            | IntrinsicOp::Mla
+            | IntrinsicOp::Mls
+            | IntrinsicOp::Bsl
+            | IntrinsicOp::Bit
+            | IntrinsicOp::Bif
+            | IntrinsicOp::Shl
+            | IntrinsicOp::Ushr
+            | IntrinsicOp::Sshr => {
+                self.lower_lane_stmt_intrinsic(module, builder, imports, name, operands)
+            }
+            IntrinsicOp::Rev16 => {
+                self.lower_lane_reverse_intrinsic(module, builder, imports, name, operands, 16)
+            }
+            IntrinsicOp::Rev32 => {
+                self.lower_lane_reverse_intrinsic(module, builder, imports, name, operands, 32)
+            }
+            IntrinsicOp::Rev64 => {
+                self.lower_lane_reverse_intrinsic(module, builder, imports, name, operands, 64)
+            }
             IntrinsicOp::Urshr => self.lower_vector_shift_stmt_intrinsic(
                 module,
                 builder,
@@ -91,33 +132,69 @@ impl LoweringState {
                 operands,
                 VectorShiftKind::Uqshl,
             ),
-            IntrinsicOp::Uxtl => self.lower_vector_shift_stmt_intrinsic(
-                module,
-                builder,
-                imports,
-                name,
-                operands,
-                VectorShiftKind::Uxtl,
-            ),
-            IntrinsicOp::Ushll2 => self.lower_vector_shift_stmt_intrinsic(
-                module,
-                builder,
-                imports,
-                name,
-                operands,
-                VectorShiftKind::Ushll2,
-            ),
+            IntrinsicOp::Uxtl
+            | IntrinsicOp::Uxtl2
+            | IntrinsicOp::Sxtl
+            | IntrinsicOp::Sxtl2
+            | IntrinsicOp::Ushll
+            | IntrinsicOp::Ushll2
+            | IntrinsicOp::Sshll
+            | IntrinsicOp::Sshll2
+            | IntrinsicOp::Umull
+            | IntrinsicOp::Umull2
+            | IntrinsicOp::Smull
+            | IntrinsicOp::Smull2
+            | IntrinsicOp::Umlal
+            | IntrinsicOp::Umlal2
+            | IntrinsicOp::Smlal
+            | IntrinsicOp::Smlal2
+            | IntrinsicOp::Umlsl
+            | IntrinsicOp::Umlsl2
+            | IntrinsicOp::Smlsl
+            | IntrinsicOp::Smlsl2 => {
+                self.lower_lane_widen_intrinsic(module, builder, imports, name, operands)
+            }
+            IntrinsicOp::Xtn => {
+                self.lower_lane_narrow_intrinsic(module, builder, imports, name, operands, false)
+            }
+            IntrinsicOp::Xtn2 => {
+                self.lower_lane_narrow_intrinsic(module, builder, imports, name, operands, true)
+            }
+            IntrinsicOp::Zip1
+            | IntrinsicOp::Zip2
+            | IntrinsicOp::Uzp1
+            | IntrinsicOp::Uzp2
+            | IntrinsicOp::Trn1
+            | IntrinsicOp::Trn2
+            | IntrinsicOp::Ext => {
+                self.lower_lane_permute_intrinsic(module, builder, imports, name, operands)
+            }
+            IntrinsicOp::Tbl => {
+                self.lower_table_lookup_intrinsic(module, builder, imports, name, operands, false)
+            }
+            IntrinsicOp::Tbx => {
+                self.lower_table_lookup_intrinsic(module, builder, imports, name, operands, true)
+            }
+            IntrinsicOp::Addv
+            | IntrinsicOp::Umaxv
+            | IntrinsicOp::Uminv
+            | IntrinsicOp::Smaxv
+            | IntrinsicOp::Sminv
+            | IntrinsicOp::Uaddlv
+            | IntrinsicOp::Saddlv => {
+                self.lower_lane_reduce_intrinsic(module, builder, imports, name, operands)
+            }
+            IntrinsicOp::Addp => {
+                self.lower_lane_pairwise_add_intrinsic(module, builder, imports, name, operands)
+            }
             IntrinsicOp::Ld1 => {
-                self.lower_ldst1_stmt_intrinsic(module, builder, imports, name, operands, true)
+                self.lower_ldst1_list_intrinsic(module, builder, imports, name, operands, true)
             }
             IntrinsicOp::St1 => {
-                self.lower_ldst1_stmt_intrinsic(module, builder, imports, name, operands, false)
+                self.lower_ldst1_list_intrinsic(module, builder, imports, name, operands, false)
             }
-            IntrinsicOp::Movi => {
-                self.lower_vector_immediate_stmt_intrinsic(builder, name, operands, false)
-            }
-            IntrinsicOp::Mvni => {
-                self.lower_vector_immediate_stmt_intrinsic(builder, name, operands, true)
+            IntrinsicOp::Ld1r => {
+                self.lower_ld1r_intrinsic(module, builder, imports, name, operands)
             }
             IntrinsicOp::Uqrshrn2 => {
                 self.lower_uqrshrn2_stmt_intrinsic(module, builder, imports, name, operands)
@@ -133,24 +210,6 @@ impl LoweringState {
             }
             IntrinsicOp::Sqrdmlsh => {
                 self.lower_sqrdmlx_stmt_intrinsic(module, builder, imports, name, operands, true)
-            }
-            IntrinsicOp::Mla => {
-                self.lower_vector_mul_acc_intrinsic(module, builder, imports, name, operands, false)
-            }
-            IntrinsicOp::Mls => {
-                self.lower_vector_mul_acc_intrinsic(module, builder, imports, name, operands, true)
-            }
-            IntrinsicOp::Umull2 => {
-                self.lower_widening_lane_mul_intrinsic(module, builder, imports, operands, false)
-            }
-            IntrinsicOp::Umlal2 => self.lower_widening_lane_mul_acc_intrinsic(
-                module, builder, imports, operands, false, false,
-            ),
-            IntrinsicOp::Umlsl2 => self.lower_widening_lane_mul_acc_intrinsic(
-                module, builder, imports, operands, false, true,
-            ),
-            IntrinsicOp::Smull2 => {
-                self.lower_widening_lane_mul_intrinsic(module, builder, imports, operands, true)
             }
             IntrinsicOp::Msr => {
                 // MSR nzcv, Xn  →  write flags from register

@@ -41,16 +41,19 @@ testing a first-class harness; `crates/aeon-jit/tests/roundtrip.rs` is a start.
 `BlockExecutor` are now one `Executor` with an `ExecMode`; a snippet is a block
 run with no backing store.
 
-`crates/aeon-jit/tests/differential.rs` runs 201 AArch64 snippets through
+`crates/aeon-jit/tests/differential.rs` runs 220 AArch64 snippets through
 Unicorn (the reference) and three engines over 35 input vectors: the
 interpreter, the JIT, and the JIT fed with IL reduced by
 `aeon_reduce::pipeline::reduce_block_local`.
 It compares x0-x30, SP, NZCV, v0-v31 and a data region mapped at the same
 address everywhere. Snippets can branch, so the interpreter and the JIT are
-driven block by block. Engines known to disagree are listed in the test's
-`KNOWN` table; the test fails on an unlisted disagreement and on a listed one
-that starts passing. `tests/differential/gen_cases.py` generates the case
+driven block by block. An engine known to disagree goes in the test's `KNOWN`
+table; the test fails on an unlisted disagreement and on a listed one that
+starts passing. `tests/differential/gen_cases.py` generates the case
 table; regenerating needs the `aarch64-linux-gnu` binutils, running does not.
+
+**`KNOWN` is empty (2026-11-17):** all three engines reproduce the reference
+on every case.
 
 Bugs it found and that are fixed:
 
@@ -79,25 +82,28 @@ Bugs it found and that are fixed:
   - A scalar FP write left the rest of the vector register in place.
   - `MOVK` with a constant-folded immediate inserted at bit 0.
   - CRC32 was missing.
+  - It had lowerings for lane-wise SIMD only as expression intrinsics, while
+    the lifter emits statements (`add.4s [dst, a, b]`). `lower/lanes.rs` now
+    lowers the statement form: lane-wise integer and floating-point
+    arithmetic, compares, shifts, bitwise selects, lane inserts, widening,
+    narrowing, permutes, table lookup, reductions, `LD1R`, and `LD1`/`ST1`
+    with register lists and register post-index.
 - Interpreter
   - `SDIV` divided unsigned; 32-bit shifts and rotates ran at 64 bits.
   - A load overlapping an earlier store returned the stale backing bytes.
   - Scalar FP writes and 64-bit arrangements kept the upper bytes of the
     vector register.
   - Missing: `ADC`/`SBC`/`NGC`, `EXTR`, `REV16`/`REV32`, `RET`, all scalar
-    floating point, and most lane-wise integer SIMD. All added.
+    floating point, and most SIMD. All added; the SIMD that is more than a
+    lane-by-lane map is in `emulation/vector.rs`.
+- Reducer: see item 8.
 
-What `KNOWN` still lists:
-
-- **Unsupported SIMD** (no wrong answers): 37 instructions in the
-  interpreter and 86 in the JIT. Both lack widening, narrowing, permutes,
-  table lookup, reductions and vector floating point. The JIT has lowerings
-  for many lane-wise operations, but as expression intrinsics; the lifter
-  emits statements (`add.4s [dst, a, b]`), which it does not accept.
-- **Reduced IL gives wrong results in 26 cases.** See item 8.
+Which lanes a widening or permuting instruction reads is decided once, in
+`aeonil::simd`, and used by both engines.
 
 Not covered yet: calls, system registers, exclusive and atomic memory
-operations, and SIMD beyond the instructions sampled.
+operations, and SIMD beyond the instructions sampled (saturating arithmetic,
+polynomial multiply, crypto, half-precision, most by-element forms).
 
 ## 3. `aeon-jit` is a single 8,640-line `lib.rs`
 
@@ -175,49 +181,61 @@ the view layer.
   the lifter, ELF and service paths, where a hostile binary should not kill a
   persistent session.
 
-## 8. The block-local reducer changes behaviour, and its output is compiled
+## 8. The block-local reducer changed behaviour
 
-Found by the differential test (item 2). `aeon-instrument` passed every block
-through `aeon_reduce::pipeline::reduce_block_local` before compiling it, and
-that pipeline is not semantics-preserving. Causes identified so far:
+Found by the differential test (item 2). `aeon_reduce::pipeline::reduce_block_local`
+was not semantics-preserving, and `aeon-instrument` compiled its output. Its
+output also feeds SSA, the API and `aeon-eval`, so the analyses saw the same
+wrong IL.
 
-- `fuse_flags` deletes a `SetFlags` when the next reader is a conditional
-  select, which still needs the flags, and `eliminate_dead_flags` treats flags
-  as dead at the end of a block, though a later block may read them. Neither
-  knows that `adc`/`sbc`, `ccmp` or `fccmp` read flags. `CMN` and `TST` are
-  fused into a `Compare` that is then evaluated as a subtraction (by reading
-  the code; the cases fail earlier for the reason above).
-- Constant folding turns `MIN / -1` into 0.
-- A register copy is forwarded past a redefinition of its source (`mov x29,
-  sp` after SP moved), into an operand that an intrinsic writes (the base of a
-  post-index `LD1`), and across a GPR-to-FP move as if the type were kept.
-- Folding `movk x, #0, lsl #16` to `movk(x, 0)` loses which field is cleared.
-  This is an IL problem: `MOVK` should be an `Insert`, not an intrinsic whose
-  shift is implied by its operand.
+**Status (2026-11-17): fixed.** The differential test runs the JIT on reduced
+IL and it matches Unicorn on every case. What was wrong, and what it does now:
 
-The passes were written to make IL readable, where dropping a `SetFlags` is
-harmless. Compiling their output needs a different contract.
+- **Flags.** A `SetFlags` was deleted when the next reader was a conditional
+  select, and flags counted as dead at the end of a block. Now `fuse_flags`
+  only rewrites the branch, and `eliminate_dead_flags` removes a `SetFlags`
+  by liveness: every reader is recognised (`csel`, `adc`/`sbc`, `adcs`,
+  `ccmp`, `fccmp`, `mrs nzcv`, unknown intrinsics), and flags are live at the
+  end of a block. `reduce_function_cfg` then removes the ones that are dead
+  across the function, assuming AAPCS64 at calls and returns.
+- **`CMN` and `TST`** were fused into a `Compare` that is evaluated as a
+  subtraction. They now become a comparison of the sum or the mask with
+  zero, and only for conditions that this reproduces.
+- **A compare fused past a redefinition of its operand** read the new value.
+  Fusion stops at any write to a register (or memory) the compare reads.
+- **Forwarding.** Any assigned expression was substituted into later uses:
+  past a redefinition of its source (`mov x29, sp` after SP moved), into an
+  operand an intrinsic writes, across a GPR-to-FP move, and through repeated
+  loads. Only 64-bit constants in X registers are forwarded now.
+- **Constant folding** treated `Div` as unsigned (`MIN / -1` gave 0), shifted
+  by the full amount instead of modulo the width, and simplified the
+  top-level operator of a `SetFlags` (`cmp x, #0` became a bare register,
+  `cmp` of two known constants became a literal NZCV of 0).
+- **`movk x, #0, lsl #16`** folded to `movk(x, 0)`, losing which field is
+  cleared. The shifted form is kept when the immediate is zero.
+- **SSA passes** removed unreachable blocks but kept indexing blocks by
+  their old ids, and crashed once a branch on constants became decidable.
+  Blocks are renumbered after removal.
 
-**Fix:** decide which it is. Either `aeon-instrument` stops reducing before
-compiling (Cranelift does its own folding), or the reducer gets a
-semantics-preserving mode: flags live out of a block unless proven otherwise,
-copy forwarding invalidated by any write to a register the copy mentions, and
-no forwarding into intrinsic operands. The pass manager in item 7 is where
-per-pass differential validation belongs.
+Two `aeon-eval` goldens had pinned wrong output (a `branch x1` that is a
+`branch x16`, a stack offset subtracted twice, `tst` as `== 1`) and are
+regenerated.
 
-**Status (2026-11-17): mitigated.** `aeon-instrument`'s translator now
-compiles the IL as lifted, so the compiled path no longer depends on the
-reducer. The reducer itself is unchanged: the differential test still runs
-the JIT on reduced IL and lists its 26 wrong results in `KNOWN`, and
-`jit_linear_sweep` still reduces, but only to display and round-trip IL. Any
-consumer that treats reduced IL as equivalent to the original (the analyses
-in `aeon`, `aeon-eval`) is exposed to the same causes.
+Still open, and the reason forwarding is so restricted: AeonIL infers an
+operation's width from its register operands, so replacing a W register with
+a constant changes a 32-bit shift or division into a 64-bit one. Explicit
+widths on `Expr` would make W-register constant propagation safe, and would
+let `MOVK` be an `Insert` instead of an intrinsic whose shift is implied by
+its operand.
+
+`aeon-instrument` still compiles the IL as lifted: Cranelift does its own
+folding, so reducing first gains nothing there.
 
 ## Order of work
 
 1, then 2: they fix a correctness risk rather than tidiness, and they make the
-JIT split in 3 mostly mechanical. Items 1 to 4 are done, and the differential
-test from item 2 covers scalar code, memory, branches and a sample of SIMD.
-Item 8 is mitigated for the compiled path. Next: SIMD coverage in the JIT
-(accept the statement form the lifter emits), making the reducer itself
-semantics-preserving, then items 5 and 6.
+JIT split in 3 mostly mechanical. Items 1 to 4 and 8 are done, and the
+differential test from item 2 covers scalar code, memory, branches, a sample
+of SIMD and the reducer, with no known disagreements. Next: items 5 and 6,
+then explicit widths in the IL (see item 8), and the pass manager from item 7
+with per-pass differential validation.

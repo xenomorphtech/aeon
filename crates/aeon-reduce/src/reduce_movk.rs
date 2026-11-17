@@ -117,6 +117,14 @@ pub(crate) fn resolve_movk_chains_with_stats(stmts: Vec<Stmt>) -> (Vec<Stmt>, us
             Stmt::Call { .. } => {
                 result.push(stmt);
                 env.invalidate_caller_saved();
+                env.remove(&aeonil::Reg::X(30));
+            }
+            Stmt::Intrinsic { operands, .. } => {
+                // It may write any register it names.
+                for reg in operands.iter().flat_map(crate::env::regs_in) {
+                    env.remove(&reg);
+                }
+                result.push(stmt);
             }
             _ => result.push(stmt),
         }

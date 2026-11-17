@@ -316,6 +316,26 @@ impl LoweringState {
                 lsb,
                 width,
             } => {
+                let dst_ty = self.infer_expr_type(dst);
+                if matches!(dst_ty, Some(ty) if ty.is_vector()) {
+                    // A lane of a vector register: `ins v3.s[1], w0`.
+                    let vec_ty = crate::lower::lanes::full_vector_type(*width)
+                        .map_err(|_| JitError::UnsupportedExpr("vector insert width"))?;
+                    let lane_ty = vec_ty.lane_type();
+                    if *lsb % *width != 0 || u16::from(*lsb) + u16::from(*width) > 128 {
+                        return Err(JitError::UnsupportedExpr("vector insert alignment"));
+                    }
+                    let vector = self.lower_expr(module, builder, imports, dst, Some(I8X16))?;
+                    let vector = self.coerce_value(builder, vector, I8X16)?;
+                    let vector = self.bitcast_value(builder, vec_ty, vector.value, vector.ty);
+                    let lane = self.lower_expr(module, builder, imports, src, Some(lane_ty))?;
+                    let lane = self.coerce_int(builder, lane, lane_ty)?;
+                    let inserted = builder.ins().insertlane(vector, lane.value, *lsb / *width);
+                    return Ok(LoweredValue {
+                        value: self.bitcast_value(builder, I8X16, inserted, vec_ty),
+                        ty: I8X16,
+                    });
+                }
                 let target = self.resolve_int_type(hint, Some(expr))?;
                 let dst = self.lower_expr(module, builder, imports, dst, Some(target))?;
                 let src = self.lower_expr(module, builder, imports, src, Some(target))?;
@@ -560,7 +580,7 @@ impl LoweringState {
 /// AArch64 returns the default NaN (sign clear) when an operation on non-NaN
 /// inputs is invalid, such as `0.0 / 0.0`. The host may set the sign bit, so
 /// replace a NaN that did not come from an operand.
-fn default_nan_if_generated(
+pub(crate) fn default_nan_if_generated(
     builder: &mut FunctionBuilder<'_>,
     result: Value,
     lhs: Value,

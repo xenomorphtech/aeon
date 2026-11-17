@@ -92,6 +92,13 @@ fn resolve_constant_branches(func: &mut SsaFunction) -> bool {
         };
 
         if let Some((stmt_idx, taken, target_expr, fallthrough)) = resolved {
+            // A branch target is an address, so name the fallthrough block by
+            // its address rather than its id.
+            let fallthrough_addr = func
+                .blocks
+                .iter()
+                .find(|block| block.id == fallthrough)
+                .map(|block| block.addr);
             let block = &mut func.blocks[block_idx];
 
             if taken {
@@ -112,7 +119,7 @@ fn resolve_constant_branches(func: &mut SsaFunction) -> bool {
                     .filter(|&s| s != fallthrough)
                     .collect();
                 block.stmts[stmt_idx] = SsaStmt::Branch {
-                    target: SsaExpr::Imm(fallthrough as u64),
+                    target: SsaExpr::Imm(fallthrough_addr.unwrap_or(fallthrough as u64)),
                 };
                 for btb in &branch_target_block {
                     block.successors.retain(|s| s != btb);
@@ -147,11 +154,55 @@ fn remove_unreachable_blocks(func: &mut SsaFunction, _use_def: &mut UseDefMap) -
 
     let before = func.blocks.len();
     func.blocks.retain(|b| reachable.contains(&b.id));
+    if func.blocks.len() < before {
+        renumber_blocks(func);
+    }
 
     // Rebuild predecessor lists to reflect removed blocks
     rebuild_predecessors(func);
 
     func.blocks.len() < before
+}
+
+/// Restores `blocks[i].id == i` after blocks were removed. Every pass indexes
+/// `func.blocks` by block id, so ids must stay dense; a block keeps its
+/// `addr`, which is how it is identified outside the SSA passes.
+fn renumber_blocks(func: &mut SsaFunction) {
+    let new_ids: std::collections::HashMap<BlockId, BlockId> = func
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| (block.id, index as BlockId))
+        .collect();
+    // Only edges to surviving blocks remain: a removed block was unreachable,
+    // so no surviving block names it.
+    let renumber = |id: &mut BlockId| {
+        if let Some(new_id) = new_ids.get(id) {
+            *id = *new_id;
+        }
+    };
+
+    renumber(&mut func.entry);
+    for block in &mut func.blocks {
+        renumber(&mut block.id);
+        block.successors.retain(|successor| new_ids.contains_key(successor));
+        block.successors.iter_mut().for_each(renumber);
+        // Phi operands from removed predecessors are dropped by
+        // `cleanup_phis`, which runs next.
+        for stmt in &mut block.stmts {
+            match stmt {
+                SsaStmt::CondBranch { fallthrough, .. } => renumber(fallthrough),
+                SsaStmt::Assign {
+                    src: SsaExpr::Phi(operands),
+                    ..
+                } => {
+                    operands.retain(|(pred, _)| new_ids.contains_key(pred));
+                    operands.iter_mut().for_each(|(pred, _)| renumber(pred));
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 /// Recompute predecessor lists from successor edges.
@@ -204,7 +255,9 @@ fn cleanup_phis(func: &mut SsaFunction, _use_def: &mut UseDefMap) -> bool {
                     .cloned()
                     .collect();
 
-                if new_operands.len() < operands.len() {
+                // A phi left with one operand (its other predecessors were
+                // removed) is a copy.
+                if new_operands.len() < operands.len() || new_operands.len() == 1 {
                     if new_operands.len() == 1 {
                         // Single operand: replace phi with copy
                         func.blocks[block_idx].stmts[stmt_idx] = SsaStmt::Assign {
@@ -348,15 +401,17 @@ mod tests {
         let changed = run(&mut func, &mut ud);
         assert!(changed);
 
-        // Block 0 should now have an unconditional Branch to fallthrough
+        // Block 0 should now have an unconditional Branch to the address of
+        // the fallthrough block (block 2, at address 8).
         assert!(matches!(
             &func.blocks[0].stmts[0],
             SsaStmt::Branch {
-                target: SsaExpr::Imm(2)
+                target: SsaExpr::Imm(8)
             }
         ));
-        // Successors should only contain block 2 (not block 1)
-        assert_eq!(func.blocks[0].successors, vec![2]);
+        // Block 1 is gone, so the fallthrough block is now block 1.
+        assert_eq!(func.blocks[0].successors, vec![1]);
+        assert_eq!(func.blocks[1].addr, 8);
     }
 
     // -----------------------------------------------------------------------
@@ -463,12 +518,13 @@ mod tests {
         let changed = run(&mut func, &mut ud);
         assert!(changed);
 
-        // Block 1 should be removed (unreachable from entry)
-        let block_ids: Vec<BlockId> = func.blocks.iter().map(|b| b.id).collect();
-        assert_eq!(block_ids, vec![0, 2]);
+        // Block 1 should be removed (unreachable from entry); the block that
+        // was 2 (at address 8) takes its id.
+        let block_addrs: Vec<u64> = func.blocks.iter().map(|b| b.addr).collect();
+        assert_eq!(block_addrs, vec![0, 8]);
 
-        // The phi in block 2 should be simplified to a copy
-        let block2 = func.blocks.iter().find(|b| b.id == 2).unwrap();
+        // The phi in that block should be simplified to a copy
+        let block2 = func.blocks.iter().find(|b| b.addr == 8).unwrap();
         assert!(matches!(
             &block2.stmts[0],
             SsaStmt::Assign { dst, src: SsaExpr::Var(v) }
@@ -540,9 +596,14 @@ mod tests {
         let changed = run(&mut func, &mut ud);
         assert!(changed);
 
-        // Only blocks 0 and 3 should remain; blocks 1 and 2 are both unreachable
+        // Only the blocks that were 0 and 3 remain (told apart by address);
+        // blocks 1 and 2 are both unreachable. Ids stay dense.
+        let block_addrs: Vec<u64> = func.blocks.iter().map(|b| b.addr).collect();
+        assert_eq!(block_addrs, vec![0, 12]);
         let block_ids: Vec<BlockId> = func.blocks.iter().map(|b| b.id).collect();
-        assert_eq!(block_ids, vec![0, 3]);
+        assert_eq!(block_ids, vec![0, 1]);
+        assert_eq!(func.blocks[0].successors, vec![1]);
+        assert_eq!(func.blocks[1].predecessors, vec![0]);
     }
 
     // -----------------------------------------------------------------------
@@ -581,8 +642,14 @@ mod tests {
                 target: SsaExpr::Imm(0x100)
             }
         ));
-        // Fallthrough (block 1) should be removed from successors
-        assert!(!func.blocks[0].successors.contains(&1));
+        // Only the taken block (at address 8) is left as a successor; the
+        // fallthrough block was removed.
+        let successors: Vec<u64> = func.blocks[0]
+            .successors
+            .iter()
+            .map(|id| func.blocks[*id as usize].addr)
+            .collect();
+        assert_eq!(successors, vec![8]);
     }
 
     #[test]
@@ -610,11 +677,11 @@ mod tests {
         let changed = run(&mut func, &mut ud);
         assert!(changed);
 
-        // Should branch to fallthrough (block 1)
+        // Should branch to the fallthrough block (block 1, at address 4)
         assert!(matches!(
             &func.blocks[0].stmts[0],
             SsaStmt::Branch {
-                target: SsaExpr::Imm(1)
+                target: SsaExpr::Imm(4)
             }
         ));
         // The branch target block should be removed from successors

@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use aeonil::{Condition, Expr, IntrinsicName, IntrinsicOp, Reg, Stmt, VectorArrangement};
 
+mod vector;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     U64(u64),
@@ -602,6 +604,9 @@ impl<'a> Executor<'a> {
                     None => Value::Unknown,
                 }
             }
+            _ if name.arrangement().is_some() && !operands.is_empty() => {
+                self.eval_vector_conversion(expr, name, &operands[0])
+            }
             IntrinsicOp::Scvtf | IntrinsicOp::Ucvtf
                 if name.suffix().is_none() && !operands.is_empty() =>
             {
@@ -740,13 +745,7 @@ impl<'a> Executor<'a> {
         let Some(value) = self.eval_float(inner, from) else {
             return Value::Unknown;
         };
-        let rounded = match rounding {
-            FloatRounding::Zero => value.trunc(),
-            FloatRounding::Down => value.floor(),
-            FloatRounding::Up => value.ceil(),
-            FloatRounding::NearestEven => value.round_ties_even(),
-            FloatRounding::NearestAway => value.round(),
-        };
+        let rounded = round_float(value, rounding);
         // Rust's float-to-int casts saturate and map NaN to 0, as AArch64 does.
         Value::U64(match (signed, narrow) {
             (true, true) => rounded as i32 as u32 as u64,
@@ -1115,6 +1114,9 @@ impl<'a> Executor<'a> {
                 self.execute_crc32_intrinsic(name, operands)
             }
             op => {
+                if let Some(keep_going) = self.execute_vector_intrinsic(name, operands) {
+                    return keep_going;
+                }
                 if !self.execute_lane_intrinsic(name, operands) && !is_supported_stmt_intrinsic(op) {
                     panic!(
                         "aeon emulation encountered unsupported IL statement intrinsic `{name}`"
@@ -1669,6 +1671,11 @@ fn lane_op(op: IntrinsicOp) -> Option<LaneOp> {
         IntrinsicOp::Smin => {
             Binary(|a, b, bits| lane_signed(a, bits).min(lane_signed(b, bits)) as u64)
         }
+        // Vector floating point, on 32- and 64-bit lanes.
+        IntrinsicOp::Fadd => Binary(|a, b, bits| vector::float_lane(FloatBinary::Add, a, b, bits)),
+        IntrinsicOp::Fsub => Binary(|a, b, bits| vector::float_lane(FloatBinary::Sub, a, b, bits)),
+        IntrinsicOp::Fmul => Binary(|a, b, bits| vector::float_lane(FloatBinary::Mul, a, b, bits)),
+        IntrinsicOp::Fdiv => Binary(|a, b, bits| vector::float_lane(FloatBinary::Div, a, b, bits)),
         // Immediate shifts: the amount arrives replicated into every lane.
         IntrinsicOp::Shl => Binary(|a, n, _| lane_shl(a, n)),
         IntrinsicOp::Ushr => Binary(|a, n, _| lane_shr(a, n)),
@@ -2008,6 +2015,16 @@ enum FloatRounding {
 }
 
 /// Rounding mode and signedness of a scalar float-to-integer intrinsic.
+fn round_float(value: f64, rounding: FloatRounding) -> f64 {
+    match rounding {
+        FloatRounding::Zero => value.trunc(),
+        FloatRounding::Down => value.floor(),
+        FloatRounding::Up => value.ceil(),
+        FloatRounding::NearestEven => value.round_ties_even(),
+        FloatRounding::NearestAway => value.round(),
+    }
+}
+
 fn float_to_int_mode(op: IntrinsicOp) -> Option<(FloatRounding, bool)> {
     Some(match op {
         IntrinsicOp::Fcvtzs => (FloatRounding::Zero, true),

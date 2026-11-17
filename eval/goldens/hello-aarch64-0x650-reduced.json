@@ -12,10 +12,10 @@
         ["assign", "x0", ["imm", "0x20010"]],
         ["assign", "x1", ["adrp_imm", "0x20000"]],
         ["assign", "x1", ["imm", "0x20010"]],
-        ["set_flags", ["imm", "0x0"]],
+        ["set_flags", ["sub", ["imm", "0x20010"], ["imm", "0x20010"]]],
         [
           "cond_branch",
-          ["flag", "eq"],
+          ["compare", "eq", ["imm", "0x20010"], ["imm", "0x20010"]],
           ["imm", "0x67c"],
           "0x668"
         ]
@@ -28,30 +28,20 @@
       "stmts": [
         ["assign", "x1", ["adrp_imm", "0x1f000"]],
         ["assign", "x1", ["load", ["imm", "0x1ffd8"], 8]],
-        [
-          "cond_branch",
-          ["zero", ["load", ["imm", "0x1ffd8"], 8]],
-          ["imm", "0x67c"],
-          "0x674"
-        ]
+        ["cond_branch", ["zero", ["reg", "x1"]], ["imm", "0x67c"], "0x674"]
       ]
     },
     {
       "addr": "0x674",
       "predecessors": ["0x668"],
       "successors": [],
-      "stmts": [
-        ["assign", "x16", ["reg", "x1"]],
-        ["branch", ["reg", "x1"]]
-      ]
+      "stmts": [["assign", "x16", ["reg", "x1"]], ["branch", ["reg", "x16"]]]
     },
     {
       "addr": "0x67c",
       "predecessors": ["0x650", "0x668"],
       "successors": [],
-      "stmts": [
-        ["ret"]
-      ]
+      "stmts": [["ret"]]
     }
   ]
 }

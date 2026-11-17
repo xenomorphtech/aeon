@@ -1443,8 +1443,10 @@ mod tests {
             .iter()
             .find(|item| item.id == "ev-metric-snapshot")
             .expect("metric snapshot evidence should exist");
-        assert_eq!(metrics.value["eligible_stack_accesses"], json!(1));
-        assert_eq!(metrics.value["stack_slots_recognized"], json!(1));
+        // All three accesses to the one local are recognised: the store and
+        // the load in the entry block and the reload in a later block.
+        assert_eq!(metrics.value["eligible_stack_accesses"], json!(3));
+        assert_eq!(metrics.value["stack_slots_recognized"], json!(3));
         assert_eq!(metrics.value["adrp_resolutions"], json!(3));
         assert_eq!(metrics.value["flag_fusions"], json!(2));
         assert_eq!(metrics.value["movk_chain_resolutions"], json!(0));

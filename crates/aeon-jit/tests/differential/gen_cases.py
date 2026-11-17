@@ -104,6 +104,28 @@ CASES = [
     ("br_conditions", "cmp x0, x1; mov x8, #0; b.hi 1f; orr x8, x8, #1; 1: b.ls 2f; orr x8, x8, #2; 2: b.ge 3f; orr x8, x8, #4; 3: b.vs 4f; orr x8, x8, #8; 4: b.mi 5f; orr x8, x8, #16; 5: mov x9, x8"),
     ("br_fp_condition", "scvtf d0, x0; scvtf d1, x1; fcmp d0, d1; mov x8, #0; b.gt 1f; orr x8, x8, #1; 1: b.mi 2f; orr x8, x8, #2; 2: mov x9, x8"),
     ("br_indirect", "adr x9, 1f; br x9; mov x8, #1; 1: mov x10, #2"),
+    # ── reducer hazards ────────────────────────────────────────────────
+    # Constants and copies that a forwarding pass must not move into a place
+    # where they mean something else, and flags that outlive their compare.
+    ("const_w_shift", "mov w1, #-1; lsr w8, w1, #4; asr w9, w1, #4; mov w2, #0x80000000; asr w10, w2, #8; ror w11, w2, #4; lsr x12, x1, #4"),
+    ("const_w_shift_reg", "mov w1, #-1; mov w2, #36; lsr w8, w1, w2; lsl w9, w1, w2; asr w10, w1, w2; mov x3, #-1; mov x4, #68; lsr x11, x3, x4"),
+    ("const_div", "mov w1, #-6; mov w2, #4; sdiv w8, w1, w2; udiv w9, w1, w2; mov x3, #-6; mov x4, #4; sdiv x10, x3, x4; udiv x11, x3, x4"),
+    ("const_copy_redefined", "mov x1, #5; mov x2, x1; mov x1, #7; add x8, x2, x1; mov x9, x2; mov x3, x0; add x0, x0, #1; mov x10, x3"),
+    ("const_w_alias", "mov x1, #-1; mov w1, #5; add x8, x1, #1; mov x2, #0x56780000; movk x2, #0x1234, lsl #32; add w2, w2, #1; add x9, x2, #0"),
+    ("const_adr", "adr x1, .; add x8, x1, #0x10; sub x9, x1, #4; mov x1, x0; add x10, x1, #0x10"),
+    ("movk_chain", "mov x8, #0x1234; movk x8, #0x5678, lsl #16; movk x8, #0, lsl #32; movk x8, #0x9abc, lsl #48; mov w9, #0xffff; movk w9, #0, lsl #16; movk w9, #0x12"),
+    ("movk_after_intrinsic", "mov x8, #1; adcs x8, x0, x1; movk x8, #0x55, lsl #16; mov x9, #2; ld1 {v0.16b}, [x20], #16; mov x10, x20"),
+    ("tst_branch_conditions", "tst x0, x1; mov x8, #0; b.hi 1f; orr x8, x8, #1; 1: b.cs 2f; orr x8, x8, #2; 2: b.ge 3f; orr x8, x8, #4; 3: b.mi 4f; orr x8, x8, #8; 4: b.eq 5f; orr x8, x8, #16; 5: mov x9, x8"),
+    ("tst_w_branch_conditions", "tst w0, w1; mov x8, #0; b.mi 1f; orr x8, x8, #1; 1: b.gt 2f; orr x8, x8, #2; 2: b.ls 3f; orr x8, x8, #4; 3: mov x9, x8"),
+    ("cmn_branch_conditions", "cmn x0, x1; mov x8, #0; b.ge 1f; orr x8, x8, #1; 1: b.cs 2f; orr x8, x8, #2; 2: b.vs 3f; orr x8, x8, #4; 3: b.eq 4f; orr x8, x8, #8; 4: b.mi 5f; orr x8, x8, #16; 5: mov x9, x8"),
+    ("cmn_w_branch_conditions", "cmn w0, w1; mov x8, #0; b.mi 1f; orr x8, x8, #1; 1: b.eq 2f; orr x8, x8, #2; 2: b.lt 3f; orr x8, x8, #4; 3: mov x9, x8"),
+    ("cmp_operand_redefined", "cmp x0, x1; mov x0, x2; b.lt 1f; mov x8, #1; b 2f; 1: mov x8, #2; 2: mov x9, x8"),
+    ("cmp_w_operand_redefined", "cmp w0, w1; add x1, x1, #1; b.eq 1f; mov x8, #1; b 2f; 1: mov x8, #2; 2: mov x9, x8"),
+    ("cmp_operand_loaded_over", "str x0, [x20]; cmp x0, x1; ldr x0, [x20, #8]; b.hi 1f; mov x8, #1; b 2f; 1: mov x8, #2; 2: mov x9, x0"),
+    ("flags_across_blocks", "cmp x0, x1; cbz x2, 1f; add x8, x2, #1; 1: cset x9, lt; csel x10, x0, x1, hi; b.ne 2f; mov x11, #1; 2: adc x12, x3, x4"),
+    ("cmp_zero", "cmp x0, #0; cset x8, hi; cset x9, ge; cmn x1, #0; cset x10, cs; cmp w2, #0; b.ls 1f; mov x11, #1; 1: adds x12, x3, #0; cset x13, cs"),
+    ("cmp_known_constants", "mov x1, #5; cmp x1, #5; cset x8, eq; cset x9, cs; mov x2, #-1; cmn x2, #1; cset x10, cs; cset x11, eq; mov x3, #7; tst x3, #8; cset x12, eq; cmp x1, x3; ccmp x1, x2, #4, lo; cset x13, ne"),
+    ("flags_overwritten", "cmp x0, x1; cmp x2, x3; cset x8, lt; adds x9, x0, x1; subs x10, x2, x3; cset x11, cs"),
     ("br_ret", "adr x30, 1f; ret; mov x8, #1; 1: mov x10, #2"),
     # ── SIMD: one instruction per case, named by the instruction, so a
     # gap is reported for exactly the instruction that has it ───────────
