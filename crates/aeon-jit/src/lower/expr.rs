@@ -43,10 +43,10 @@ impl LoweringState {
                 let addr = self.coerce_int(builder, addr, self.pointer_type)?;
                 if let Some(callback) = imports.memory_read {
                     if imports.memory_read_addr_only {
-                        builder.ins().call(callback, &[addr.value]);
+                        imports.call_hook(builder, callback, &[addr.value]);
                     } else {
                         let size = builder.ins().iconst(types::I8, i64::from(*size));
-                        builder.ins().call(callback, &[addr.value, size]);
+                        imports.call_hook(builder, callback, &[addr.value, size]);
                     }
                 }
                 let value = builder.ins().load(load_ty, MemFlags::new(), addr.value, 0);

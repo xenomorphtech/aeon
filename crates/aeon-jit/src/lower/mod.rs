@@ -141,9 +141,7 @@ impl LoweringState {
                 if let Some(callback) = imports.memory_write {
                     let size = builder.ins().iconst(types::I8, i64::from(*size));
                     let callback_value = self.value_as_u64_bits(builder, value)?;
-                    builder
-                        .ins()
-                        .call(callback, &[addr.value, size, callback_value]);
+                    imports.call_hook(builder, callback, &[addr.value, size, callback_value]);
                 }
                 builder
                     .ins()
@@ -187,7 +185,7 @@ impl LoweringState {
                     self.lower_expr(module, builder, imports, target, Some(self.pointer_type))?;
                 let target = self.coerce_int(builder, target, self.pointer_type)?;
                 if let Some(translator) = imports.branch_translate {
-                    let translated_call = builder.ins().call(translator, &[target.value]);
+                    let translated_call = imports.call_hook(builder, translator, &[target.value]);
                     let translated_raw = builder.inst_results(translated_call)[0];
                     let translated_block = builder.create_block();
                     let unresolved_block = builder.create_block();
@@ -227,7 +225,7 @@ impl LoweringState {
 
                     builder.switch_to_block(unresolved_block);
                     if let Some(bridge) = imports.branch_bridge {
-                        builder.ins().call(bridge, &[self.ctx_ptr, target.value]);
+                        imports.call_hook(builder, bridge, &[self.ctx_ptr, target.value]);
                         builder.ins().jump(continue_block, &[]);
                     } else if let Some(sig) = imports.call_sig {
                         builder
@@ -278,7 +276,7 @@ impl LoweringState {
                     let block_addr = builder.ins().iconst(types::I64, self.block_addr as i64);
                     let kind = builder.ins().iconst(types::I64, trap_kind_code(*kind));
                     let imm = builder.ins().iconst(types::I64, i64::from(*imm));
-                    builder.ins().call(callback, &[block_addr, kind, imm]);
+                    imports.call_hook(builder, callback, &[block_addr, kind, imm]);
                 }
                 builder
                     .ins()
@@ -303,7 +301,7 @@ impl LoweringState {
             // state, especially x30 after call-to-branch rewriting. Flush the
             // current scalar state before crossing that boundary.
             self.flush_scalars(builder)?;
-            let translated_call = builder.ins().call(translator, &[target]);
+            let translated_call = imports.call_hook(builder, translator, &[target]);
             let translated_raw = builder.inst_results(translated_call)[0];
             let dynamic_block = builder.create_block();
             let dispatch_block = builder.create_block();
@@ -362,7 +360,7 @@ impl LoweringState {
             builder.switch_to_block(unresolved_block);
             self.flush_scalars(builder)?;
             if let Some(bridge) = imports.branch_bridge {
-                let bridge_call = builder.ins().call(bridge, &[self.ctx_ptr, target]);
+                let bridge_call = imports.call_hook(builder, bridge, &[self.ctx_ptr, target]);
                 let next_target = builder.inst_results(bridge_call)[0];
                 builder.ins().return_(&[next_target]);
             } else {

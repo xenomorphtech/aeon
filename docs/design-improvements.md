@@ -122,16 +122,19 @@ moved, not rewritten, then formatted. Correction to the above: only 9 of the
 invariants there are still undocumented. Methods of `LoweringState` became
 `pub(crate)` so sibling modules can call them.
 
-Open, found while running the suite repeatedly (2026-11-17):
+Found while running the suite repeatedly (2026-11-17):
 
-- **The JIT's hooks are process-wide.** `JitCompiler::set_*_callback` and
-  `set_block_counters` write statics in `runtime.rs` that every compiled
-  block reads when it runs and every compile consults, so two compilers in
-  one process overwrite each other's hooks. It showed as a unit test failing
-  about one run in seven, when a test on another thread installed a branch
-  hook. The unit tests now take a lock and clear the hooks first; the fix
-  proper is a per-compiler hook table whose address is passed to the
-  trampolines.
+- **The JIT's hooks were process-wide** (fixed). `JitCompiler::set_*_callback`
+  and `set_block_counters` wrote statics that every compiled block read, so
+  two compilers in one process overwrote each other's hooks; a unit test
+  failed about one run in seven when a test on another thread installed a
+  branch hook. Each compiler now owns a `RuntimeHooks` table, compiled code
+  passes its address to the trampolines, and the table's invariants are
+  documented in `runtime.rs` along with each `unsafe` block there. Object
+  code is unaffected: it links against the runtime's own hook symbols.
+
+Still open:
+
 - **The trampolines append to `/tmp/aeon_jit_native.log` on every call**,
   opening the file each time, with no way to turn it off.
 - **`tests/native_smoke.rs` crashes** in

@@ -9,13 +9,40 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
-pub(crate) static MEMORY_READ_CALLBACK: AtomicUsize = AtomicUsize::new(0);
-pub(crate) static MEMORY_WRITE_CALLBACK: AtomicUsize = AtomicUsize::new(0);
-pub(crate) static BRANCH_TRANSLATE_CALLBACK: AtomicUsize = AtomicUsize::new(0);
-pub(crate) static BRANCH_BRIDGE_CALLBACK: AtomicUsize = AtomicUsize::new(0);
-pub(crate) static BLOCK_ENTER_CALLBACK: AtomicUsize = AtomicUsize::new(0);
-pub(crate) static BLOCK_COUNTERS_PTR: AtomicPtr<u64> = AtomicPtr::new(std::ptr::null_mut());
-pub(crate) static BLOCK_COUNTERS_LEN: AtomicUsize = AtomicUsize::new(0);
+/// The hooks of one `JitCompiler`: callbacks its compiled code calls, and
+/// the block counters it increments.
+///
+/// Compiled code holds this table's address as a constant and passes it to
+/// the trampolines below, so each compiler's code reaches its own hooks.
+///
+/// # Invariants
+///
+/// - A table is never freed. Code compiled by a `JitCompiler` stays
+///   callable after the compiler is dropped (its code memory is not
+///   released), so the table it points at must stay valid too.
+///   `RuntimeHooks::leak` is the only constructor.
+/// - A stored callback is either 0 or a function pointer of the type its
+///   setter takes; the setters are the only writers.
+/// - `block_counters` points at `block_counters_len` writable `u64`s for as
+///   long as code compiled with block instrumentation may run. The caller of
+///   `JitCompiler::set_block_counters` guarantees that; pass a null pointer
+///   to detach.
+#[derive(Default)]
+pub struct RuntimeHooks {
+    pub(crate) memory_read: AtomicUsize,
+    pub(crate) memory_write: AtomicUsize,
+    pub(crate) branch_translate: AtomicUsize,
+    pub(crate) branch_bridge: AtomicUsize,
+    pub(crate) block_enter: AtomicUsize,
+    pub(crate) block_counters: AtomicPtr<u64>,
+    pub(crate) block_counters_len: AtomicUsize,
+}
+
+impl RuntimeHooks {
+    pub(crate) fn leak() -> &'static RuntimeHooks {
+        Box::leak(Box::default())
+    }
+}
 
 pub(crate) fn native_log_path() -> &'static str {
     #[cfg(target_os = "android")]
@@ -43,47 +70,66 @@ pub(crate) fn native_log_line(message: &str) {
     }
 }
 
-pub extern "C" fn on_memory_read(addr: u64, size: u8) {
+/// Loads a hook's callback. `hooks` is the table address baked into the
+/// calling code; see the invariants on [`RuntimeHooks`].
+fn callback_of(hooks: *const RuntimeHooks, slot: fn(&RuntimeHooks) -> &AtomicUsize) -> usize {
+    // SAFETY: a non-null `hooks` is a leaked, never-freed table.
+    match unsafe { hooks.as_ref() } {
+        Some(hooks) => slot(hooks).load(Ordering::SeqCst),
+        None => 0,
+    }
+}
+
+pub extern "C" fn on_memory_read(hooks: *const RuntimeHooks, addr: u64, size: u8) {
     native_log_line(&format!("mem_read addr=0x{addr:x} size={size}"));
-    let callback = MEMORY_READ_CALLBACK.load(Ordering::SeqCst);
+    let callback = callback_of(hooks, |hooks| &hooks.memory_read);
     if callback == 0 {
         return;
     }
+    // SAFETY: a non-zero slot holds a `MemoryReadCallback`.
     let callback: MemoryReadCallback = unsafe { std::mem::transmute(callback) };
     callback(addr, size);
 }
 
-pub extern "C" fn on_memory_write(addr: u64, size: u8, value: u64) {
+pub extern "C" fn on_memory_write(hooks: *const RuntimeHooks, addr: u64, size: u8, value: u64) {
     native_log_line(&format!(
         "mem_write addr=0x{addr:x} size={size} value=0x{value:x}"
     ));
-    let callback = MEMORY_WRITE_CALLBACK.load(Ordering::SeqCst);
+    let callback = callback_of(hooks, |hooks| &hooks.memory_write);
     if callback == 0 {
         return;
     }
+    // SAFETY: a non-zero slot holds a `MemoryWriteCallback`.
     let callback: MemoryWriteCallback = unsafe { std::mem::transmute(callback) };
     callback(addr, size, value);
 }
 
-pub extern "C" fn on_branch_translate(target: u64) -> u64 {
+pub extern "C" fn on_branch_translate(hooks: *const RuntimeHooks, target: u64) -> u64 {
     native_log_line(&format!("branch_translate in=0x{target:x}"));
-    let callback = BRANCH_TRANSLATE_CALLBACK.load(Ordering::SeqCst);
+    let callback = callback_of(hooks, |hooks| &hooks.branch_translate);
     if callback == 0 {
         return target;
     }
+    // SAFETY: a non-zero slot holds a `BranchTranslateCallback`.
     let callback: BranchTranslateCallback = unsafe { std::mem::transmute(callback) };
     callback(target)
 }
 
-pub extern "C" fn on_branch_bridge(ctx: *mut JitContext, target: u64) -> u64 {
+pub extern "C" fn on_branch_bridge(
+    hooks: *const RuntimeHooks,
+    ctx: *mut JitContext,
+    target: u64,
+) -> u64 {
+    // SAFETY: compiled code passes the context it was called with.
     let ctx_pc = unsafe { ctx.as_ref().map(|c| c.pc).unwrap_or(0) };
     native_log_line(&format!(
         "branch_bridge ctx_pc=0x{ctx_pc:x} target=0x{target:x}"
     ));
-    let callback = BRANCH_BRIDGE_CALLBACK.load(Ordering::SeqCst);
+    let callback = callback_of(hooks, |hooks| &hooks.branch_bridge);
     if callback == 0 {
         return target;
     }
+    // SAFETY: a non-zero slot holds a `BranchBridgeCallback`.
     let callback: BranchBridgeCallback = unsafe { std::mem::transmute(callback) };
     let out = callback(ctx, target);
     native_log_line(&format!(
@@ -92,18 +138,25 @@ pub extern "C" fn on_branch_bridge(ctx: *mut JitContext, target: u64) -> u64 {
     out
 }
 
-pub extern "C" fn on_block_enter(block_id: u64) {
+pub extern "C" fn on_block_enter(hooks: *const RuntimeHooks, block_id: u64) {
     native_log_line(&format!("block_enter id=0x{block_id:x}"));
-    let callback = BLOCK_ENTER_CALLBACK.load(Ordering::SeqCst);
+    let callback = callback_of(hooks, |hooks| &hooks.block_enter);
     if callback != 0 {
+        // SAFETY: a non-zero slot holds a `BlockEnterCallback`.
         let callback: BlockEnterCallback = unsafe { std::mem::transmute(callback) };
         callback(block_id);
     }
-    let counters = BLOCK_COUNTERS_PTR.load(Ordering::SeqCst);
-    let len = BLOCK_COUNTERS_LEN.load(Ordering::SeqCst);
+    // SAFETY: a non-null `hooks` is a leaked, never-freed table.
+    let Some(hooks) = (unsafe { hooks.as_ref() }) else {
+        return;
+    };
+    let counters = hooks.block_counters.load(Ordering::SeqCst);
+    let len = hooks.block_counters_len.load(Ordering::SeqCst);
     if counters.is_null() || block_id as usize >= len {
         return;
     }
+    // SAFETY: `block_id < len`, and the caller of `set_block_counters`
+    // keeps `len` counters writable while instrumented code can run.
     unsafe {
         let slot = counters.add(block_id as usize);
         *slot = (*slot).wrapping_add(1);

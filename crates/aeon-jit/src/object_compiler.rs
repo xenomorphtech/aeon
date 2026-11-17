@@ -207,6 +207,8 @@ impl ObjectCompiler {
                 self.fcmla_8h_helper_func,
                 true,
                 false,
+                // Object code links against the runtime's own hook symbols.
+                None,
             )?;
 
             let mut state = LoweringState::new(ctx_ptr, pointer_type, block_addr, block_id);

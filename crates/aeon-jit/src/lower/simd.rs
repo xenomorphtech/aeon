@@ -340,10 +340,10 @@ impl LoweringState {
         if is_load {
             if let Some(callback) = imports.memory_read {
                 if imports.memory_read_addr_only {
-                    builder.ins().call(callback, &[addr.value]);
+                    imports.call_hook(builder, callback, &[addr.value]);
                 } else {
                     let size = builder.ins().iconst(types::I8, i64::from(byte_len));
-                    builder.ins().call(callback, &[addr.value, size]);
+                    imports.call_hook(builder, callback, &[addr.value, size]);
                 }
             }
             let result = match byte_len {
@@ -376,9 +376,7 @@ impl LoweringState {
                     if let Some(callback) = imports.memory_write {
                         let size = builder.ins().iconst(types::I8, i64::from(byte_len));
                         let callback_value = self.value_as_u64_bits(builder, value)?;
-                        builder
-                            .ins()
-                            .call(callback, &[addr.value, size, callback_value]);
+                        imports.call_hook(builder, callback, &[addr.value, size, callback_value]);
                     }
                     builder
                         .ins()
@@ -396,9 +394,7 @@ impl LoweringState {
                                 ty: types::I64,
                             },
                         )?;
-                        builder
-                            .ins()
-                            .call(callback, &[addr.value, size, callback_value]);
+                        imports.call_hook(builder, callback, &[addr.value, size, callback_value]);
                     }
                     builder.ins().store(MemFlags::new(), low, addr.value, 0);
                 }

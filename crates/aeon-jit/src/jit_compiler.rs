@@ -2,8 +2,7 @@ use crate::imports::Imports;
 use crate::lower::LoweringState;
 use crate::runtime::{
     aeon_fcmla_8h, on_block_enter, on_branch_bridge, on_branch_translate, on_memory_read,
-    on_memory_write, BLOCK_COUNTERS_LEN, BLOCK_COUNTERS_PTR, BLOCK_ENTER_CALLBACK,
-    BRANCH_BRIDGE_CALLBACK, BRANCH_TRANSLATE_CALLBACK, MEMORY_READ_CALLBACK, MEMORY_WRITE_CALLBACK,
+    on_memory_write, RuntimeHooks,
 };
 use crate::{
     BlockEnterCallback, BranchBridgeCallback, BranchTranslateCallback, JitConfig, JitError,
@@ -24,6 +23,12 @@ pub struct JitCompiler {
     next_function_ordinal: u64,
     next_block_id: u64,
     block_ids: BTreeMap<u64, u64>,
+    /// This compiler's hooks. Compiled code refers to the table by address.
+    hooks: &'static RuntimeHooks,
+}
+
+fn store_callback(slot: &std::sync::atomic::AtomicUsize, callback: Option<usize>) {
+    slot.store(callback.unwrap_or(0), Ordering::SeqCst);
 }
 
 impl JitCompiler {
@@ -43,47 +48,37 @@ impl JitCompiler {
             next_function_ordinal: 0,
             next_block_id: 0,
             block_ids: BTreeMap::new(),
+            hooks: RuntimeHooks::leak(),
         }
     }
 
     pub fn set_memory_read_callback(&mut self, callback: Option<MemoryReadCallback>) {
-        MEMORY_READ_CALLBACK.store(
-            callback.map(|cb| cb as usize).unwrap_or(0),
-            Ordering::SeqCst,
-        );
+        store_callback(&self.hooks.memory_read, callback.map(|cb| cb as usize));
     }
 
     pub fn set_memory_write_callback(&mut self, callback: Option<MemoryWriteCallback>) {
-        MEMORY_WRITE_CALLBACK.store(
-            callback.map(|cb| cb as usize).unwrap_or(0),
-            Ordering::SeqCst,
-        );
+        store_callback(&self.hooks.memory_write, callback.map(|cb| cb as usize));
     }
 
     pub fn set_branch_translate_callback(&mut self, callback: Option<BranchTranslateCallback>) {
-        BRANCH_TRANSLATE_CALLBACK.store(
-            callback.map(|cb| cb as usize).unwrap_or(0),
-            Ordering::SeqCst,
-        );
+        store_callback(&self.hooks.branch_translate, callback.map(|cb| cb as usize));
     }
 
     pub fn set_branch_bridge_callback(&mut self, callback: Option<BranchBridgeCallback>) {
-        BRANCH_BRIDGE_CALLBACK.store(
-            callback.map(|cb| cb as usize).unwrap_or(0),
-            Ordering::SeqCst,
-        );
+        store_callback(&self.hooks.branch_bridge, callback.map(|cb| cb as usize));
     }
 
+    /// Points block instrumentation at `len` counters, one per block id.
+    /// They must stay writable for as long as code compiled by this
+    /// compiler with block instrumentation can run; pass a null pointer to
+    /// detach them first.
     pub fn set_block_counters(&mut self, counters: *mut u64, len: usize) {
-        BLOCK_COUNTERS_PTR.store(counters, Ordering::SeqCst);
-        BLOCK_COUNTERS_LEN.store(len, Ordering::SeqCst);
+        self.hooks.block_counters.store(counters, Ordering::SeqCst);
+        self.hooks.block_counters_len.store(len, Ordering::SeqCst);
     }
 
     pub fn set_block_enter_callback(&mut self, callback: Option<BlockEnterCallback>) {
-        BLOCK_ENTER_CALLBACK.store(
-            callback.map(|cb| cb as usize).unwrap_or(0),
-            Ordering::SeqCst,
-        );
+        store_callback(&self.hooks.block_enter, callback.map(|cb| cb as usize));
     }
 
     pub fn block_id(&self, block_addr: u64) -> Option<u64> {
@@ -125,8 +120,9 @@ impl JitCompiler {
         ctx.func.name = UserFuncName::user(0, func_id.as_u32());
 
         let mut imports = Imports::new();
-        let enable_branch_runtime_hooks = BRANCH_TRANSLATE_CALLBACK.load(Ordering::SeqCst) != 0
-            || BRANCH_BRIDGE_CALLBACK.load(Ordering::SeqCst) != 0;
+        let enable_branch_runtime_hooks = self.hooks.branch_translate.load(Ordering::SeqCst) != 0
+            || self.hooks.branch_bridge.load(Ordering::SeqCst) != 0;
+        let hooks_addr = self.hooks as *const RuntimeHooks as u64;
         let lower_result = {
             let mut func_ctx = FunctionBuilderContext::new();
             let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
@@ -151,6 +147,7 @@ impl JitCompiler {
                 None,
                 false,
                 enable_branch_runtime_hooks,
+                Some(hooks_addr),
             )?;
 
             let mut state = LoweringState::new(ctx_ptr, pointer_type, block_addr, block_id);
@@ -158,7 +155,7 @@ impl JitCompiler {
 
             if let Some(counter) = imports.block_counter {
                 let block_id_value = builder.ins().iconst(types::I64, block_id as i64);
-                builder.ins().call(counter, &[block_id_value]);
+                imports.call_hook(&mut builder, counter, &[block_id_value]);
             }
 
             if let Err(err) = state.lower_stmts(&mut self.module, &mut builder, &imports, stmts) {

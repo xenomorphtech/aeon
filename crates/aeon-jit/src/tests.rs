@@ -21,30 +21,6 @@ thread_local! {
     static LAST_BRIDGE_CTX_X30: RefCell<u64> = RefCell::new(0);
 }
 
-/// The JIT's hooks (memory, branch and block callbacks, block counters)
-/// are process-wide statics in `runtime.rs`, read by every block that runs
-/// and by every compile. Tests run on parallel threads, so each test holds
-/// this lock for its whole body and starts with the hooks cleared.
-fn serial_test() -> std::sync::MutexGuard<'static, ()> {
-    use std::sync::atomic::Ordering;
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let guard = LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    for hook in [
-        &MEMORY_READ_CALLBACK,
-        &MEMORY_WRITE_CALLBACK,
-        &BRANCH_TRANSLATE_CALLBACK,
-        &BRANCH_BRIDGE_CALLBACK,
-        &BLOCK_ENTER_CALLBACK,
-    ] {
-        hook.store(0, Ordering::SeqCst);
-    }
-    BLOCK_COUNTERS_PTR.store(std::ptr::null_mut(), Ordering::SeqCst);
-    BLOCK_COUNTERS_LEN.store(0, Ordering::SeqCst);
-    guard
-}
-
 fn reset_test_statics() {
     READ_COUNT.with(|v| *v.borrow_mut() = 0);
     WRITE_COUNT.with(|v| *v.borrow_mut() = 0);
@@ -128,7 +104,6 @@ fn reference_fcmla_8h(dst: [u16; 8], src: [u16; 8], scalar_pair: u32, rotation: 
 
 #[test]
 fn compiles_and_executes_a_basic_block() {
-    let _serial = serial_test();
     reset_test_statics();
 
     let mut compiler = JitCompiler::new(JitConfig {
@@ -206,7 +181,6 @@ fn compiles_and_executes_a_basic_block() {
 
 #[test]
 fn branch_translate_zero_returns_raw_target_without_bridge() {
-    let _serial = serial_test();
     reset_test_statics();
 
     let mut compiler = JitCompiler::new(JitConfig::default());
@@ -243,7 +217,6 @@ fn branch_translate_zero_returns_raw_target_without_bridge() {
 
 #[test]
 fn unresolved_branch_bridge_sees_flushed_x30() {
-    let _serial = serial_test();
     reset_test_statics();
 
     let mut compiler = JitCompiler::new(JitConfig::default());
@@ -291,7 +264,6 @@ fn unresolved_branch_bridge_sees_flushed_x30() {
 
 #[test]
 fn branches_on_ne_after_64bit_compare() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![
         Stmt::SetFlags {
@@ -327,7 +299,6 @@ fn branches_on_ne_after_64bit_compare() {
 
 #[test]
 fn executes_checksum_loop_block_with_post_index_load() {
-    let _serial = serial_test();
     reset_test_statics();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![
@@ -402,7 +373,6 @@ fn executes_checksum_loop_block_with_post_index_load() {
 
 #[test]
 fn mrs_nzcv_reads_flags_shifted() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     // Set flags, then read NZCV into a register
     let stmts = vec![
@@ -444,7 +414,6 @@ fn mrs_nzcv_reads_flags_shifted() {
 
 #[test]
 fn mrs_tpidr_el0_reads_from_context() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Assign {
         dst: Reg::X(0),
@@ -470,7 +439,6 @@ fn mrs_tpidr_el0_reads_from_context() {
 
 #[test]
 fn msr_nzcv_writes_flags() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     // MSR nzcv, x0 → write flags from x0 bits [31:28]
     let stmts = vec![Stmt::Intrinsic {
@@ -504,7 +472,6 @@ fn msr_nzcv_writes_flags() {
 
 #[test]
 fn compile_block_rejects_nop() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let err = compiler
         .compile_block(0x1000, &[Stmt::Nop])
@@ -514,7 +481,6 @@ fn compile_block_rejects_nop() {
 
 #[test]
 fn compile_block_allows_supported_barrier() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let code = compiler
         .compile_block(
@@ -537,7 +503,6 @@ fn compile_block_allows_supported_barrier() {
 
 #[test]
 fn compile_block_rejects_unknown_barrier() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let err = compiler
         .compile_block(0x1000, &[Stmt::Barrier("unknown".to_string())])
@@ -547,7 +512,6 @@ fn compile_block_rejects_unknown_barrier() {
 
 #[test]
 fn compile_block_rejects_non_nzcv_msr() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let err = compiler
         .compile_block(
@@ -569,7 +533,6 @@ fn compile_block_rejects_non_nzcv_msr() {
 
 #[test]
 fn simd_vector_and() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Assign {
         dst: Reg::V(2),
@@ -593,7 +556,6 @@ fn simd_vector_and() {
 
 #[test]
 fn simd_vector_orr() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Assign {
         dst: Reg::V(2),
@@ -617,7 +579,6 @@ fn simd_vector_orr() {
 
 #[test]
 fn simd_vector_eor() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Assign {
         dst: Reg::V(2),
@@ -641,7 +602,6 @@ fn simd_vector_eor() {
 
 #[test]
 fn simd_vector_bic() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Assign {
         dst: Reg::V(2),
@@ -665,7 +625,6 @@ fn simd_vector_bic() {
 
 #[test]
 fn simd_vector_orn() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Assign {
         dst: Reg::V(2),
@@ -689,7 +648,6 @@ fn simd_vector_orn() {
 
 #[test]
 fn simd_vector_not() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Assign {
         dst: Reg::V(1),
@@ -712,7 +670,6 @@ fn simd_vector_not() {
 
 #[test]
 fn simd_bsl_bitselect() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     // BSL v0, v1, v2 → (v0 & v1) | (~v0 & v2)
     let stmts = vec![Stmt::Assign {
@@ -743,7 +700,6 @@ fn simd_bsl_bitselect() {
 
 #[test]
 fn simd_ushr_2d_shifts_each_lane() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Intrinsic {
         name: "ushr.2d".into(),
@@ -768,7 +724,6 @@ fn simd_ushr_2d_shifts_each_lane() {
 
 #[test]
 fn simd_usra_2d_accumulates_shifted_lanes() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Intrinsic {
         name: "usra.2d".into(),
@@ -792,7 +747,6 @@ fn simd_usra_2d_accumulates_shifted_lanes() {
 
 #[test]
 fn simd_sli_2d_inserts_low_bits_from_destination() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Intrinsic {
         name: "sli.2d".into(),
@@ -813,7 +767,6 @@ fn simd_sli_2d_inserts_low_bits_from_destination() {
 
 #[test]
 fn simd_sri_2d_inserts_high_bits_from_destination() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Intrinsic {
         name: "sri.2d".into(),
@@ -834,7 +787,6 @@ fn simd_sri_2d_inserts_high_bits_from_destination() {
 
 #[test]
 fn simd_sqshlu_2d_saturates_negative_and_overflowing_lanes() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Intrinsic {
         name: "sqshlu.2d".into(),
@@ -856,7 +808,6 @@ fn simd_sqshlu_2d_saturates_negative_and_overflowing_lanes() {
 
 #[test]
 fn simd_uqshl_2d_saturates_unsigned_overflowing_lanes() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Intrinsic {
         name: "uqshl.2d".into(),
@@ -878,7 +829,6 @@ fn simd_uqshl_2d_saturates_unsigned_overflowing_lanes() {
 
 #[test]
 fn simd_uxtl_8h_zero_extends_lower_bytes() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Intrinsic {
         name: "uxtl.8h".into(),
@@ -907,7 +857,6 @@ fn simd_uxtl_8h_zero_extends_lower_bytes() {
 
 #[test]
 fn simd_ushll2_2d_zero_extends_upper_words_and_shifts() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Intrinsic {
         name: "ushll2.2d".into(),
@@ -930,7 +879,6 @@ fn simd_ushll2_2d_zero_extends_upper_words_and_shifts() {
 
 #[test]
 fn simd_sqrdmlah_8h_rounds_multiplies_and_accumulates() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Intrinsic {
         name: "sqrdmlah.8h".into(),
@@ -971,7 +919,6 @@ fn simd_sqrdmlah_8h_rounds_multiplies_and_accumulates() {
 
 #[test]
 fn simd_sqrdmlsh_8h_rounds_multiplies_and_subtracts() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Intrinsic {
         name: "sqrdmlsh.8h".into(),
@@ -1012,7 +959,6 @@ fn simd_sqrdmlsh_8h_rounds_multiplies_and_subtracts() {
 
 #[test]
 fn simd_stmt_movi_16b_splats_immediate() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Intrinsic {
         name: "movi.16b".into(),
@@ -1028,7 +974,6 @@ fn simd_stmt_movi_16b_splats_immediate() {
 
 #[test]
 fn simd_uqrshrn2_4s_rounds_narrows_into_upper_half() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Intrinsic {
         name: "uqrshrn2.4s".into(),
@@ -1055,7 +1000,6 @@ fn simd_uqrshrn2_4s_rounds_narrows_into_upper_half() {
 
 #[test]
 fn simd_fmulx_2d_multiplies_each_lane_by_scalar_lane() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Intrinsic {
         name: "fmulx.2d".into(),
@@ -1089,7 +1033,6 @@ fn simd_fmulx_2d_multiplies_each_lane_by_scalar_lane() {
 
 #[test]
 fn simd_fcmla_8h_handles_all_rotations() {
-    let _serial = serial_test();
     let src = [
         0x3c00, 0x4000, // 1.0, 2.0
         0x4200, 0x4400, // 3.0, 4.0
@@ -1144,7 +1087,6 @@ fn simd_fcmla_8h_handles_all_rotations() {
 
 #[test]
 fn object_compiler_compiles_fcmla_8h_block() {
-    let _serial = serial_test();
     let mut compiler = ObjectCompiler::new_aarch64(JitConfig::default()).expect("compiler");
     let symbol = compiler
         .compile_block(
@@ -1169,7 +1111,6 @@ fn object_compiler_compiles_fcmla_8h_block() {
 
 #[test]
 fn simd_ld1_8b_loads_low_half_and_updates_base() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Intrinsic {
         name: "ld1.8b".into(),
@@ -1198,7 +1139,6 @@ fn simd_ld1_8b_loads_low_half_and_updates_base() {
 
 #[test]
 fn simd_st1_8h_stores_full_vector_and_updates_base() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Intrinsic {
         name: "st1.8h".into(),
@@ -1225,7 +1165,6 @@ fn simd_st1_8h_stores_full_vector_and_updates_base() {
 
 #[test]
 fn simd_mla_8h_multiplies_by_scalar_lane_and_accumulates() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Intrinsic {
         name: "mla.8h".into(),
@@ -1266,7 +1205,6 @@ fn simd_mla_8h_multiplies_by_scalar_lane_and_accumulates() {
 
 #[test]
 fn simd_mls_8h_multiplies_by_scalar_lane_and_subtracts() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Intrinsic {
         name: "mls.8h".into(),
@@ -1310,7 +1248,6 @@ fn simd_mls_8h_multiplies_by_scalar_lane_and_subtracts() {
 
 #[test]
 fn simd_umlal2_4s_accumulates_upper_half_products() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Intrinsic {
         name: "umlal2.4s".into(),
@@ -1347,7 +1284,6 @@ fn simd_umlal2_4s_accumulates_upper_half_products() {
 
 #[test]
 fn simd_umlsl2_4s_subtracts_upper_half_products() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Intrinsic {
         name: "umlsl2.4s".into(),
@@ -1384,7 +1320,6 @@ fn simd_umlsl2_4s_subtracts_upper_half_products() {
 
 #[test]
 fn float_rounding_frintz_truncate() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Assign {
         dst: Reg::D(1),
@@ -1415,7 +1350,6 @@ fn float_rounding_frintz_truncate() {
 
 #[test]
 fn float_rounding_frintm_floor() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Assign {
         dst: Reg::D(1),
@@ -1440,7 +1374,6 @@ fn float_rounding_frintm_floor() {
 
 #[test]
 fn float_rounding_frintp_ceil() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Assign {
         dst: Reg::D(1),
@@ -1465,7 +1398,6 @@ fn float_rounding_frintp_ceil() {
 
 #[test]
 fn fnmadd_neg_mul_sub() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     // FNMADD: -(n*m) - a
     let stmts = vec![Stmt::Assign {
@@ -1500,7 +1432,6 @@ fn fnmadd_neg_mul_sub() {
 
 #[test]
 fn fnmsub_mul_sub() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     // FNMSUB: n*m - a
     let stmts = vec![Stmt::Assign {
@@ -1535,7 +1466,6 @@ fn fnmsub_mul_sub() {
 
 #[test]
 fn smull_widening_multiply_positive_values() {
-    let _serial = serial_test();
     // SMULL pattern: X2 = Mul(SignExtend(W0, 32), SignExtend(W1, 32))
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Assign {
@@ -1567,7 +1497,6 @@ fn smull_widening_multiply_positive_values() {
 
 #[test]
 fn smull_widening_multiply_negative_operand() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Assign {
         dst: Reg::X(2),
@@ -1598,7 +1527,6 @@ fn smull_widening_multiply_negative_operand() {
 
 #[test]
 fn smull_lsr_div_by_3_magic_constant() {
-    let _serial = serial_test();
     // Real div-by-3 pattern from compiled C code:
     //   SMULL X2, W3, W6    → X2 = sext(W3) * sext(W6)
     //   LSR   X2, X2, #32  → X2 = X2 >> 32 (unsigned)
@@ -1681,7 +1609,6 @@ fn smull_lsr_div_by_3_magic_constant() {
 
 #[test]
 fn smull_both_negative() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Assign {
         dst: Reg::X(2),
@@ -1712,7 +1639,6 @@ fn smull_both_negative() {
 
 #[test]
 fn smull_large_values_upper_bits() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![
         // X2 = smull(W0, W1)
@@ -1762,7 +1688,6 @@ fn smull_large_values_upper_bits() {
 
 #[test]
 fn rev16_swaps_bytes_in_halfwords() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Assign {
         dst: Reg::W(0),
@@ -1786,7 +1711,6 @@ fn rev16_swaps_bytes_in_halfwords() {
 
 #[test]
 fn rev32_reverses_bytes_in_words() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Assign {
         dst: Reg::W(0),
@@ -1810,7 +1734,6 @@ fn rev32_reverses_bytes_in_words() {
 
 #[test]
 fn cnt_popcount() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Assign {
         dst: Reg::W(0),
@@ -1841,7 +1764,6 @@ fn cnt_popcount() {
 
 #[test]
 fn movk_builds_constant() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     // Build 0x55555556 via MOV + MOVK (as the lifter does)
     let stmts = vec![
@@ -1873,7 +1795,6 @@ fn movk_builds_constant() {
 
 #[test]
 fn bitfield_ubfx_extract() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     // UBFX W0, W1, #4, #8 → extract 8 bits starting at bit 4
     let stmts = vec![Stmt::Intrinsic {
@@ -1900,7 +1821,6 @@ fn bitfield_ubfx_extract() {
 
 #[test]
 fn bitfield_sbfx_signed_extract() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     // SBFX W0, W1, #4, #8 → signed extract
     let stmts = vec![Stmt::Intrinsic {
@@ -1933,7 +1853,6 @@ fn bitfield_sbfx_signed_extract() {
 
 #[test]
 fn bitfield_extr_rotate() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     // EXTR W0, W1, W2, #16 → (W1:W2 >> 16)[31:0]
     let stmts = vec![Stmt::Intrinsic {
@@ -1987,7 +1906,6 @@ fn branch_result(cond: Condition, x0: u64, x1: u64) -> u64 {
 
 #[test]
 fn flag_cond_eq_and_ne() {
-    let _serial = serial_test();
     reset_test_statics();
     // equal
     assert_eq!(branch_result(Condition::EQ, 5, 5), 0x2000);
@@ -1999,7 +1917,6 @@ fn flag_cond_eq_and_ne() {
 
 #[test]
 fn flag_cond_cs_cc_unsigned_carry() {
-    let _serial = serial_test();
     reset_test_statics();
     // 5 - 3 = 2 → carry set (no borrow)
     assert_eq!(branch_result(Condition::CS, 5, 3), 0x2000);
@@ -2011,7 +1928,6 @@ fn flag_cond_cs_cc_unsigned_carry() {
 
 #[test]
 fn flag_cond_mi_pl_negative() {
-    let _serial = serial_test();
     reset_test_statics();
     // 3 - 5 = -2 → negative
     assert_eq!(branch_result(Condition::MI, 3, 5), 0x2000);
@@ -2026,7 +1942,6 @@ fn flag_cond_mi_pl_negative() {
 
 #[test]
 fn flag_cond_hi_ls_unsigned_greater() {
-    let _serial = serial_test();
     reset_test_statics();
     // HI = unsigned higher (C && !Z)
     assert_eq!(branch_result(Condition::HI, 5, 3), 0x2000);
@@ -2041,7 +1956,6 @@ fn flag_cond_hi_ls_unsigned_greater() {
 
 #[test]
 fn flag_cond_ge_lt_signed() {
-    let _serial = serial_test();
     reset_test_statics();
     // signed: 5 >= 3
     assert_eq!(branch_result(Condition::GE, 5, 3), 0x2000);
@@ -2060,7 +1974,6 @@ fn flag_cond_ge_lt_signed() {
 
 #[test]
 fn flag_cond_gt_le_signed() {
-    let _serial = serial_test();
     reset_test_statics();
     // 5 > 3
     assert_eq!(branch_result(Condition::GT, 5, 3), 0x2000);
@@ -2075,7 +1988,6 @@ fn flag_cond_gt_le_signed() {
 
 #[test]
 fn flag_cond_vs_vc_overflow() {
-    let _serial = serial_test();
     reset_test_statics();
     // Signed overflow: MAX_POSITIVE - (-1) = MAX+1 → overflow
     let max_pos = i64::MAX as u64; // 0x7FFFFFFFFFFFFFFF
@@ -2091,7 +2003,6 @@ fn flag_cond_vs_vc_overflow() {
 
 #[test]
 fn bitfield_ubfiz_insert() {
-    let _serial = serial_test();
     // UBFIZ X0, X1, #8, #4  → X0 = (X1 & 0xF) << 8
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Intrinsic {
@@ -2113,7 +2024,6 @@ fn bitfield_ubfiz_insert() {
 
 #[test]
 fn bitfield_sbfiz_signed_insert() {
-    let _serial = serial_test();
     // SBFIZ X0, X1, #4, #8  → X0 = sign_extend(X1[7:0]) << 4
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Intrinsic {
@@ -2146,7 +2056,6 @@ fn bitfield_sbfiz_signed_insert() {
 
 #[test]
 fn bitfield_bfi_insert_into_dest() {
-    let _serial = serial_test();
     // BFI X0, X1, #8, #4  → X0[11:8] = X1[3:0], other bits preserved
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Intrinsic {
@@ -2170,7 +2079,6 @@ fn bitfield_bfi_insert_into_dest() {
 
 #[test]
 fn bitfield_bfxil_extract_insert_low() {
-    let _serial = serial_test();
     // BFXIL X0, X1, #8, #4  → X0[3:0] = X1[11:8], other bits preserved
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Intrinsic {
@@ -2196,7 +2104,6 @@ fn bitfield_bfxil_extract_insert_low() {
 
 #[test]
 fn int_to_float_scvtf() {
-    let _serial = serial_test();
     // SCVTF D0, X1  → D0 = (double)X1_signed
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Assign {
@@ -2220,7 +2127,6 @@ fn int_to_float_scvtf() {
 
 #[test]
 fn float_to_int_fcvtzs() {
-    let _serial = serial_test();
     // FCVTZS X0, D1  → X0 = (int64_t)D1 (truncate toward zero)
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Assign {
@@ -2242,7 +2148,6 @@ fn float_to_int_fcvtzs() {
 
 #[test]
 fn setflags_fsub_with_inline_f32_load_compiles() {
-    let _serial = serial_test();
     // Reduced fcmp-style blocks inline the compared float load. These
     // must stay on the float path even when flag lowering does not pass a
     // float hint through.
@@ -2269,7 +2174,6 @@ fn setflags_fsub_with_inline_f32_load_compiles() {
 
 #[test]
 fn setflags_fsub_with_inline_f32_load_on_lhs_compiles() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![
         Stmt::SetFlags {
@@ -2296,7 +2200,6 @@ fn setflags_fsub_with_inline_f32_load_on_lhs_compiles() {
 
 #[test]
 fn write_s_reg_from_xzr_reduces_to_32_bits() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Assign {
         dst: Reg::S(0),
@@ -2311,7 +2214,6 @@ fn write_s_reg_from_xzr_reduces_to_32_bits() {
 
 #[test]
 fn vector_ucvtf_2d_converts_u64_lanes_to_f64() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Assign {
         dst: Reg::V(0),
@@ -2338,7 +2240,6 @@ fn vector_ucvtf_2d_converts_u64_lanes_to_f64() {
 
 #[test]
 fn vector_fcvtzu_2d_converts_f64_lanes_to_u64() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Assign {
         dst: Reg::V(0),
@@ -2362,7 +2263,6 @@ fn vector_fcvtzu_2d_converts_f64_lanes_to_u64() {
 
 #[test]
 fn umull2_4s_multiplies_upper_half_u16_lanes_by_scalar_lane() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Intrinsic {
         name: "umull2.4s".into(),
@@ -2399,7 +2299,6 @@ fn umull2_4s_multiplies_upper_half_u16_lanes_by_scalar_lane() {
 
 #[test]
 fn fcvt_f32_to_f64() {
-    let _serial = serial_test();
     // FCVT D0, S1  → promote f32 to f64
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Assign {
@@ -2419,7 +2318,6 @@ fn fcvt_f32_to_f64() {
 
 #[test]
 fn condselect_picks_correct_value() {
-    let _serial = serial_test();
     // SetFlags(Sub(X0, X1)) then CondSelect EQ → X2 if true, X3 if false
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![
@@ -2463,7 +2361,6 @@ fn condselect_picks_correct_value() {
 
 #[test]
 fn condselect_lt_signed_comparison() {
-    let _serial = serial_test();
     // CondSelect LT with signed values
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![
@@ -2503,7 +2400,6 @@ fn condselect_lt_signed_comparison() {
 
 #[test]
 fn adc_add_with_carry() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     // Set carry flag, then ADC
     let stmts = vec![
@@ -2536,7 +2432,6 @@ fn adc_add_with_carry() {
 
 #[test]
 fn sbc_subtract_with_carry() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     // Set carry flag (= no borrow), then SBC
     let stmts = vec![
@@ -2574,7 +2469,6 @@ fn sbc_subtract_with_carry() {
 
 #[test]
 fn umulh_unsigned_multiply_high() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Assign {
         dst: Reg::X(2),
@@ -2614,7 +2508,6 @@ fn umulh_unsigned_multiply_high() {
 
 #[test]
 fn smulh_signed_multiply_high() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![Stmt::Assign {
         dst: Reg::X(2),
@@ -2660,7 +2553,6 @@ fn smulh_signed_multiply_high() {
 
 #[test]
 fn ngc_negate_with_carry() {
-    let _serial = serial_test();
     // NGC X0, X1 → X0 = -X1 - 1 + C
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![
@@ -2695,7 +2587,6 @@ fn ngc_negate_with_carry() {
 
 #[test]
 fn object_compiler_emits_block_memory_trap_branch_and_bridge_hook_symbols() {
-    let _serial = serial_test();
     use object::{Object, ObjectSymbol};
 
     let mut compiler = ObjectCompiler::new_aarch64(JitConfig {
@@ -2756,7 +2647,6 @@ fn object_compiler_emits_block_memory_trap_branch_and_bridge_hook_symbols() {
 
 #[test]
 fn compile_block_rejects_invalid_memory_size_zero() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let err = compiler
         .compile_block(
@@ -2773,7 +2663,6 @@ fn compile_block_rejects_invalid_memory_size_zero() {
 
 #[test]
 fn compile_block_rejects_invalid_memory_size_non_power_of_two() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let err = compiler
         .compile_block(
@@ -2792,7 +2681,6 @@ fn compile_block_rejects_invalid_memory_size_non_power_of_two() {
 
 #[test]
 fn compile_block_rejects_invalid_memory_size_too_large() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let err = compiler
         .compile_block(
@@ -2809,7 +2697,6 @@ fn compile_block_rejects_invalid_memory_size_too_large() {
 
 #[test]
 fn compile_block_handles_large_immediate_values() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let large_imm = 0xDEADBEEFCAFEBABE_u64;
     let code = compiler
@@ -2833,7 +2720,6 @@ fn compile_block_handles_large_immediate_values() {
 
 #[test]
 fn compile_block_handles_maximum_imm64() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let max_imm = u64::MAX;
     let code = compiler
@@ -2854,7 +2740,6 @@ fn compile_block_handles_maximum_imm64() {
 
 #[test]
 fn compile_block_handles_deep_expression_nesting() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     // (((1 + 2) + 3) + 4) + 5
     let code = compiler
@@ -2884,7 +2769,6 @@ fn compile_block_handles_deep_expression_nesting() {
 
 #[test]
 fn compile_block_handles_all_gpr_registers() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let mut stmts = Vec::new();
 
@@ -2916,7 +2800,6 @@ fn compile_block_handles_all_gpr_registers() {
 
 #[test]
 fn compile_block_handles_all_simd_registers() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let mut stmts = Vec::new();
 
@@ -2944,7 +2827,6 @@ fn compile_block_handles_all_simd_registers() {
 
 #[test]
 fn compile_block_rejects_unsupported_barrier_kind() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let err = compiler
         .compile_block(
@@ -2957,7 +2839,6 @@ fn compile_block_rejects_unsupported_barrier_kind() {
 
 #[test]
 fn compile_block_compiles_call_to_immediate() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let code = compiler
         .compile_block(
@@ -2974,7 +2855,6 @@ fn compile_block_compiles_call_to_immediate() {
 
 #[test]
 fn compile_block_handles_minimum_stack_offset() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let code = compiler
         .compile_block(
@@ -3001,7 +2881,6 @@ fn compile_block_handles_minimum_stack_offset() {
 
 #[test]
 fn compile_block_handles_large_stack_offset() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     // Load from sp + 4096 (typical stack offset range)
     let code = compiler
@@ -3036,7 +2915,6 @@ fn compile_block_handles_large_stack_offset() {
 
 #[test]
 fn compile_block_handles_sequential_operations() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let code = compiler
         .compile_block(
@@ -3073,7 +2951,6 @@ fn compile_block_handles_sequential_operations() {
 
 #[test]
 fn benchmark_compile_small_block() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![
         Stmt::Assign {
@@ -3108,7 +2985,6 @@ fn benchmark_compile_small_block() {
 
 #[test]
 fn benchmark_compile_medium_block() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let mut stmts = Vec::new();
 
@@ -3142,7 +3018,6 @@ fn benchmark_compile_medium_block() {
 
 #[test]
 fn benchmark_compile_complex_block_with_branches() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let stmts = vec![
         Stmt::Assign {
@@ -3186,7 +3061,6 @@ fn benchmark_compile_complex_block_with_branches() {
 
 #[test]
 fn benchmark_compile_simd_heavy_block() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
     let mut stmts = Vec::new();
 
@@ -3218,7 +3092,6 @@ fn benchmark_compile_simd_heavy_block() {
 
 #[test]
 fn benchmark_code_generation_efficiency() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
 
     // Simple block with just a few operations
@@ -3253,7 +3126,6 @@ fn benchmark_code_generation_efficiency() {
 
 #[test]
 fn benchmark_multiple_blocks_same_compiler() {
-    let _serial = serial_test();
     let mut compiler = JitCompiler::new(JitConfig::default());
 
     let start = std::time::Instant::now();
@@ -3289,7 +3161,6 @@ fn benchmark_multiple_blocks_same_compiler() {
 
 #[test]
 fn benchmark_memory_usage_estimation() {
-    let _serial = serial_test();
     // Create a JitContext and measure its size
     let ctx = JitContext::default();
     let ctx_size = std::mem::size_of_val(&ctx);
