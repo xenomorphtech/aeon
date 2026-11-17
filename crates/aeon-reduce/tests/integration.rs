@@ -186,21 +186,15 @@ fn real_movz_movk_4step() {
         }, // MOVZ
         Stmt::Assign {
             dst: Reg::X(0),
-            src: e_intrinsic("movk", vec![Expr::Reg(Reg::X(0)), Expr::Imm(0xCAFE0000)]),
+            src: e_insert(Expr::Reg(Reg::X(0)), Expr::Imm(0xCAFE), 16, 16),
         },
         Stmt::Assign {
             dst: Reg::X(0),
-            src: e_intrinsic(
-                "movk",
-                vec![Expr::Reg(Reg::X(0)), Expr::Imm(0xBEEF00000000)],
-            ),
+            src: e_insert(Expr::Reg(Reg::X(0)), Expr::Imm(0xBEEF), 32, 16),
         },
         Stmt::Assign {
             dst: Reg::X(0),
-            src: e_intrinsic(
-                "movk",
-                vec![Expr::Reg(Reg::X(0)), Expr::Imm(0xDEAD000000000000)],
-            ),
+            src: e_insert(Expr::Reg(Reg::X(0)), Expr::Imm(0xDEAD), 48, 16),
         },
     ];
     let result = reduce_block(input);

@@ -555,26 +555,6 @@ impl<'a> Executor<'a> {
     fn eval_expr_intrinsic(&mut self, expr: &Expr, name: &IntrinsicName, operands: &[Expr]) -> Value {
         let op = name.op();
         match op {
-            IntrinsicOp::Movk => {
-                let dst = operands
-                    .first()
-                    .map(|expr| self.eval_expr(expr))
-                    .and_then(|value| value.as_u64());
-                let src = operands
-                    .get(1)
-                    .map(|expr| self.eval_expr(expr))
-                    .and_then(|value| value.as_u64());
-                // As lifted the immediate is `imm16 << shift`, which says
-                // where the field is even when imm16 is zero.
-                let shift = match operands.get(1) {
-                    Some(Expr::Shl(_, amount)) => match amount.as_ref() {
-                        Expr::Imm(shift) => Some(*shift as u32),
-                        _ => None,
-                    },
-                    _ => None,
-                };
-                eval_movk_bits(dst, src, shift)
-            }
             IntrinsicOp::Smulh | IntrinsicOp::Umulh => eval_mul_high(
                 operands.first().map(|expr| self.eval_expr(expr)),
                 operands.get(1).map(|expr| self.eval_expr(expr)),
@@ -2133,29 +2113,6 @@ fn condition_from_code(code: u64) -> Option<Condition> {
     })
 }
 
-/// MOVK: replace one 16-bit field of `dst`. `src` is the immediate already
-/// shifted into place. Without an explicit `shift` the field is taken to be
-/// the one holding the immediate's lowest set bit, which cannot tell a zero
-/// immediate's position.
-fn eval_movk_bits(dst: Option<u64>, src: Option<u64>, shift: Option<u32>) -> Value {
-    let (Some(dst), Some(src)) = (dst, src) else {
-        return Value::Unknown;
-    };
-
-    let shift = shift.unwrap_or(if src == 0 {
-        0
-    } else {
-        (src.trailing_zeros() / 16) * 16
-    });
-    if shift >= 64 {
-        return Value::Unknown;
-    }
-
-    let imm16 = (src >> shift) & 0xffff;
-    let mask = 0xffffu64 << shift;
-    Value::U64((dst & !mask) | ((imm16 << shift) & mask))
-}
-
 fn eval_mul_high(lhs: Option<Value>, rhs: Option<Value>, signed: bool) -> Value {
     let (Some(lhs), Some(rhs)) = (
         lhs.and_then(|value| value.as_u64()),
@@ -2636,14 +2593,16 @@ mod tests {
     }
 
     #[test]
-    fn execute_snippet_evaluates_movk_intrinsic() {
+    fn execute_snippet_evaluates_movk_insert() {
         let result = execute_snippet(
             &[Stmt::Assign {
                 dst: Reg::X(0),
-                src: Expr::Intrinsic {
-                    name: "movk".into(),
-                    operands: vec![Expr::Imm(0x1122_3344_0000_7788), Expr::Imm(0x55aa_0000)],
-                },
+                src: aeonil::e_insert(
+                    Expr::Imm(0x1122_3344_0000_7788),
+                    Expr::Imm(0x55aa),
+                    16,
+                    16,
+                ),
             }],
             BTreeMap::new(),
             8,
@@ -2772,7 +2731,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_block_evaluates_movk_intrinsic() {
+    fn execute_block_evaluates_movk_insert() {
         let backing = TestBackingStore {
             cells: BTreeMap::new(),
         };
@@ -2780,10 +2739,12 @@ mod tests {
         let result = execute_block(
             &[Stmt::Assign {
                 dst: Reg::X(0),
-                src: Expr::Intrinsic {
-                    name: "movk".into(),
-                    operands: vec![Expr::Imm(0x8899_aabb_0000_ccdd), Expr::Imm(0x1234_0000)],
-                },
+                src: aeonil::e_insert(
+                    Expr::Imm(0x8899_aabb_0000_ccdd),
+                    Expr::Imm(0x1234),
+                    16,
+                    16,
+                ),
             }],
             BTreeMap::new(),
             BTreeMap::new(),

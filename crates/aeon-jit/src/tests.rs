@@ -1773,12 +1773,11 @@ fn movk_builds_constant() {
         },
         Stmt::Assign {
             dst: Reg::W(0),
-            src: Expr::Intrinsic {
-                name: "movk".into(),
-                operands: vec![
-                    Expr::Reg(Reg::W(0)),
-                    Expr::Shl(Box::new(Expr::Imm(0x5555)), Box::new(Expr::Imm(16))),
-                ],
+            src: Expr::Insert {
+                dst: Box::new(Expr::Reg(Reg::W(0))),
+                src: Box::new(Expr::Imm(0x5555)),
+                lsb: 16,
+                width: 16,
             },
         },
     ];

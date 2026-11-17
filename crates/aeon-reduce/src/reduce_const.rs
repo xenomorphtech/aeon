@@ -6,10 +6,6 @@ use aeonil::{BranchCond, Expr, Stmt};
 
 /// Recursively fold constant expressions within an expression tree.
 pub fn fold_expr(expr: &Expr) -> Expr {
-    if let Some(folded) = fold_movk_clearing_a_field(expr) {
-        return folded;
-    }
-
     // First, recursively fold all sub-expressions
     let folded = expr.map_subexprs(|e| fold_expr(e));
 
@@ -110,19 +106,21 @@ pub fn fold_expr(expr: &Expr) -> Expr {
             }
             _ => folded,
         },
-        Expr::Intrinsic { name, operands } if name.op() == aeonil::IntrinsicOp::Movk && operands.len() == 2 => {
-            match (&operands[0], &operands[1]) {
-                (Expr::Imm(dst), Expr::Imm(src)) => {
-                    fold_movk(*dst, *src).map(Expr::Imm).unwrap_or(folded)
-                }
-                (Expr::Imm32(dst), Expr::Imm(src)) if *src <= u64::from(u32::MAX) => {
-                    fold_movk(u64::from(*dst), *src)
-                        .map(|value| Expr::Imm32(value as u32))
-                        .unwrap_or(folded)
-                }
-                _ => folded,
+        // --- Bitfield insert into a constant (`movk` onto a known value) ---
+        Expr::Insert {
+            dst,
+            src,
+            lsb,
+            width,
+        } => match (dst.as_ref(), src.as_int_const()) {
+            (Expr::Imm(old), Some(field)) if u32::from(*lsb) + u32::from(*width) <= 64 => {
+                Expr::Imm(insert_bits(*old, field, *lsb, *width))
             }
-        }
+            (Expr::Imm32(old), Some(field)) if u32::from(*lsb) + u32::from(*width) <= 32 => {
+                Expr::Imm32(insert_bits(u64::from(*old), field, *lsb, *width) as u32)
+            }
+            _ => folded,
+        },
 
         // Everything else: already recursively folded by map_subexprs
         _ => folded,
@@ -171,49 +169,13 @@ fn fold_32_bit(expr: &Expr) -> Option<Expr> {
     Some(Expr::Imm32(value))
 }
 
-/// `movk x, #0, lsl #s` clears a 16-bit field. Its immediate is lifted as
-/// `Shl(Imm(0), Imm(s))`; folding that to `Imm(0)` would lose which field, so
-/// it is kept as written, or the whole `movk` is folded if the old value is
-/// known. Returns `None` for any other expression.
-fn fold_movk_clearing_a_field(expr: &Expr) -> Option<Expr> {
-    let Expr::Intrinsic { name, operands } = expr else {
-        return None;
-    };
-    if name.op() != aeonil::IntrinsicOp::Movk || operands.len() != 2 {
-        return None;
+/// `dst` with `width` bits at `lsb` replaced by the low bits of `field`.
+fn insert_bits(dst: u64, field: u64, lsb: u8, width: u8) -> u64 {
+    if width == 0 {
+        return dst;
     }
-    let Expr::Shl(value, shift) = &operands[1] else {
-        return None;
-    };
-    let (Expr::Imm(0), Expr::Imm(shift)) = (value.as_ref(), shift.as_ref()) else {
-        return None;
-    };
-    if *shift == 0 || *shift >= 64 {
-        return None;
-    }
-    Some(match fold_expr(&operands[0]) {
-        Expr::Imm(old) => Expr::Imm(old & !(0xffffu64 << shift)),
-        Expr::Imm32(old) if *shift < 32 => Expr::Imm32(old & !(0xffffu32 << shift)),
-        old => Expr::Intrinsic {
-            name: name.clone(),
-            operands: vec![old, operands[1].clone()],
-        },
-    })
-}
-
-fn fold_movk(dst: u64, src: u64) -> Option<u64> {
-    let shift = if src == 0 {
-        0
-    } else {
-        (src.trailing_zeros() / 16) * 16
-    };
-    if shift >= 64 {
-        return None;
-    }
-
-    let imm16 = (src >> shift) & 0xffff;
-    let mask = 0xffffu64 << shift;
-    Some((dst & !mask) | ((imm16 << shift) & mask))
+    let mask = (u64::MAX >> (64 - u32::from(width))) << lsb;
+    (dst & !mask) | ((field << lsb) & mask)
 }
 
 /// Applies `f` to the operands of a flag-setting expression, leaving the
@@ -371,26 +333,26 @@ mod tests {
     }
 
     #[test]
-    fn fold_movk_intrinsic_with_shifted_immediate() {
-        let expr = Expr::Intrinsic {
-            name: "movk".into(),
-            operands: vec![Expr::Imm(0x7140), e_shl(Expr::Imm(0xace0), Expr::Imm(16))],
-        };
+    fn fold_insert_into_constant() {
+        // movk x, #0xace0, lsl #16 onto 0x7140.
+        let expr = aeonil::e_insert(Expr::Imm(0x7140), Expr::Imm(0xace0), 16, 16);
         assert_eq!(fold_expr(&expr), Expr::Imm(0xace0_7140));
+        // A zero field clears the bits it names.
+        let expr = aeonil::e_insert(Expr::Imm(u64::MAX), Expr::Imm(0), 32, 16);
+        assert_eq!(fold_expr(&expr), Expr::Imm(0xffff_0000_ffff_ffff));
+        // Into a 32-bit constant the result stays 32-bit.
+        let expr = aeonil::e_insert(Expr::Imm32(0xffff), Expr::Imm(0x12), 16, 16);
+        assert_eq!(fold_expr(&expr), Expr::Imm32(0x0012_ffff));
     }
 
     #[test]
-    fn fold_nested_movk_chain_expr() {
-        let expr = Expr::Intrinsic {
-            name: "movk".into(),
-            operands: vec![
-                Expr::Intrinsic {
-                    name: "movk".into(),
-                    operands: vec![Expr::Imm(0x7140), e_shl(Expr::Imm(0xace0), Expr::Imm(16))],
-                },
-                e_shl(Expr::Imm(0x76), Expr::Imm(32)),
-            ],
-        };
+    fn fold_nested_insert_chain() {
+        let expr = aeonil::e_insert(
+            aeonil::e_insert(Expr::Imm(0x7140), Expr::Imm(0xace0), 16, 16),
+            Expr::Imm(0x76),
+            32,
+            16,
+        );
         assert_eq!(fold_expr(&expr), Expr::Imm(0x76_ace0_7140));
     }
 

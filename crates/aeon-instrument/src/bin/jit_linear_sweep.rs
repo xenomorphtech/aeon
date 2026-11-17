@@ -689,23 +689,16 @@ mod tests {
         let stmts = vec![
             Stmt::Assign {
                 dst: Reg::X(8),
-                src: Expr::Intrinsic {
-                    name: "movk".into(),
-                    operands: vec![Expr::Reg(Reg::X(8)), Expr::Imm(0xace0_0000)],
-                },
+                src: aeonil::e_insert(Expr::Reg(Reg::X(8)), Expr::Imm(0xace0), 16, 16),
             },
             Stmt::Assign {
                 dst: Reg::X(8),
-                src: Expr::Intrinsic {
-                    name: "movk".into(),
-                    operands: vec![
-                        Expr::Intrinsic {
-                            name: "movk".into(),
-                            operands: vec![Expr::Reg(Reg::X(8)), Expr::Imm(0xace0_0000)],
-                        },
-                        Expr::Imm(0x76_0000_0000),
-                    ],
-                },
+                src: aeonil::e_insert(
+                    aeonil::e_insert(Expr::Reg(Reg::X(8)), Expr::Imm(0xace0), 16, 16),
+                    Expr::Imm(0x76),
+                    32,
+                    16,
+                ),
             },
         ];
         assert_eq!(
@@ -1968,9 +1961,21 @@ fn format_assign_arm64(dst: &Reg, src: &Expr) -> Option<String> {
     match src {
         Expr::Reg(src_reg) => Some(format!("mov {}, {}", format_reg(dst), format_reg(src_reg))),
         Expr::Imm(value) => Some(format!("mov {}, #0x{value:x}", format_reg(dst))),
-        Expr::Intrinsic { name, operands } if name.op() == aeonil::IntrinsicOp::Movk => {
-            format_movk_assign_arm64(dst, operands)
-        }
+        // A 16-bit field at a multiple of 16 is what `movk` writes.
+        Expr::Insert {
+            src: field,
+            lsb,
+            width: 16,
+            ..
+        } if lsb % 16 == 0 => match field.as_ref() {
+            Expr::Imm(chunk) => Some(format!(
+                "movk {}, #0x{:x}, lsl #0x{:x}",
+                format_reg(dst),
+                chunk,
+                lsb
+            )),
+            _ => None,
+        },
         Expr::Load { addr, size } => Some(format!(
             "{} {}, {}",
             load_mnemonic((*size).into()),
@@ -2033,45 +2038,6 @@ fn format_assign_arm64(dst: &Reg, src: &Expr) -> Option<String> {
                 format_reg(dst),
                 format_expr_arm64(rhs)
             ))
-        }
-        _ => None,
-    }
-}
-
-fn format_movk_assign_arm64(dst: &Reg, operands: &[Expr]) -> Option<String> {
-    let [_, value] = operands else {
-        return None;
-    };
-    let (chunk, shift) = decode_movk_lane(value)?;
-    Some(format!(
-        "movk {}, #0x{:x}, lsl #0x{:x}",
-        format_reg(dst),
-        chunk,
-        shift
-    ))
-}
-
-fn decode_movk_lane(expr: &Expr) -> Option<(u64, u64)> {
-    match expr {
-        Expr::Shl(lhs, rhs) => {
-            let (Expr::Imm(chunk), Expr::Imm(shift)) = (lhs.as_ref(), rhs.as_ref()) else {
-                return None;
-            };
-            Some((*chunk, *shift))
-        }
-        Expr::Imm(value) => {
-            let mut found = None;
-            for lane in 0..4 {
-                let shift = lane * 16;
-                let chunk = (value >> shift) & 0xffff;
-                if chunk != 0 {
-                    if found.is_some() {
-                        return None;
-                    }
-                    found = Some((chunk, shift as u64));
-                }
-            }
-            found.or(Some((0, 0)))
         }
         _ => None,
     }

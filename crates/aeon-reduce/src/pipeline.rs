@@ -1,5 +1,5 @@
 //! Reduction pipeline -- sequences the individual peephole passes (const,
-//! adrp, movk, pair, flags, ext) in the correct order for intra-block
+//! adrp, pair, flags, ext) in the correct order for intra-block
 //! reduction.
 
 use std::collections::HashSet;
@@ -10,7 +10,6 @@ use crate::reduce_adrp::resolve_adrp_add_with_stats;
 use crate::reduce_const::fold_constants;
 use crate::reduce_ext::fold_extensions;
 use crate::reduce_flags::{eliminate_dead_flags, eliminate_dead_flags_cfg, fuse_flags_with_stats};
-use crate::reduce_movk::resolve_movk_chains_with_stats;
 use crate::reduce_pair::flatten_pairs;
 use crate::reduce_stack::{detect_prologue, recognize_stack_frame, rewrite_stack_accesses};
 use crate::ssa::cfg::{build_cfg, Cfg};
@@ -24,7 +23,6 @@ pub struct ReductionMetrics {
     pub stack_slots_recognized: usize,
     pub adrp_resolutions: usize,
     pub flag_fusions: usize,
-    pub movk_chain_resolutions: usize,
     pub ssa_vars_before_optimization: usize,
     pub ssa_vars_after_optimization: usize,
     pub intrinsic_instructions: usize,
@@ -44,25 +42,22 @@ impl ReductionMetrics {
 struct BlockReductionMetrics {
     adrp_resolutions: usize,
     flag_fusions: usize,
-    movk_chain_resolutions: usize,
 }
 
 fn reduce_block_local_with_metrics(stmts: Vec<Stmt>) -> (Vec<Stmt>, BlockReductionMetrics) {
     let stmts = flatten_pairs(stmts); // 1. structural
     let stmts = fold_constants(stmts); // 2. expression-level
     let (stmts, adrp_resolutions) = resolve_adrp_add_with_stats(stmts); // 3. multi-stmt, RegisterEnv
-    let (stmts, movk_chain_resolutions) = resolve_movk_chains_with_stats(stmts); // 4. multi-stmt, RegisterEnv
-    let stmts = fold_constants(stmts); // 5. again (ADRP/MOVK may produce foldable exprs)
-    let (stmts, flag_fusions) = fuse_flags_with_stats(stmts); // 6. multi-stmt, flag tracking
-    let stmts = eliminate_dead_flags(stmts); // 7. liveness
-    let stmts = fold_extensions(stmts); // 8. expression-level
+    let stmts = fold_constants(stmts); // 4. again (forwarding may produce foldable exprs)
+    let (stmts, flag_fusions) = fuse_flags_with_stats(stmts); // 5. multi-stmt, flag tracking
+    let stmts = eliminate_dead_flags(stmts); // 6. liveness
+    let stmts = fold_extensions(stmts); // 7. expression-level
 
     (
         stmts,
         BlockReductionMetrics {
             adrp_resolutions,
             flag_fusions,
-            movk_chain_resolutions,
         },
     )
 }
@@ -123,7 +118,6 @@ pub fn reduce_function_cfg_with_metrics(
         block.stmts = stmts;
         metrics.adrp_resolutions += block_metrics.adrp_resolutions;
         metrics.flag_fusions += block_metrics.flag_fusions;
-        metrics.movk_chain_resolutions += block_metrics.movk_chain_resolutions;
     }
     eliminate_dead_flags_cfg(&mut cfg);
 

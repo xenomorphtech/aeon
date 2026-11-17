@@ -451,61 +451,6 @@ impl LoweringState {
                     ty: types::I64,
                 })
             }
-            IntrinsicOp::Movk => {
-                // MOVK: insert 16-bit immediate at a shifted position, keep other bits.
-                // operands[0] = Expr::Reg(Rd) (current value)
-                // operands[1] = shifted immediate (already has LSL applied)
-                if operands.len() < 2 {
-                    return Err(JitError::UnsupportedExpr("movk operand count"));
-                }
-                let ty = self.resolve_int_type(hint, Some(&operands[0]))?;
-                let reg_val = self.lower_expr(module, builder, imports, &operands[0], Some(ty))?;
-                let reg_val = self.coerce_int(builder, reg_val, ty)?;
-                // Extract the shift amount from the expression tree
-                let (imm_val, shift_amount) = match &operands[1] {
-                    Expr::Shl(inner, shift) => {
-                        let v = self.lower_expr(module, builder, imports, inner, Some(ty))?;
-                        let v = self.coerce_int(builder, v, ty)?;
-                        let shift_imm = match shift.as_ref() {
-                            Expr::Imm(s) => *s as u8,
-                            _ => 0,
-                        };
-                        (v, shift_imm)
-                    }
-                    // Constant folding turns `imm16 << shift` into one
-                    // immediate; its 16-bit field is the one holding its
-                    // lowest set bit.
-                    Expr::Imm(shifted) if *shifted != 0 => {
-                        let shift = (shifted.trailing_zeros() / 16 * 16) as u8;
-                        let value = self.iconst(builder, ty, shifted >> shift)?;
-                        (LoweredValue { value, ty }, shift)
-                    }
-                    _ => {
-                        let v =
-                            self.lower_expr(module, builder, imports, &operands[1], Some(ty))?;
-                        let v = self.coerce_int(builder, v, ty)?;
-                        (v, 0u8)
-                    }
-                };
-                // mask = 0xFFFF << shift_amount
-                let mask_val = 0xFFFFu64 << shift_amount;
-                let mask = self.iconst(builder, ty, mask_val)?;
-                let inv_mask = self.iconst(builder, ty, !mask_val)?;
-                // Clear the 16-bit window, then insert the shifted immediate
-                let cleared = builder.ins().band(reg_val.value, inv_mask);
-                let shifted_imm = if shift_amount > 0 {
-                    let shift = builder.ins().iconst(ty, i64::from(shift_amount));
-                    builder.ins().ishl(imm_val.value, shift)
-                } else {
-                    imm_val.value
-                };
-                // Mask the shifted immediate to 16 bits at the right position
-                let masked_imm = builder.ins().band(shifted_imm, mask);
-                Ok(LoweredValue {
-                    value: builder.ins().bor(cleared, masked_imm),
-                    ty,
-                })
-            }
             _ => Err(JitError::UnsupportedExpr("expr intrinsic")),
         }
     }

@@ -248,8 +248,8 @@ mod tests {
     #[test]
     fn reports_intrinsic_opcode_breakdown_sorted_by_frequency() {
         let stats = coverage_from_words(&[
-            0x72b0_8ac8, // movk w8, #0x8456, lsl #16
-            0xf295_02e3, // movk x3, #0xa817
+            0x9b41_7c08, // smulh x8, x0, x1
+            0x9b43_7c4a, // smulh x10, x2, x3
             0x5309_60c0, // ubfx w0, w6, #9, #16
             0xd503_201f, // nop
             0x7a57_00c1, // ccmp w6, w23, #1, eq
@@ -263,7 +263,7 @@ mod tests {
         assert_eq!(
             stats.intrinsic_opcode_breakdown,
             vec![OpcodeFrequency {
-                opcode: "movk".to_string(),
+                opcode: "smulh".to_string(),
                 count: 2,
             }]
         );

@@ -25,14 +25,22 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
             Stmt::Assign { dst, src }
         }
         Op::MOVK => {
-            // MOVK Xd, #imm, LSL #shift — keeps other bits
+            // MOVK Xd, #imm, LSL #shift: replace one 16-bit field.
             let dst = reg_op(operands, 0);
-            let src = expr_op(operands, 1);
+            let (imm16, shift) = match operands.get(1) {
+                Some(Operand::Imm64 { imm, shift }) | Some(Operand::Imm32 { imm, shift }) => (
+                    imm_to_u64(imm) & 0xffff,
+                    match shift {
+                        Some(Shift::LSL(n)) => *n as u8,
+                        _ => 0,
+                    },
+                ),
+                _ => (0, 0),
+            };
             ft(&mut edges, next_pc);
-            let dst_expr = Expr::Reg(dst.clone());
             Stmt::Assign {
+                src: e_insert(Expr::Reg(dst.clone()), Expr::Imm(imm16), shift, 16),
                 dst,
-                src: e_intrinsic("movk", vec![dst_expr, src]),
             }
         }
         Op::FMOV => {

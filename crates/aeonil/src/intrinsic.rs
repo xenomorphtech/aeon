@@ -48,7 +48,6 @@ macro_rules! intrinsic_ops {
 
 intrinsic_ops! {
     // Scalar integer
-    Movk => "movk",
     Smulh => "smulh",
     Umulh => "umulh",
     Adc => "adc",
@@ -426,8 +425,8 @@ mod tests {
 
     #[test]
     fn scalar_name_has_no_arrangement() {
-        let name = IntrinsicName::new("movk");
-        assert_eq!(name.op(), IntrinsicOp::Movk);
+        let name = IntrinsicName::new("smulh");
+        assert_eq!(name.op(), IntrinsicOp::Smulh);
         assert_eq!(name.suffix(), None);
         assert_eq!(name.arrangement(), None);
     }

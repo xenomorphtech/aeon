@@ -783,7 +783,6 @@ fn reduction_metrics_value(metrics: &ReductionMetrics) -> Value {
         "stack_slots_recognized": metrics.stack_slots_recognized,
         "adrp_resolutions": metrics.adrp_resolutions,
         "flag_fusions": metrics.flag_fusions,
-        "movk_chain_resolutions": metrics.movk_chain_resolutions,
         "ssa_vars_before_optimization": metrics.ssa_vars_before_optimization,
         "ssa_vars_after_optimization": metrics.ssa_vars_after_optimization,
         "intrinsic_instructions": metrics.intrinsic_instructions,
@@ -1018,7 +1017,7 @@ fn run_task(task: &TaskSpec, binary_path: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aeon::il::{e_add, e_intrinsic, e_load, e_sub, BranchCond, Condition, Expr, Reg};
+    use aeon::il::{e_add, e_insert, e_load, e_sub, BranchCond, Condition, Expr, Reg};
     use serde_json::json;
     use std::path::PathBuf;
 
@@ -1188,10 +1187,7 @@ mod tests {
                         0x4004,
                         Stmt::Assign {
                             dst: Reg::X(0),
-                            src: e_intrinsic(
-                                "movk",
-                                vec![Expr::Reg(Reg::X(0)), Expr::Imm(0xCAFE0000)],
-                            ),
+                            src: e_insert(Expr::Reg(Reg::X(0)), Expr::Imm(0xCAFE), 16, 16),
                         },
                         vec![0x4008],
                     ),
@@ -1199,10 +1195,7 @@ mod tests {
                         0x4008,
                         Stmt::Assign {
                             dst: Reg::X(0),
-                            src: e_intrinsic(
-                                "movk",
-                                vec![Expr::Reg(Reg::X(0)), Expr::Imm(0xBEEF00000000)],
-                            ),
+                            src: e_insert(Expr::Reg(Reg::X(0)), Expr::Imm(0xBEEF), 32, 16),
                         },
                         vec![0x400c],
                     ),
@@ -1210,10 +1203,7 @@ mod tests {
                         0x400c,
                         Stmt::Assign {
                             dst: Reg::X(0),
-                            src: e_intrinsic(
-                                "movk",
-                                vec![Expr::Reg(Reg::X(0)), Expr::Imm(0xDEAD000000000000)],
-                            ),
+                            src: e_insert(Expr::Reg(Reg::X(0)), Expr::Imm(0xDEAD), 48, 16),
                         },
                         vec![],
                     ),
@@ -1296,7 +1286,6 @@ mod tests {
         assert_eq!(metrics.value["stack_slots_recognized"], json!(3));
         assert_eq!(metrics.value["adrp_resolutions"], json!(3));
         assert_eq!(metrics.value["flag_fusions"], json!(2));
-        assert_eq!(metrics.value["movk_chain_resolutions"], json!(0));
         assert_eq!(metrics.value["intrinsic_to_proper_il_ratio"], json!(0.0));
 
         let before = metrics.value["ssa_vars_before_optimization"]

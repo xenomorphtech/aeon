@@ -296,7 +296,7 @@ IL and it matches Unicorn on every case. What was wrong, and what it does now:
   top-level operator of a `SetFlags` (`cmp x, #0` became a bare register,
   `cmp` of two known constants became a literal NZCV of 0).
 - **`movk x, #0, lsl #16`** folded to `movk(x, 0)`, losing which field is
-  cleared. The shifted form is kept when the immediate is zero.
+  cleared. `MOVK` is now an `Insert` that names its field (see below).
 - **SSA passes** removed unreachable blocks but kept indexing blocks by
   their old ids, and crashed once a branch on constants became decidable.
   Blocks are renumbered after removal.
@@ -320,6 +320,13 @@ be forwarded. Now:
   and folds operations on it at 32 bits. The differential test has nine
   cases that read such a constant from shifts, divisions, flags, branches,
   bit operations, extensions, FP moves, selects, bitfields and stores.
+
+- `MOVK` is lifted as `Insert { dst, src: Imm(imm16), lsb, width: 16 }`.
+  The `movk` intrinsic, whose field was implied by the shape or value of
+  its operand, is gone, and with it the special cases in the folder and in
+  both engines. `reduce_movk.rs` is deleted: forwarding plus folding an
+  `Insert` into a constant resolves the same chains, for W registers too.
+  The `movk_chain_resolutions` metric went with it.
 
 This is the small version: a width on the one leaf that lacked it, not a
 width on every node. Not done: a constant known through the X view is not
