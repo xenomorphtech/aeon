@@ -122,6 +122,23 @@ moved, not rewritten, then formatted. Correction to the above: only 9 of the
 invariants there are still undocumented. Methods of `LoweringState` became
 `pub(crate)` so sibling modules can call them.
 
+Open, found while running the suite repeatedly (2026-11-17):
+
+- **The JIT's hooks are process-wide.** `JitCompiler::set_*_callback` and
+  `set_block_counters` write statics in `runtime.rs` that every compiled
+  block reads when it runs and every compile consults, so two compilers in
+  one process overwrite each other's hooks. It showed as a unit test failing
+  about one run in seven, when a test on another thread installed a branch
+  hook. The unit tests now take a lock and clear the hooks first; the fix
+  proper is a per-compiler hook table whose address is passed to the
+  trampolines.
+- **The trampolines append to `/tmp/aeon_jit_native.log` on every call**,
+  opening the file each time, with no way to turn it off.
+- **`tests/native_smoke.rs` crashes** in
+  `native_jit_indirect_call_via_x30_bridges_to_printf`, which has JIT code
+  call the host's `printf` through the branch bridge; the other tests in
+  that file then fail on the poisoned lock.
+
 ## 4. Target-specific research code lived inside library crates
 
 A 6.5k-line evaluation binary with hardcoded libc offsets, 40+ one-off Frida
