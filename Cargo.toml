@@ -5,6 +5,7 @@ members = [
     "crates/aeon-jit",
     "crates/aeonil",
     "crates/aeon",
+    "crates/aeon-service",
     "crates/aeon-frontend",
     "crates/aeon-swarm",
     "crates/aeon-reduce",

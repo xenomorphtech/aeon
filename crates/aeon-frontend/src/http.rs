@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
-use crate::service::{tools_list, AeonFrontend};
+use aeon_service::service::{tools_list, AeonFrontend};
 
 pub fn run() {
     let bind_addr = std::env::args()
@@ -121,7 +121,7 @@ mod tests {
     use serde_json::json;
 
     use super::handle_call;
-    use crate::service::AeonFrontend;
+    use aeon_service::service::AeonFrontend;
 
     fn sample_binary_path() -> String {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

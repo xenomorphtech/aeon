@@ -5,7 +5,7 @@ use aeon_swarm::{
     claude::{ClaudeContentBlock, MockClaudeClient},
     types::{AgentSpec, SwarmRole},
 };
-use aeon_frontend::service::AeonFrontend;
+use aeon_service::service::AeonFrontend;
 use std::sync::{Arc, Mutex};
 use serde_json::json;
 

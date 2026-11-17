@@ -43,7 +43,7 @@ Guidelines:\n\
 
 pub fn tool_defs_for_role(role: &SwarmRole) -> Vec<ClaudeToolDef> {
     let names = role.allowed_tools();
-    let all_tools = aeon_frontend::service::tools_list();
+    let all_tools = aeon_service::service::tools_list();
     let tools_arr = all_tools["tools"].as_array().cloned().unwrap_or_default();
 
     tools_arr

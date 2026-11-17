@@ -10,7 +10,7 @@
 use serde_json::json;
 use std::path::PathBuf;
 
-use aeon_frontend::service::AeonFrontend;
+use aeon_service::service::AeonFrontend;
 
 fn sample_binary_path() -> String {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -33,7 +33,7 @@ fn load_sample_binary(frontend: &mut AeonFrontend) {
 /// Test: advanced tool appears in schema with correct structure
 #[test]
 fn advanced_tool_in_schema() {
-    let tools = aeon_frontend::service::tools_list();
+    let tools = aeon_service::service::tools_list();
     let tool_array = tools
         .get("tools")
         .and_then(|t| t.as_array())

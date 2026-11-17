@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use aeon_frontend::service::AeonFrontend;
+use aeon_service::service::AeonFrontend;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]

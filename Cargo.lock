@@ -35,7 +35,7 @@ name = "aeon-frontend"
 version = "0.1.0"
 dependencies = [
  "aeon",
- "schemars",
+ "aeon-service",
  "serde",
  "serde_json",
  "tiny_http",
@@ -90,10 +90,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "aeon-service"
+version = "0.1.0"
+dependencies = [
+ "aeon",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "aeon-swarm"
 version = "0.1.0"
 dependencies = [
- "aeon-frontend",
+ "aeon-service",
  "mockito",
  "reqwest",
  "serde",

@@ -1,5 +1,5 @@
 use aeon_swarm::bridge::{DirectBridge, HttpBridge, ToolBridge};
-use aeon_frontend::service::AeonFrontend;
+use aeon_service::service::AeonFrontend;
 use serde_json::json;
 
 #[test]

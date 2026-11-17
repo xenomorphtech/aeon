@@ -7,7 +7,7 @@ use std::io::{BufRead, Write};
 
 use serde_json::{json, Value};
 
-use crate::service::{tools_list, AeonFrontend};
+use aeon_service::service::{tools_list, AeonFrontend};
 
 pub fn run() {
     let stdin = std::io::stdin();
@@ -133,7 +133,7 @@ mod tests {
     use serde_json::json;
 
     use super::dispatch;
-    use crate::service::AeonFrontend;
+    use aeon_service::service::AeonFrontend;
 
     fn sample_binary_path() -> String {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

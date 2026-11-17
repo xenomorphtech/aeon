@@ -158,7 +158,7 @@ aeon-eval constructor-layout libUnreal.so 0x05e66990
 
 These tools are exposed by the MCP and HTTP frontends:
 
-Generated from `crates/aeon-frontend/src/service.rs` via `cargo run -p aeon-frontend --bin aeon_docgen`.
+Generated from `crates/aeon-service/src/service.rs` via `cargo run -p aeon-frontend --bin aeon_docgen`.
 
 <!-- BEGIN GENERATED TOOL SURFACE -->
 | Tool | Description |
@@ -224,7 +224,7 @@ ELF binary
 | `crates/aeon/src/analysis.rs` | Datalog rules for CFG and reachability |
 | `crates/aeon/src/rc4_search.rs` | Behavioral RC4 detection |
 | `crates/aeon/src/engine.rs` | Session orchestration and analysis internals |
-| `crates/aeon-frontend/src/service.rs` | Shared stateful tool dispatch |
+| `crates/aeon-service/src/service.rs` | Shared stateful tool dispatch |
 | `crates/aeon-frontend/src/mcp.rs` | MCP frontend |
 | `crates/aeon-frontend/src/http.rs` | HTTP frontend |
 

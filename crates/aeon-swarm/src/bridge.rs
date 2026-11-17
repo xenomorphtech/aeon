@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 use serde_json::Value;
-use aeon_frontend::service::AeonFrontend;
+use aeon_service::service::AeonFrontend;
 
 pub trait ToolBridge: Send + Sync {
     fn execute(&self, name: &str, args: &Value) -> Result<Value, String>;

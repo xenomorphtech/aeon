@@ -4,7 +4,7 @@
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
-use aeon_frontend::service::AeonFrontend;
+use aeon_service::service::AeonFrontend;
 
 fn sample_binary_path() -> String {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

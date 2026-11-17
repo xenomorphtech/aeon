@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use aeon_frontend::service::AeonFrontend;
+use aeon_service::service::AeonFrontend;
 use serde_json::json;
 
 use crate::agent::AgentRunner;
