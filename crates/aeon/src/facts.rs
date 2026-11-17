@@ -1,32 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
-use aeon_reduce::pipeline::reduce_function_cfg;
-use aeon_reduce::ssa::construct::{build_ssa, SsaFunction};
+use aeon_reduce::ssa::construct::SsaFunction;
 use aeon_reduce::ssa::domtree::DomTree;
 use aeon_reduce::ssa::types::{BlockId, RegLocation, SsaBranchCond, SsaExpr, SsaStmt, SsaVar};
 use aeon_reduce::ssa::use_def::UseDefMap;
 use aeonil::Condition;
 
-use crate::il::Stmt;
-use crate::lifter;
-
-#[derive(Debug, Clone)]
-pub struct LiftedInstruction {
-    pub addr: u64,
-    pub disasm: String,
-    pub stmt: Stmt,
-    pub edges: Vec<u64>,
-}
-
-pub struct FunctionAnalysis {
-    pub func_addr: u64,
-    pub lifted: Vec<LiftedInstruction>,
-    pub reduced_cfg: aeon_reduce::ssa::cfg::Cfg,
-    pub ssa: SsaFunction,
-    pub use_def: UseDefMap,
-    pub dom_tree: DomTree,
-    pub facts: FunctionFacts,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct StmtSite {
@@ -125,29 +104,6 @@ pub struct FunctionFacts {
     stmts: HashMap<StmtSite, SsaStmt>,
     stmt_order: Vec<StmtSite>,
     block_addrs: HashMap<BlockId, u64>,
-}
-
-pub fn analyze_function(raw_bytes: &[u8], func_addr: u64) -> FunctionAnalysis {
-    let lifted = decode_and_lift(raw_bytes, func_addr);
-    let instructions: Vec<(u64, Stmt, Vec<u64>)> = lifted
-        .iter()
-        .map(|inst| (inst.addr, inst.stmt.clone(), inst.edges.clone()))
-        .collect();
-    let reduced_cfg = reduce_function_cfg(&instructions);
-    let ssa = build_ssa(&reduced_cfg);
-    let use_def = UseDefMap::build(&ssa);
-    let dom_tree = DomTree::build(&ssa);
-    let facts = FunctionFacts::from_analysis(&ssa, &use_def, &dom_tree);
-
-    FunctionAnalysis {
-        func_addr,
-        lifted,
-        reduced_cfg,
-        ssa,
-        use_def,
-        dom_tree,
-        facts,
-    }
 }
 
 pub fn extract_function_facts(func: &SsaFunction) -> FunctionFacts {
@@ -424,44 +380,6 @@ impl FunctionFacts {
     }
 }
 
-fn decode_and_lift(raw_bytes: &[u8], func_addr: u64) -> Vec<LiftedInstruction> {
-    let mut lifted = Vec::new();
-    let mut offset = 0usize;
-    let mut pc = func_addr;
-
-    while offset + 4 <= raw_bytes.len() {
-        let word = u32::from_le_bytes(raw_bytes[offset..offset + 4].try_into().unwrap());
-        let next_pc = if offset + 8 <= raw_bytes.len() {
-            Some(pc + 4)
-        } else {
-            None
-        };
-
-        let lifted_inst = match bad64::decode(word, pc) {
-            Ok(insn) => {
-                let result = lifter::lift(&insn, pc, next_pc);
-                LiftedInstruction {
-                    addr: pc,
-                    disasm: result.disasm,
-                    stmt: result.stmt,
-                    edges: result.edges,
-                }
-            }
-            Err(_) => LiftedInstruction {
-                addr: pc,
-                disasm: "(invalid)".to_string(),
-                stmt: Stmt::Nop,
-                edges: next_pc.into_iter().collect(),
-            },
-        };
-        lifted.push(lifted_inst);
-
-        offset += 4;
-        pc += 4;
-    }
-
-    lifted
-}
 
 fn collect_defs_in_stmt(stmt: &SsaStmt, site: StmtSite, defines: &mut Vec<DefinitionFact>) {
     match stmt {

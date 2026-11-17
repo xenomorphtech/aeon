@@ -8,8 +8,11 @@ use aeon_reduce::ssa::pipeline::{optimize_ssa, reduce_and_build_ssa};
 use aeon_reduce::ssa::types::{BlockId, RegLocation, SsaBranchCond, SsaExpr, SsaStmt, SsaVar};
 use aeonil::{BranchCond, Condition, Expr, Reg, Stmt, TrapKind};
 use serde::Serialize;
+use serde_json::{json, Value};
 
+use crate::analysis::AeonAnalysis;
 use crate::elf::{FunctionInfo, LoadedBinary};
+use crate::facts::FunctionFacts;
 use crate::lifter;
 
 #[derive(Debug, Clone)]
@@ -51,6 +54,7 @@ pub struct FunctionArtifacts {
     stack_frame: Option<Option<PrologueInfo>>,
     ssa: Option<SsaFunction>,
     optimized_ssa: Option<SsaFunction>,
+    facts: Option<FunctionFacts>,
 }
 
 impl FunctionArtifacts {
@@ -61,6 +65,7 @@ impl FunctionArtifacts {
             stack_frame: None,
             ssa: None,
             optimized_ssa: None,
+            facts: None,
         }
     }
 
@@ -95,6 +100,14 @@ impl FunctionArtifacts {
             self.ssa = Some(build_ssa(self.reduced_cfg()));
         }
         self.ssa.as_ref().unwrap()
+    }
+
+    /// Datalog-style facts over the (unoptimized) SSA form.
+    pub fn facts(&mut self) -> &FunctionFacts {
+        if self.facts.is_none() {
+            self.facts = Some(FunctionFacts::from_ssa(self.ssa()));
+        }
+        self.facts.as_ref().unwrap()
     }
 
     pub fn optimized_ssa(&mut self) -> &SsaFunction {
@@ -163,6 +176,52 @@ pub fn decode_function(
         func_addr: func.addr,
         size: func.size,
         instructions,
+    })
+}
+
+/// Listing, intra-function edges and reachability for one function.
+pub fn function_details(decoded: &DecodedFunction) -> Value {
+    let func = decoded.func_addr;
+    let mut analysis = AeonAnalysis::default();
+    for instruction in &decoded.instructions {
+        analysis.inst_in_func.push((func, instruction.addr));
+        for &target in &instruction.edges {
+            analysis.edge.push((instruction.addr, target));
+        }
+    }
+    analysis.run();
+
+    let il_listing: Vec<Value> = decoded
+        .instructions
+        .iter()
+        .map(|instruction| {
+            json!({
+                "address": format!("0x{:x}", instruction.addr),
+                "disassembly": instruction.asm,
+                "il": format!("{:?}", instruction.stmt),
+            })
+        })
+        .collect();
+
+    let internal_edges: Vec<Value> = analysis
+        .internal_edge
+        .iter()
+        .map(|(_, src, dst)| json!({ "src": format!("0x{:x}", src), "dst": format!("0x{:x}", dst) }))
+        .collect();
+
+    let terminals: Vec<String> = analysis
+        .terminal
+        .iter()
+        .map(|(_, addr)| format!("0x{:x}", addr))
+        .collect();
+
+    json!({
+        "function": format!("0x{:x}", func),
+        "instruction_count": decoded.instructions.len(),
+        "il_listing": il_listing,
+        "internal_edges": internal_edges,
+        "terminal_blocks": terminals,
+        "reachable_paths_count": analysis.reachable.len(),
     })
 }
 

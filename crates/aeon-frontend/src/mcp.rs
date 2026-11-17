@@ -72,14 +72,15 @@ fn dispatch(
                 .cloned()
                 .unwrap_or_else(|| json!({}));
 
-            let result = match frontend.call_tool(name, &args) {
+            let result = match frontend.call_tool_typed(name, &args) {
                 Ok(value) => json!({
                     "content": [{"type": "text", "text": serde_json::to_string(&value).unwrap()}],
                     "isError": false
                 }),
-                Err(message) => json!({
-                    "content": [{"type": "text", "text": message}],
-                    "isError": true
+                Err(error) => json!({
+                    "content": [{"type": "text", "text": error.message}],
+                    "isError": true,
+                    "_meta": {"code": error.code.as_str()}
                 }),
             };
 

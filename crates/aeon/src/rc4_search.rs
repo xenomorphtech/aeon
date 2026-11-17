@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use aeon_reduce::ssa::types::{SsaExpr, SsaStmt};
 
 use crate::elf::LoadedBinary;
-use crate::engine::AeonEngine;
+use crate::function_ir::{decode_function, FunctionArtifacts};
 use crate::facts::{FunctionFacts, PatternMatch, PatternSpec, StmtSite};
 use crate::lifter;
 
@@ -24,11 +24,6 @@ struct Rc4CandidateEvidence {
 }
 
 pub fn search(binary: &LoadedBinary) -> Value {
-    let mut engine = AeonEngine::with_binary(binary.clone());
-    search_with_engine(binary, &mut engine)
-}
-
-pub fn search_with_engine(binary: &LoadedBinary, engine: &mut AeonEngine) -> Value {
     let mut phase1_count = 0u64;
     let mut phase2_count = 0u64;
     let mut verified = Vec::new();
@@ -43,10 +38,14 @@ pub fn search_with_engine(binary: &LoadedBinary, engine: &mut AeonEngine) -> Val
             None => continue,
         };
 
-        let Some(analysis) = engine.function_analysis(func.addr) else {
+        // A whole-binary scan: each function's artifacts are built, used
+        // and dropped, not kept in a session's cache.
+        let Ok(decoded) = decode_function(binary, func) else {
             continue;
         };
-        let evidence = extract_candidate_evidence(&analysis.facts);
+        let mut artifacts = FunctionArtifacts::new(decoded);
+        let facts = artifacts.facts();
+        let evidence = extract_candidate_evidence(facts);
 
         if !passes_phase1(&evidence) {
             continue;
@@ -65,17 +64,17 @@ pub fn search_with_engine(binary: &LoadedBinary, engine: &mut AeonEngine) -> Val
             .take(3)
             .map(|(load1, load2, store1, store2)| {
                 json!({
-                    "load1": format_stmt_site(&analysis.facts, *load1),
-                    "load2": format_stmt_site(&analysis.facts, *load2),
-                    "store1": format_stmt_site(&analysis.facts, *store1),
-                    "store2": format_stmt_site(&analysis.facts, *store2),
+                    "load1": format_stmt_site(facts, *load1),
+                    "load2": format_stmt_site(facts, *load2),
+                    "store1": format_stmt_site(facts, *store1),
+                    "store2": format_stmt_site(facts, *store2),
                 })
             })
             .collect();
         let xor_sites: Vec<String> = evidence
             .keystream_xor_sites
             .iter()
-            .map(|site| format_stmt_site(&analysis.facts, *site))
+            .map(|site| format_stmt_site(facts, *site))
             .collect();
         let listing = disassemble_function(raw_bytes, func.addr);
 

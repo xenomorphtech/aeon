@@ -1,14 +1,14 @@
-use std::cell::RefCell;
 use std::collections::{hash_map::Entry, HashMap};
+use std::sync::{Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use serde_json::{json, Value};
 use bad64;
 
 use crate::coverage::analyze_lift_coverage;
 use crate::elf::{self, FunctionInfo, LoadedBinary};
-use crate::engine::{AeonEngine, SemanticContext};
+use crate::blackboard::{Blackboard, SemanticContext};
 use crate::function_ir::{
-    decode_function, DecodedFunction, FunctionArtifacts, ReducedFunctionView, SsaFunctionView,
+    decode_function, function_details, DecodedFunction, FunctionArtifacts, ReducedFunctionView, SsaFunctionView,
     StackFrameArtifactView,
 };
 use crate::il::{Expr, Stmt};
@@ -16,11 +16,21 @@ use crate::lifter;
 use crate::object_layout::ConstructorObjectLayout;
 use crate::pointer_analysis;
 
+/// One loaded binary and everything known about it.
+///
+/// There are three owners, and nothing is stored twice:
+/// - `binary`: the bytes and the function table, immutable after load;
+/// - `function_cache`: per-function artifacts derived from the binary
+///   (decoded instructions, reduced CFG, SSA, facts), computed on demand;
+/// - `blackboard`: what the analyst has recorded (names, structs, notes).
+///
+/// The two mutable parts sit behind locks, so a session can be shared
+/// between threads.
 pub struct AeonSession {
     path: String,
     binary: LoadedBinary,
-    analysis_state: RefCell<AeonEngine>,
-    function_cache: RefCell<HashMap<u64, FunctionArtifacts>>,
+    blackboard: RwLock<Blackboard>,
+    function_cache: Mutex<HashMap<u64, FunctionArtifacts>>,
 }
 
 impl AeonSession {
@@ -28,9 +38,9 @@ impl AeonSession {
         let binary = elf::load_elf(path)?;
         Ok(Self {
             path: path.to_string(),
-            analysis_state: RefCell::new(AeonEngine::with_binary(binary.clone())),
+            blackboard: RwLock::new(Blackboard::new()),
             binary,
-            function_cache: RefCell::new(HashMap::new()),
+            function_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -38,9 +48,9 @@ impl AeonSession {
         let binary = elf::load_raw(path, base_addr)?;
         Ok(Self {
             path: path.to_string(),
-            analysis_state: RefCell::new(AeonEngine::with_binary(binary.clone())),
+            blackboard: RwLock::new(Blackboard::new()),
             binary,
-            function_cache: RefCell::new(HashMap::new()),
+            function_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -53,9 +63,7 @@ impl AeonSession {
     }
 
     pub fn set_analysis_name(&self, addr: u64, name: &str) -> Value {
-        let semantic = self
-            .analysis_state
-            .borrow_mut()
+        let semantic = self.blackboard_mut()
             .set_analysis_name(addr, name.to_string());
 
         json!({
@@ -67,9 +75,7 @@ impl AeonSession {
     }
 
     pub fn rename_symbol(&self, addr: u64, name: &str) -> Value {
-        let semantic = self
-            .analysis_state
-            .borrow_mut()
+        let semantic = self.blackboard_mut()
             .rename_symbol(addr, name.to_string());
 
         json!({
@@ -81,9 +87,7 @@ impl AeonSession {
     }
 
     pub fn define_struct(&self, addr: u64, definition: &str) -> Value {
-        let semantic = self
-            .analysis_state
-            .borrow_mut()
+        let semantic = self.blackboard_mut()
             .define_struct(addr, definition.to_string());
 
         json!({
@@ -95,9 +99,7 @@ impl AeonSession {
     }
 
     pub fn add_hypothesis(&self, addr: u64, note: &str) -> Value {
-        let semantic = self
-            .analysis_state
-            .borrow_mut()
+        let semantic = self.blackboard_mut()
             .add_hypothesis(addr, note.to_string());
 
         json!({
@@ -109,7 +111,7 @@ impl AeonSession {
     }
 
     pub fn search_analysis_names(&self, pattern: &str) -> Result<Value, String> {
-        let engine = self.analysis_state.borrow();
+        let engine = self.blackboard();
         let matches = engine
             .search_analysis_names(pattern)
             .map_err(|e| format!("Invalid regex: {}", e))?;
@@ -138,7 +140,7 @@ impl AeonSession {
     }
 
     pub fn get_blackboard_entry(&self, addr: u64) -> Value {
-        let engine = self.analysis_state.borrow();
+        let engine = self.blackboard();
         let func = self.binary.function_containing(addr);
         json!({
             "addr": format!("0x{:x}", addr),
@@ -152,7 +154,7 @@ impl AeonSession {
     }
 
     pub fn summary(&self) -> Value {
-        let engine = self.analysis_state.borrow();
+        let engine = self.blackboard();
         json!({
             "status": "loaded",
             "path": self.path,
@@ -166,7 +168,7 @@ impl AeonSession {
 
     pub fn list_functions(&self, offset: usize, limit: usize, name_filter: Option<&str>) -> Value {
         let name_filter = name_filter.unwrap_or("");
-        let engine = self.analysis_state.borrow();
+        let engine = self.blackboard();
 
         let filtered: Vec<&FunctionInfo> = self
             .binary
@@ -200,7 +202,7 @@ impl AeonSession {
     }
 
     pub fn get_il(&self, addr: u64) -> Result<Value, String> {
-        let engine = self.analysis_state.borrow();
+        let engine = self.blackboard();
         self.with_function_artifacts(addr, |func, artifacts| {
             let listing =
                 render_decoded_listing(artifacts.decoded(), &self.binary, &engine, ListingMode::Il);
@@ -225,7 +227,7 @@ impl AeonSession {
     }
 
     pub fn get_reduced_il(&self, addr: u64) -> Result<Value, String> {
-        let engine = self.analysis_state.borrow();
+        let engine = self.blackboard();
         self.with_function_artifacts(addr, |func, artifacts| {
             let mut value =
                 serde_json::to_value(ReducedFunctionView::from_artifacts(addr, artifacts)).unwrap();
@@ -242,7 +244,7 @@ impl AeonSession {
     }
 
     pub fn get_ssa(&self, addr: u64, optimize: bool) -> Result<Value, String> {
-        let engine = self.analysis_state.borrow();
+        let engine = self.blackboard();
         self.with_function_artifacts(addr, |func, artifacts| {
             let mut value = serde_json::to_value(SsaFunctionView::from_artifacts(addr, artifacts, optimize))
                 .unwrap();
@@ -294,12 +296,10 @@ impl AeonSession {
     pub fn get_function_details(&self, addr: u64) -> Result<Value, String> {
         let func = self.find_function(addr)?;
         let mut details = self.with_function_artifacts(addr, |_, artifacts| {
-            let mut analysis = AeonEngine::new();
-            analysis.ingest_decoded_function(artifacts.decoded());
-            Ok(analysis.get_function_details(func.addr))
+            Ok(function_details(artifacts.decoded()))
         })?;
 
-        let engine = self.analysis_state.borrow();
+        let engine = self.blackboard();
         annotate_function_details(&mut details, func, &self.binary, &engine);
         Ok(details)
     }
@@ -538,7 +538,7 @@ impl AeonSession {
     pub fn get_function_cfg(&self, addr: u64) -> Result<Value, String> {
         let func = self.find_function(addr)?;
         let details = self.get_function_details(addr)?;
-        let engine = self.analysis_state.borrow();
+        let engine = self.blackboard();
 
         let mut edges = details["internal_edges"].clone();
         annotate_cfg_edges(&mut edges, &self.binary, &engine);
@@ -557,7 +557,7 @@ impl AeonSession {
 
     pub fn get_xrefs(&self, target_addr: u64) -> Value {
         let target_func = self.binary.functions.iter().find(|f| f.addr == target_addr);
-        let engine = self.analysis_state.borrow();
+        let engine = self.blackboard();
 
         let mut calls_out = Vec::new();
         if let Some(func) = target_func {
@@ -679,7 +679,7 @@ impl AeonSession {
             max_paths,
         )?;
         let mut value = serde_json::to_value(report).unwrap();
-        let engine = self.analysis_state.borrow();
+        let engine = self.blackboard();
         annotate_call_paths(&mut value, &self.binary, &engine);
         Ok(value)
     }
@@ -877,7 +877,7 @@ impl AeonSession {
         }
 
         let bytes = &self.binary.data[start..end];
-        let engine = self.analysis_state.borrow();
+        let engine = self.blackboard();
         Ok(data_view(addr, bytes, &self.binary, &engine))
     }
 
@@ -887,7 +887,7 @@ impl AeonSession {
             .binary
             .read_vaddr(addr, size)
             .ok_or_else(|| format!("Cannot read address 0x{:x} — not in any LOAD segment", addr))?;
-        let engine = self.analysis_state.borrow();
+        let engine = self.blackboard();
         Ok(data_view(addr, bytes, &self.binary, &engine))
     }
 
@@ -897,7 +897,7 @@ impl AeonSession {
             .binary
             .read_string(addr, max_len)
             .ok_or_else(|| format!("Cannot read address 0x{:x} — not in any LOAD segment", addr))?;
-        let engine = self.analysis_state.borrow();
+        let engine = self.blackboard();
 
         Ok(json!({
             "addr": format!("0x{:x}", addr),
@@ -948,7 +948,7 @@ impl AeonSession {
         }
 
         let bytes = &self.binary.data[file_start..file_end];
-        let engine = self.analysis_state.borrow();
+        let engine = self.blackboard();
         let listing =
             render_instruction_listing(bytes, start_addr, &self.binary, &engine, ListingMode::Asm);
 
@@ -972,7 +972,7 @@ impl AeonSession {
             .binary
             .function_containing(addr)
             .ok_or_else(|| format!("No function containing 0x{:x}", addr))?;
-        let engine = self.analysis_state.borrow();
+        let engine = self.blackboard();
         let mut response = json!({
             "query_addr": format!("0x{:x}", addr),
             "query_semantic": semantic_value(&engine, addr),
@@ -1010,7 +1010,7 @@ impl AeonSession {
 
     pub fn search_rc4(&self) -> Value {
         let mut report = crate::rc4_search::search(&self.binary);
-        let engine = self.analysis_state.borrow();
+        let engine = self.blackboard();
         annotate_rc4_report(&mut report, &self.binary, &engine);
         report
     }
@@ -1179,6 +1179,24 @@ impl AeonSession {
         serde_json::to_value(&result).map_err(|e| format!("serialize result: {}", e))
     }
 
+    // A panic while a lock is held leaves the data as it was before the
+    // panicking call's last write, which is still consistent: the cache only
+    // gains entries and the blackboard is updated one field at a time.
+    fn blackboard(&self) -> RwLockReadGuard<'_, Blackboard> {
+        self.blackboard.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn blackboard_mut(&self) -> RwLockWriteGuard<'_, Blackboard> {
+        self.blackboard.write().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn function_cache(&self) -> MutexGuard<'_, HashMap<u64, FunctionArtifacts>> {
+        self.function_cache.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Runs `f` on the artifacts of the function containing `addr`, building
+    /// them first if needed. The cache is locked while `f` runs, so `f` must
+    /// not call back into a method that uses the cache.
     fn with_function_artifacts<T>(
         &self,
         addr: u64,
@@ -1188,7 +1206,7 @@ impl AeonSession {
             .binary
             .function_containing(addr)
             .ok_or_else(|| format!("No function containing 0x{:x}", addr))?;
-        let mut cache = self.function_cache.borrow_mut();
+        let mut cache = self.function_cache();
 
         let artifacts = match cache.entry(func.addr) {
             Entry::Occupied(entry) => entry.into_mut(),
@@ -1209,6 +1227,12 @@ impl AeonSession {
             .ok_or_else(|| format!("No function at 0x{:x}", addr))
     }
 }
+
+// The HTTP frontend and the swarm share one session between threads.
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<AeonSession>();
+};
 
 use aeonil::Reg;
 
@@ -1383,7 +1407,7 @@ pub(crate) fn branch_cond_uses_register(cond: &aeonil::BranchCond, register: &st
     }
 }
 
-fn function_matches_filter(func: &FunctionInfo, filter: &str, engine: &AeonEngine) -> bool {
+fn function_matches_filter(func: &FunctionInfo, filter: &str, engine: &Blackboard) -> bool {
     if filter.is_empty() {
         return true;
     }
@@ -1417,7 +1441,7 @@ fn semantic_to_value(value: Option<SemanticContext>) -> Value {
     }
 }
 
-fn semantic_value(engine: &AeonEngine, addr: u64) -> Value {
+fn semantic_value(engine: &Blackboard, addr: u64) -> Value {
     semantic_to_value(engine.semantic_context(addr))
 }
 
@@ -1433,7 +1457,7 @@ fn resolved_name_value(
     addr: u64,
     fallback_name: Option<&str>,
     binary: &LoadedBinary,
-    engine: &AeonEngine,
+    engine: &Blackboard,
 ) -> Value {
     match engine
         .symbol_name(addr)
@@ -1445,7 +1469,7 @@ fn resolved_name_value(
     }
 }
 
-fn annotate_cfg_edges(edges: &mut Value, binary: &LoadedBinary, engine: &AeonEngine) {
+fn annotate_cfg_edges(edges: &mut Value, binary: &LoadedBinary, engine: &Blackboard) {
     let Some(arr) = edges.as_array_mut() else { return };
     for edge in arr {
         let Some(obj) = edge.as_object_mut() else { continue };
@@ -1465,7 +1489,7 @@ fn annotate_cfg_edges(edges: &mut Value, binary: &LoadedBinary, engine: &AeonEng
     }
 }
 
-fn annotate_call_paths(root: &mut Value, binary: &LoadedBinary, engine: &AeonEngine) {
+fn annotate_call_paths(root: &mut Value, binary: &LoadedBinary, engine: &Blackboard) {
     if let Some(path) = root.get_mut("shortest_path") {
         if let Some(functions) = path.get_mut("functions").and_then(Value::as_array_mut) {
             let mut annotated = Vec::new();
@@ -1505,7 +1529,7 @@ fn annotate_call_paths(root: &mut Value, binary: &LoadedBinary, engine: &AeonEng
     }
 }
 
-fn data_view(addr: u64, bytes: &[u8], binary: &LoadedBinary, engine: &AeonEngine) -> Value {
+fn data_view(addr: u64, bytes: &[u8], binary: &LoadedBinary, engine: &Blackboard) -> Value {
     let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
     let ascii: String = bytes
         .iter()
@@ -1566,7 +1590,7 @@ fn render_instruction_listing(
     raw_bytes: &[u8],
     start_addr: u64,
     binary: &LoadedBinary,
-    engine: &AeonEngine,
+    engine: &Blackboard,
     mode: ListingMode,
 ) -> Vec<Value> {
     let mut listing = Vec::new();
@@ -1640,7 +1664,7 @@ fn render_instruction_listing(
 fn render_decoded_listing(
     decoded: &DecodedFunction,
     binary: &LoadedBinary,
-    engine: &AeonEngine,
+    engine: &Blackboard,
     mode: ListingMode,
 ) -> Vec<Value> {
     let mut listing = Vec::new();
@@ -1702,7 +1726,7 @@ fn annotate_instruction_entry(
     addr: u64,
     stmt: &Stmt,
     binary: &LoadedBinary,
-    engine: &AeonEngine,
+    engine: &Blackboard,
 ) {
     annotate_instruction_address(entry, "addr", addr, None, binary, engine);
 
@@ -1739,7 +1763,7 @@ fn annotate_function_details(
     details: &mut Value,
     func: &FunctionInfo,
     binary: &LoadedBinary,
-    engine: &AeonEngine,
+    engine: &Blackboard,
 ) {
     if let Some(object) = details.as_object_mut() {
         object.insert("name".to_string(), option_str(func.name.as_deref()));
@@ -1755,7 +1779,7 @@ fn annotate_function_details(
     }
 }
 
-fn annotate_rc4_report(report: &mut Value, binary: &LoadedBinary, engine: &AeonEngine) {
+fn annotate_rc4_report(report: &mut Value, binary: &LoadedBinary, engine: &Blackboard) {
     let Some(candidates) = report.get_mut("candidates").and_then(Value::as_array_mut) else {
         return;
     };
@@ -1791,7 +1815,7 @@ fn annotate_listing(
     entries: &mut [Value],
     addr_key: &str,
     binary: &LoadedBinary,
-    engine: &AeonEngine,
+    engine: &Blackboard,
 ) {
     for entry in entries {
         let Some(addr) = entry
@@ -1812,7 +1836,7 @@ fn annotate_instruction_address(
     addr: u64,
     fallback_name: Option<&str>,
     binary: &LoadedBinary,
-    engine: &AeonEngine,
+    engine: &Blackboard,
 ) {
     if let Some(object) = entry.as_object_mut() {
         object.insert(

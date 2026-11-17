@@ -1,11 +1,10 @@
 pub mod analysis;
 pub mod api;
-pub mod components;
+pub mod blackboard;
 pub mod coverage;
 pub mod datalog;
 pub mod elf;
 pub mod emulation;
-pub mod engine;
 pub mod facts;
 pub mod function_ir;
 pub mod il;

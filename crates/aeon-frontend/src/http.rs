@@ -72,7 +72,7 @@ fn handle_call(body: Value, frontend: &mut AeonFrontend) -> (u16, Value) {
         .cloned()
         .unwrap_or_else(|| json!({}));
 
-    match frontend.call_tool(name, &args) {
+    match frontend.call_tool_typed(name, &args) {
         Ok(result) => (
             200,
             json!({
@@ -85,7 +85,8 @@ fn handle_call(body: Value, frontend: &mut AeonFrontend) -> (u16, Value) {
             400,
             json!({
                 "ok": false,
-                "error": error,
+                "error": error.message,
+                "code": error.code.as_str(),
                 "state": frontend.status(),
             }),
         ),

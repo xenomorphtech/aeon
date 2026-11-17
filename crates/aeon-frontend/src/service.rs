@@ -1,5 +1,98 @@
 use serde_json::{json, Value};
 
+/// Why a tool call failed. The string form is stable: clients may branch
+/// on it, while messages are for people and may change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ErrorCode {
+    /// No tool has that name.
+    UnknownTool,
+    /// The tool needs a binary and none is loaded.
+    NoBinaryLoaded,
+    /// An argument is missing, of the wrong type, or not parseable.
+    InvalidArgument,
+    /// The arguments were understood and the analysis itself failed: no
+    /// function at that address, a file that would not load, and so on.
+    Analysis,
+}
+
+impl ErrorCode {
+    pub const ALL: [ErrorCode; 4] = [
+        ErrorCode::UnknownTool,
+        ErrorCode::NoBinaryLoaded,
+        ErrorCode::InvalidArgument,
+        ErrorCode::Analysis,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ErrorCode::UnknownTool => "unknown_tool",
+            ErrorCode::NoBinaryLoaded => "no_binary_loaded",
+            ErrorCode::InvalidArgument => "invalid_argument",
+            ErrorCode::Analysis => "analysis_failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolError {
+    pub code: ErrorCode,
+    pub message: String,
+}
+
+impl ToolError {
+    pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    /// The error as a JSON object: `{"code": ..., "message": ...}`.
+    pub fn to_value(&self) -> Value {
+        json!({ "code": self.code.as_str(), "message": self.message })
+    }
+}
+
+impl std::fmt::Display for ToolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ToolError {}
+
+/// The core reports failures as strings; they are all analysis failures.
+/// Argument problems are raised here in the frontend, as [`ArgError`].
+impl From<String> for ToolError {
+    fn from(message: String) -> Self {
+        Self::new(ErrorCode::Analysis, message)
+    }
+}
+
+/// A problem with a tool call's arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArgError(String);
+
+impl From<&str> for ArgError {
+    fn from(message: &str) -> Self {
+        Self(message.to_string())
+    }
+}
+
+impl From<String> for ArgError {
+    fn from(message: String) -> Self {
+        Self(message)
+    }
+}
+
+impl From<ArgError> for ToolError {
+    fn from(error: ArgError) -> Self {
+        Self::new(ErrorCode::InvalidArgument, error.0)
+    }
+}
+
+pub type ToolResult = Result<Value, ToolError>;
+
 pub struct AeonFrontend {
     session: Option<aeon::AeonSession>,
 }
@@ -21,56 +114,35 @@ impl AeonFrontend {
         }
     }
 
+    /// Runs the tool called `name`. See [`TOOLS`] for what exists.
     pub fn call_tool(&mut self, name: &str, args: &Value) -> Result<Value, String> {
-        match name {
-            "load_binary" => self.tool_load_binary(args),
-            "list_functions" => self.tool_list_functions(args),
-            "set_analysis_name" => self.tool_set_analysis_name(args),
-            "rename_symbol" => self.tool_rename_symbol(args),
-            "define_struct" => self.tool_define_struct(args),
-            "add_hypothesis" => self.tool_add_hypothesis(args),
-            "search_analysis_names" => self.tool_search_analysis_names(args),
-            "get_blackboard_entry" => self.tool_get_blackboard_entry(args),
-            "get_il" => self.tool_get_il(args),
-            "get_function_il" => self.tool_get_function_il(args),
-            "get_reduced_il" => self.tool_get_reduced_il(args),
-            "get_ssa" => self.tool_get_ssa(args),
-            "get_stack_frame" => self.tool_get_stack_frame(args),
-            "get_function_cfg" => self.tool_get_function_cfg(args),
-            "get_function_skeleton" => self.tool_get_function_skeleton(args),
-            "get_data_flow_slice" => self.tool_get_data_flow_slice(args),
-            "get_xrefs" => self.tool_get_xrefs(args),
-            "scan_pointers" => self.tool_scan_pointers(),
-            "scan_vtables" => self.tool_scan_vtables(),
-            "get_function_pointers" => self.tool_get_function_pointers(args),
-            "find_call_paths" => self.tool_find_call_paths(args),
-            "get_bytes" => self.tool_get_bytes(args),
-            "search_rc4" => self.tool_search_rc4(),
-            "get_coverage" => self.tool_get_coverage(),
-            "get_asm" => self.tool_get_asm(args),
-            "get_function_at" => self.tool_get_function_at(args),
-            "get_string" => self.tool_get_string(args),
-            "get_data" => self.tool_get_data(args),
-            "emulate_snippet_il" => self.tool_emulate_snippet_il(args),
-            "emulate_snippet_native" => self.tool_emulate_snippet_native(args),
-            "emulate_snippet" => self.tool_emulate_snippet_native(args),
-            "emulate_snippet_native_advanced" => self.tool_emulate_snippet_native_advanced(args),
-            "execute_datalog" => self.tool_execute_datalog(args),
-            _ => Err(format!("Unknown tool: {}", name)),
-        }
+        self.call_tool_typed(name, args)
+            .map_err(|error| error.message)
     }
 
-    fn require_session(&self) -> Result<&aeon::AeonSession, String> {
-        self.session
-            .as_ref()
-            .ok_or("No binary loaded. Call load_binary first.".into())
+    /// As [`Self::call_tool`], with an error that carries a stable code.
+    pub fn call_tool_typed(&mut self, name: &str, args: &Value) -> ToolResult {
+        let tool = TOOLS
+            .iter()
+            .find(|tool| tool.name == name)
+            .ok_or_else(|| ToolError::new(ErrorCode::UnknownTool, format!("Unknown tool: {}", name)))?;
+        (tool.handler)(self, args)
     }
 
-    fn tool_load_binary(&mut self, args: &Value) -> Result<Value, String> {
+    fn require_session(&self) -> Result<&aeon::AeonSession, ToolError> {
+        self.session.as_ref().ok_or_else(|| {
+            ToolError::new(
+                ErrorCode::NoBinaryLoaded,
+                "No binary loaded. Call load_binary first.",
+            )
+        })
+    }
+
+    fn tool_load_binary(&mut self, args: &Value) -> ToolResult {
         let path = args
             .get("path")
             .and_then(|value| value.as_str())
-            .ok_or("Missing required parameter: path")?;
+            .ok_or(ArgError::from("Missing required parameter: path"))?;
         let format = args
             .get("format")
             .and_then(|value| value.as_str())
@@ -83,17 +155,18 @@ impl AeonFrontend {
                 let base_addr = args
                     .get("base_addr")
                     .and_then(|value| value.as_str())
-                    .ok_or("Missing required parameter for raw binaries: base_addr")?;
+                    .ok_or(ArgError::from("Missing required parameter for raw binaries: base_addr"))?;
                 let base_addr = parse_hex(base_addr)
-                    .ok_or_else(|| format!("Invalid hex address for base_addr: {}", base_addr))?;
+                    .ok_or_else(|| ArgError::from(format!("Invalid hex address for base_addr: {}", base_addr)))?;
                 aeon::AeonSession::load_raw(path, base_addr)
                     .map_err(|e| format!("Failed to load raw binary: {}", e))?
             }
             other => {
-                return Err(format!(
+                return Err(ArgError::from(format!(
                     "Unsupported binary format: {} (expected 'elf' or 'raw')",
                     other
                 ))
+                .into())
             }
         };
         let result = session.summary();
@@ -101,7 +174,7 @@ impl AeonFrontend {
         Ok(result)
     }
 
-    fn tool_list_functions(&self, args: &Value) -> Result<Value, String> {
+    fn tool_list_functions(&self, args: &Value) -> ToolResult {
         let session = self.require_session()?;
         let offset = args
             .get("offset")
@@ -118,151 +191,151 @@ impl AeonFrontend {
         Ok(session.list_functions(offset, limit, Some(name_filter)))
     }
 
-    fn tool_set_analysis_name(&self, args: &Value) -> Result<Value, String> {
+    fn tool_set_analysis_name(&self, args: &Value) -> ToolResult {
         let session = self.require_session()?;
         let addr = parse_addr_arg(args)?;
         let name = args
             .get("name")
             .and_then(|value| value.as_str())
-            .ok_or("Missing required parameter: name")?;
+            .ok_or(ArgError::from("Missing required parameter: name"))?;
         Ok(session.set_analysis_name(addr, name))
     }
 
-    fn tool_rename_symbol(&self, args: &Value) -> Result<Value, String> {
+    fn tool_rename_symbol(&self, args: &Value) -> ToolResult {
         let session = self.require_session()?;
         let addr = parse_addr_arg(args)?;
         let name = args
             .get("name")
             .and_then(|value| value.as_str())
-            .ok_or("Missing required parameter: name")?;
+            .ok_or(ArgError::from("Missing required parameter: name"))?;
         Ok(session.rename_symbol(addr, name))
     }
 
-    fn tool_define_struct(&self, args: &Value) -> Result<Value, String> {
+    fn tool_define_struct(&self, args: &Value) -> ToolResult {
         let session = self.require_session()?;
         let addr = parse_addr_arg(args)?;
         let definition = args
             .get("definition")
             .and_then(|value| value.as_str())
-            .ok_or("Missing required parameter: definition")?;
+            .ok_or(ArgError::from("Missing required parameter: definition"))?;
         Ok(session.define_struct(addr, definition))
     }
 
-    fn tool_add_hypothesis(&self, args: &Value) -> Result<Value, String> {
+    fn tool_add_hypothesis(&self, args: &Value) -> ToolResult {
         let session = self.require_session()?;
         let addr = parse_addr_arg(args)?;
         let note = args
             .get("note")
             .and_then(|value| value.as_str())
-            .ok_or("Missing required parameter: note")?;
+            .ok_or(ArgError::from("Missing required parameter: note"))?;
         Ok(session.add_hypothesis(addr, note))
     }
 
-    fn tool_search_analysis_names(&self, args: &Value) -> Result<Value, String> {
+    fn tool_search_analysis_names(&self, args: &Value) -> ToolResult {
         let session = self.require_session()?;
         let pattern = args
             .get("pattern")
             .and_then(|value| value.as_str())
-            .ok_or("Missing required parameter: pattern")?;
-        session.search_analysis_names(pattern)
+            .ok_or(ArgError::from("Missing required parameter: pattern"))?;
+        Ok(session.search_analysis_names(pattern)?)
     }
 
-    fn tool_get_blackboard_entry(&self, args: &Value) -> Result<Value, String> {
+    fn tool_get_blackboard_entry(&self, args: &Value) -> ToolResult {
         let session = self.require_session()?;
         let addr = parse_addr_arg(args)?;
         Ok(session.get_blackboard_entry(addr))
     }
 
-    fn tool_get_function_il(&self, args: &Value) -> Result<Value, String> {
+    fn tool_get_function_il(&self, args: &Value) -> ToolResult {
         self.tool_get_il(args)
     }
 
-    fn tool_get_reduced_il(&self, args: &Value) -> Result<Value, String> {
+    fn tool_get_reduced_il(&self, args: &Value) -> ToolResult {
         let session = self.require_session()?;
         let addr = parse_addr_arg(args)?;
-        session.get_reduced_il(addr)
+        Ok(session.get_reduced_il(addr)?)
     }
 
-    fn tool_get_ssa(&self, args: &Value) -> Result<Value, String> {
+    fn tool_get_ssa(&self, args: &Value) -> ToolResult {
         let session = self.require_session()?;
         let addr = parse_addr_arg(args)?;
         let optimize = parse_bool_arg(args, "optimize", true)?;
-        session.get_ssa(addr, optimize)
+        Ok(session.get_ssa(addr, optimize)?)
     }
 
-    fn tool_get_stack_frame(&self, args: &Value) -> Result<Value, String> {
+    fn tool_get_stack_frame(&self, args: &Value) -> ToolResult {
         let session = self.require_session()?;
         let addr = parse_addr_arg(args)?;
-        session.get_stack_frame(addr)
+        Ok(session.get_stack_frame(addr)?)
     }
 
-    fn tool_get_il(&self, args: &Value) -> Result<Value, String> {
+    fn tool_get_il(&self, args: &Value) -> ToolResult {
         let session = self.require_session()?;
         let addr = parse_addr_arg(args)?;
-        session.get_il(addr)
+        Ok(session.get_il(addr)?)
     }
 
-    fn tool_get_function_cfg(&self, args: &Value) -> Result<Value, String> {
+    fn tool_get_function_cfg(&self, args: &Value) -> ToolResult {
         let session = self.require_session()?;
         let addr = parse_addr_arg(args)?;
-        session.get_function_cfg(addr)
+        Ok(session.get_function_cfg(addr)?)
     }
 
-    fn tool_get_function_skeleton(&self, args: &Value) -> Result<Value, String> {
+    fn tool_get_function_skeleton(&self, args: &Value) -> ToolResult {
         let session = self.require_session()?;
         let addr = parse_addr_arg(args)?;
-        session.get_function_skeleton(addr)
+        Ok(session.get_function_skeleton(addr)?)
     }
 
 
-    fn tool_get_data_flow_slice(&self, args: &Value) -> Result<Value, String> {
+    fn tool_get_data_flow_slice(&self, args: &Value) -> ToolResult {
         let session = self.require_session()?;
         let addr = parse_addr_arg(args)?;
         let register = args
             .get("register")
             .and_then(|v| v.as_str())
-            .ok_or("register parameter required")?;
+            .ok_or(ArgError::from("register parameter required"))?;
         let direction = args
             .get("direction")
             .and_then(|v| v.as_str())
-            .ok_or("direction parameter required ('backward' or 'forward')")?;
-        session.get_data_flow_slice(addr, register, direction)
+            .ok_or(ArgError::from("direction parameter required ('backward' or 'forward')"))?;
+        Ok(session.get_data_flow_slice(addr, register, direction)?)
     }
 
-    fn tool_get_xrefs(&self, args: &Value) -> Result<Value, String> {
+    fn tool_get_xrefs(&self, args: &Value) -> ToolResult {
         let session = self.require_session()?;
         let addr = parse_addr_arg(args)?;
         Ok(session.get_xrefs(addr))
     }
 
-    fn tool_execute_datalog(&self, args: &Value) -> Result<Value, String> {
+    fn tool_execute_datalog(&self, args: &Value) -> ToolResult {
         let session = self.require_session()?;
         let query = args
             .get("query")
             .and_then(|value| value.as_str())
-            .ok_or("Missing required parameter: query")?;
+            .ok_or(ArgError::from("Missing required parameter: query"))?;
         let addr = parse_addr_arg(args)?;
         let register = args.get("register").and_then(|value| value.as_str());
         let limit = args.get("limit").and_then(|value| value.as_u64()).map(|v| v as usize);
 
-        session.execute_datalog(query, addr, register, limit)
+        Ok(session.execute_datalog(query, addr, register, limit)?)
     }
 
-    fn tool_scan_pointers(&self) -> Result<Value, String> {
+    fn tool_scan_pointers(&self) -> ToolResult {
         let session = self.require_session()?;
         Ok(session.scan_pointers())
     }
 
-    fn tool_scan_vtables(&self) -> Result<Value, String> {
+    fn tool_scan_vtables(&self) -> ToolResult {
         let session = self.require_session()?;
         Ok(session.scan_vtables())
     }
 
-    fn tool_get_function_pointers(&self, args: &Value) -> Result<Value, String> {
+    fn tool_get_function_pointers(&self, args: &Value) -> ToolResult {
         let session = self.require_session()?;
         let addr = match args.get("addr").and_then(|value| value.as_str()) {
             Some(value) => {
-                Some(parse_hex(value).ok_or_else(|| format!("Invalid hex address: {}", value))?)
+                Some(parse_hex(value).ok_or_else(|| ArgError::from(format!("Invalid hex address: {}", value)))?)
             }
             None => None,
         };
@@ -274,23 +347,23 @@ impl AeonFrontend {
             .get("limit")
             .and_then(|value| value.as_u64())
             .unwrap_or(50) as usize;
-        session.scan_function_pointers(addr, offset, limit)
+        Ok(session.scan_function_pointers(addr, offset, limit)?)
     }
 
-    fn tool_find_call_paths(&self, args: &Value) -> Result<Value, String> {
+    fn tool_find_call_paths(&self, args: &Value) -> ToolResult {
         let session = self.require_session()?;
         let start_str = args
             .get("start_addr")
             .and_then(|value| value.as_str())
-            .ok_or("Missing required parameter: start_addr")?;
+            .ok_or(ArgError::from("Missing required parameter: start_addr"))?;
         let goal_str = args
             .get("goal_addr")
             .and_then(|value| value.as_str())
-            .ok_or("Missing required parameter: goal_addr")?;
+            .ok_or(ArgError::from("Missing required parameter: goal_addr"))?;
         let start_addr =
-            parse_hex(start_str).ok_or_else(|| format!("Invalid hex address: {}", start_str))?;
+            parse_hex(start_str).ok_or_else(|| ArgError::from(format!("Invalid hex address: {}", start_str)))?;
         let goal_addr =
-            parse_hex(goal_str).ok_or_else(|| format!("Invalid hex address: {}", goal_str))?;
+            parse_hex(goal_str).ok_or_else(|| ArgError::from(format!("Invalid hex address: {}", goal_str)))?;
         let max_depth = args
             .get("max_depth")
             .and_then(|value| value.as_u64())
@@ -300,82 +373,82 @@ impl AeonFrontend {
             .get("max_paths")
             .and_then(|value| value.as_u64())
             .unwrap_or(32) as usize;
-        session.find_call_paths(
+        Ok(session.find_call_paths(
             start_addr,
             goal_addr,
             max_depth,
             include_all_paths,
             max_paths,
-        )
+        )?)
     }
 
-    fn tool_get_bytes(&self, args: &Value) -> Result<Value, String> {
+    fn tool_get_bytes(&self, args: &Value) -> ToolResult {
         let session = self.require_session()?;
         let addr = parse_addr_arg(args)?;
         let size = args
             .get("size")
             .and_then(|value| value.as_u64())
             .unwrap_or(64) as usize;
-        session.get_bytes(addr, size)
+        Ok(session.get_bytes(addr, size)?)
     }
 
-    fn tool_search_rc4(&self) -> Result<Value, String> {
+    fn tool_search_rc4(&self) -> ToolResult {
         let session = self.require_session()?;
         Ok(session.search_rc4())
     }
 
-    fn tool_get_coverage(&self) -> Result<Value, String> {
+    fn tool_get_coverage(&self) -> ToolResult {
         let session = self.require_session()?;
         Ok(session.get_coverage())
     }
 
-    fn tool_get_asm(&self, args: &Value) -> Result<Value, String> {
+    fn tool_get_asm(&self, args: &Value) -> ToolResult {
         let session = self.require_session()?;
         let start_str = args
             .get("start_addr")
             .and_then(|value| value.as_str())
-            .ok_or("Missing required parameter: start_addr")?;
+            .ok_or(ArgError::from("Missing required parameter: start_addr"))?;
         let stop_str = args
             .get("stop_addr")
             .and_then(|value| value.as_str())
-            .ok_or("Missing required parameter: stop_addr")?;
+            .ok_or(ArgError::from("Missing required parameter: stop_addr"))?;
 
         let start_addr =
-            parse_hex(start_str).ok_or_else(|| format!("Invalid hex address: {}", start_str))?;
+            parse_hex(start_str).ok_or_else(|| ArgError::from(format!("Invalid hex address: {}", start_str)))?;
         let stop_addr =
-            parse_hex(stop_str).ok_or_else(|| format!("Invalid hex address: {}", stop_str))?;
-        session.get_asm(start_addr, stop_addr)
+            parse_hex(stop_str).ok_or_else(|| ArgError::from(format!("Invalid hex address: {}", stop_str)))?;
+        Ok(session.get_asm(start_addr, stop_addr)?)
     }
 
-    fn tool_get_function_at(&self, args: &Value) -> Result<Value, String> {
+    fn tool_get_function_at(&self, args: &Value) -> ToolResult {
         let session = self.require_session()?;
         let addr = parse_addr_arg(args)?;
         let include_asm = parse_bool_arg(args, "include_asm", false)?;
         let include_il = parse_bool_arg(args, "include_il", false)?;
-        session.get_function_at(addr, include_asm, include_il)
+        Ok(session.get_function_at(addr, include_asm, include_il)?)
     }
 
-    fn tool_get_string(&self, args: &Value) -> Result<Value, String> {
+    fn tool_get_string(&self, args: &Value) -> ToolResult {
         let session = self.require_session()?;
         let addr = parse_addr_arg(args)?;
         let max_len = args
             .get("max_len")
             .and_then(|value| value.as_u64())
             .unwrap_or(256) as usize;
-        session.get_string(addr, max_len)
+        Ok(session.get_string(addr, max_len)?)
     }
 
-    fn tool_get_data(&self, args: &Value) -> Result<Value, String> {
+    fn tool_get_data(&self, args: &Value) -> ToolResult {
         let session = self.require_session()?;
         let addr = parse_addr_arg(args)?;
         let size = args
             .get("size")
             .and_then(|value| value.as_u64())
             .unwrap_or(64) as usize;
-        session.get_data(addr, size)
+        Ok(session.get_data(addr, size)?)
     }
 
-    fn tool_emulate_snippet_il(&self, args: &Value) -> Result<Value, String> {
+    fn tool_emulate_snippet_il(&self, args: &Value) -> ToolResult {
         let session = self.require_session()?;
         let start_addr = parse_hex_arg(args, "start_addr")?;
         let end_addr = parse_hex_arg(args, "end_addr")?;
@@ -386,10 +459,10 @@ impl AeonFrontend {
 
         let initial_registers = parse_register_map(args)?;
 
-        session.emulate_snippet_il(start_addr, end_addr, initial_registers, step_limit)
+        Ok(session.emulate_snippet_il(start_addr, end_addr, initial_registers, step_limit)?)
     }
 
-    fn tool_emulate_snippet_native(&self, args: &Value) -> Result<Value, String> {
+    fn tool_emulate_snippet_native(&self, args: &Value) -> ToolResult {
         let session = self.require_session()?;
         let start_addr = parse_hex_arg(args, "start_addr")?;
         let end_addr = parse_hex_arg(args, "end_addr")?;
@@ -401,10 +474,10 @@ impl AeonFrontend {
         let initial_registers = parse_register_map(args)?;
         let initial_memory = parse_memory_map(args)?;
 
-        session.emulate_snippet(start_addr, end_addr, initial_registers, initial_memory, step_limit)
+        Ok(session.emulate_snippet(start_addr, end_addr, initial_registers, initial_memory, step_limit)?)
     }
 
-    fn tool_emulate_snippet_native_advanced(&self, args: &Value) -> Result<Value, String> {
+    fn tool_emulate_snippet_native_advanced(&self, args: &Value) -> ToolResult {
         let session = self.require_session()?;
         let start_addr = parse_hex_arg(args, "start_addr")?;
         let end_addr = parse_hex_arg(args, "end_addr")?;
@@ -433,245 +506,403 @@ impl AeonFrontend {
             record_pc_trace,
         };
 
-        session.emulate_snippet_native_advanced(req)
+        Ok(session.emulate_snippet_native_advanced(req)?)
     }
 }
 
+/// One tool: its name, what it is for, the JSON schema of its arguments and
+/// the function that runs it.
+///
+/// `TOOLS` is the only list of tools. Dispatch (`AeonFrontend::call_tool`),
+/// the schema listing (`tools_list`) and the documentation table
+/// (`tools_markdown_table`) are all derived from it, so a tool cannot be
+/// callable but unlisted, or listed but not callable.
+pub struct ToolSpec {
+    pub name: &'static str,
+    pub description: &'static str,
+    input_schema: fn() -> Value,
+    handler: fn(&mut AeonFrontend, &Value) -> ToolResult,
+}
+
+impl ToolSpec {
+    pub fn input_schema(&self) -> Value {
+        (self.input_schema)()
+    }
+}
+
+pub static TOOLS: &[ToolSpec] = &[
+    ToolSpec {
+        name: "load_binary",
+        description: "Load an ELF or raw AArch64 binary for analysis. Must be called before other tools.",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "path": {"type": "string", "description": "Path to binary"},
+                "format": {"type": "string", "description": "Binary format: 'elf' or 'raw'", "default": "elf"},
+                "base_addr": {"type": "string", "description": "Required for raw binaries: virtual base address in hex"}
+            }, "required": ["path"]})
+        },
+        handler: |frontend, args| frontend.tool_load_binary(args),
+    },
+    ToolSpec {
+        name: "list_functions",
+        description: "List functions discovered from .eh_frame unwind tables. Supports pagination and name filtering.",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "offset": {"type": "integer", "description": "Start index", "default": 0},
+                "limit": {"type": "integer", "description": "Max results", "default": 100},
+                "name_filter": {"type": "string", "description": "Substring filter on symbol name"}
+            }})
+        },
+        handler: |frontend, args| frontend.tool_list_functions(args),
+    },
+    ToolSpec {
+        name: "set_analysis_name",
+        description: "Backwards-compatible alias for rename_symbol. Attaches or overwrites a semantic symbol on an address.",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Virtual address in hex"},
+                "name": {"type": "string", "description": "Analysis name to assign to the address"}
+            }, "required": ["addr", "name"]})
+        },
+        handler: |frontend, args| frontend.tool_set_analysis_name(args),
+    },
+    ToolSpec {
+        name: "rename_symbol",
+        description: "Attach or overwrite a semantic symbol name on an address.",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Virtual address in hex"},
+                "name": {"type": "string", "description": "Semantic symbol name to assign to the address"}
+            }, "required": ["addr", "name"]})
+        },
+        handler: |frontend, args| frontend.tool_rename_symbol(args),
+    },
+    ToolSpec {
+        name: "define_struct",
+        description: "Attach or overwrite a structure definition on an address.",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Virtual address in hex"},
+                "definition": {"type": "string", "description": "Structure definition text"}
+            }, "required": ["addr", "definition"]})
+        },
+        handler: |frontend, args| frontend.tool_define_struct(args),
+    },
+    ToolSpec {
+        name: "add_hypothesis",
+        description: "Record a semantic hypothesis on an address. Duplicate notes are ignored.",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Virtual address in hex"},
+                "note": {"type": "string", "description": "Hypothesis or analyst note"}
+            }, "required": ["addr", "note"]})
+        },
+        handler: |frontend, args| frontend.tool_add_hypothesis(args),
+    },
+    ToolSpec {
+        name: "search_analysis_names",
+        description: "Search analysis names attached to addresses using a regex pattern.",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "pattern": {"type": "string", "description": "Regex pattern matched against analysis names"}
+            }, "required": ["pattern"]})
+        },
+        handler: |frontend, args| frontend.tool_search_analysis_names(args),
+    },
+    ToolSpec {
+        name: "get_blackboard_entry",
+        description: "Look up all semantic context recorded for an address: symbol name, struct definition, hypotheses, and containing function. Use to inspect what the blackboard knows about a specific address.",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Address to look up in hex"}
+            }, "required": ["addr"]})
+        },
+        handler: |frontend, args| frontend.tool_get_blackboard_entry(args),
+    },
+    ToolSpec {
+        name: "get_il",
+        description: "Get the lifted AeonIL intermediate language listing for the function containing a given address.",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"}
+            }, "required": ["addr"]})
+        },
+        handler: |frontend, args| frontend.tool_get_il(args),
+    },
+    ToolSpec {
+        name: "get_function_il",
+        description: "Backwards-compatible alias for get_il.",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"}
+            }, "required": ["addr"]})
+        },
+        handler: |frontend, args| frontend.tool_get_function_il(args),
+    },
+    ToolSpec {
+        name: "get_reduced_il",
+        description: "Return block-structured reduced AeonIL for the function containing a given address.",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"}
+            }, "required": ["addr"]})
+        },
+        handler: |frontend, args| frontend.tool_get_reduced_il(args),
+    },
+    ToolSpec {
+        name: "get_ssa",
+        description: "Return reduced SSA form for the function containing a given address, optionally optimized.",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"},
+                "optimize": {"type": "boolean", "description": "Run SSA optimization passes before returning JSON", "default": true}
+            }, "required": ["addr"]})
+        },
+        handler: |frontend, args| frontend.tool_get_ssa(args),
+    },
+    ToolSpec {
+        name: "get_stack_frame",
+        description: "Summarize the detected stack frame and visible stack-slot accesses for the function containing a given address.",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"}
+            }, "required": ["addr"]})
+        },
+        handler: |frontend, args| frontend.tool_get_stack_frame(args),
+    },
+    ToolSpec {
+        name: "get_function_cfg",
+        description: "Get the Control Flow Graph for a function. Returns adjacency list, terminal blocks, and reachability from Datalog analysis.",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Function address in hex"}
+            }, "required": ["addr"]})
+        },
+        handler: |frontend, args| frontend.tool_get_function_cfg(args),
+    },
+    ToolSpec {
+        name: "get_function_skeleton",
+        description: "Get a dense summary of function properties for efficient triage: argument count, calls, strings, loops, crypto constants, stack frame size, and suspicious patterns.",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Function address in hex"}
+            }, "required": ["addr"]})
+        },
+        handler: |frontend, args| frontend.tool_get_function_skeleton(args),
+    },
+    ToolSpec {
+        name: "get_data_flow_slice",
+        description: "Trace value flow for a register backward or forward through a function: backward shows where a value comes from, forward shows where it goes. Detects data dependencies through assignments and control flow.",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Instruction address in hex, e.g. '0x5e611fc'"},
+                "register": {"type": "string", "description": "Register name (e.g., 'x0', 'w1', 'sp')"},
+                "direction": {"type": "string", "enum": ["backward", "forward"], "description": "Direction of data flow to trace"}
+            }, "required": ["addr", "register", "direction"]})
+        },
+        handler: |frontend, args| frontend.tool_get_data_flow_slice(args),
+    },
+    ToolSpec {
+        name: "get_xrefs",
+        description: "Get cross-references for an address: outgoing calls from the function, and incoming calls from other functions.",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Function address in hex"}
+            }, "required": ["addr"]})
+        },
+        handler: |frontend, args| frontend.tool_get_xrefs(args),
+    },
+    ToolSpec {
+        name: "execute_datalog",
+        description: "Run a named Datalog query over a function or the whole binary. Returns structured facts derived by the ascent Datalog engine from lifted AeonIL.",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "query": {"type": "string", "enum": ["reachability", "defines", "reads_mem", "writes_mem", "flows_to", "call_graph", "call_graph_transitive"], "description": "Named Datalog query to execute"},
+                "addr": {"type": "string", "description": "Virtual address in hex. For per-function queries, identifies the function. For cross-function queries, identifies the root function."},
+                "register": {"type": "string", "description": "Register name (e.g. 'x0', 'w1', 'sp'). Required for 'defines' and 'flows_to' queries."},
+                "limit": {"type": "integer", "description": "Maximum number of result tuples to return", "default": 500}
+            }, "required": ["query", "addr"]})
+        },
+        handler: |frontend, args| frontend.tool_execute_datalog(args),
+    },
+    ToolSpec {
+        name: "scan_pointers",
+        description: "Scan non-executable mapped sections for pointer-sized values that reference other locations in the binary, classifying data-to-data and data-to-code edges.",
+        input_schema: || {
+            json!({"type": "object", "properties": {}})
+        },
+        handler: |frontend, _args| frontend.tool_scan_pointers(),
+    },
+    ToolSpec {
+        name: "scan_vtables",
+        description: "Detect candidate C++ vtables in .rodata/.data-style sections by finding arrays of function pointers and grouping related tables.",
+        input_schema: || {
+            json!({"type": "object", "properties": {}})
+        },
+        handler: |frontend, _args| frontend.tool_scan_vtables(),
+    },
+    ToolSpec {
+        name: "get_function_pointers",
+        description: "Enumerate pointer-valued operands and resolved code/data references for one function or a paginated slice of functions.",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Optional function address in hex; when present, analyzes the containing function"},
+                "offset": {"type": "integer", "description": "Start index when scanning multiple functions", "default": 0},
+                "limit": {"type": "integer", "description": "Max functions to analyze when addr is omitted", "default": 50}
+            }})
+        },
+        handler: |frontend, args| frontend.tool_get_function_pointers(args),
+    },
+    ToolSpec {
+        name: "find_call_paths",
+        description: "Find shortest and optionally all bounded call-graph paths between two functions using direct calls and vtable-resolved indirect calls.",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "start_addr": {"type": "string", "description": "Start function address in hex"},
+                "goal_addr": {"type": "string", "description": "Goal function address in hex"},
+                "max_depth": {"type": "integer", "description": "Maximum call depth to explore", "default": 6},
+                "include_all_paths": {"type": "boolean", "description": "Include all simple paths up to max_depth", "default": false},
+                "max_paths": {"type": "integer", "description": "Maximum number of paths to return when include_all_paths is true", "default": 32}
+            }, "required": ["start_addr", "goal_addr"]})
+        },
+        handler: |frontend, args| frontend.tool_find_call_paths(args),
+    },
+    ToolSpec {
+        name: "get_bytes",
+        description: "Read raw bytes from the binary at a virtual address. Returns hex-encoded string.",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Virtual address in hex"},
+                "size": {"type": "integer", "description": "Number of bytes", "default": 64}
+            }, "required": ["addr"]})
+        },
+        handler: |frontend, args| frontend.tool_get_bytes(args),
+    },
+    ToolSpec {
+        name: "search_rc4",
+        description: "Search for RC4 cipher implementations using Datalog behavioral subgraph isomorphism. Detects KSA (swap+256+mod256) and PRGA (swap+keystream XOR) patterns.",
+        input_schema: || {
+            json!({"type": "object", "properties": {}})
+        },
+        handler: |frontend, _args| frontend.tool_search_rc4(),
+    },
+    ToolSpec {
+        name: "get_coverage",
+        description: "Get IL lift coverage statistics: proper IL vs intrinsic vs nop vs decode errors.",
+        input_schema: || {
+            json!({"type": "object", "properties": {}})
+        },
+        handler: |frontend, _args| frontend.tool_get_coverage(),
+    },
+    ToolSpec {
+        name: "get_asm",
+        description: "Disassemble ARM64 instructions between two virtual addresses. Returns asm only, without AeonIL.",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "start_addr": {"type": "string", "description": "Start virtual address in hex, e.g. '0x512025c'"},
+                "stop_addr": {"type": "string", "description": "Stop virtual address in hex (exclusive), e.g. '0x51202cc'"}
+            }, "required": ["start_addr", "stop_addr"]})
+        },
+        handler: |frontend, args| frontend.tool_get_asm(args),
+    },
+    ToolSpec {
+        name: "get_function_at",
+        description: "Find the function containing a given address. Returns function metadata by default, and can optionally attach asm and/or AeonIL listings.",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"},
+                "include_asm": {"type": "boolean", "description": "Include asm in the returned listing", "default": false},
+                "include_il": {"type": "boolean", "description": "Include AeonIL in the returned listing", "default": false}
+            }, "required": ["addr"]})
+        },
+        handler: |frontend, args| frontend.tool_get_function_at(args),
+    },
+    ToolSpec {
+        name: "get_string",
+        description: "Read a null-terminated string at any virtual address (works across all ELF segments, not just .text).",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Virtual address in hex"},
+                "max_len": {"type": "integer", "description": "Max bytes to scan for null terminator", "default": 256}
+            }, "required": ["addr"]})
+        },
+        handler: |frontend, args| frontend.tool_get_string(args),
+    },
+    ToolSpec {
+        name: "get_data",
+        description: "Read raw bytes at any virtual address (works across all ELF segments). Returns hex + ASCII.",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "addr": {"type": "string", "description": "Virtual address in hex"},
+                "size": {"type": "integer", "description": "Number of bytes to read", "default": 64}
+            }, "required": ["addr"]})
+        },
+        handler: |frontend, args| frontend.tool_get_data(args),
+    },
+    ToolSpec {
+        name: "emulate_snippet_il",
+        description: "Execute an ARM64 code region using AeonIL interpretation. Executes lifted IL statements without full binary emulation. Useful for symbolic execution or analyzing stripped code.",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "start_addr": {"type": "string", "description": "Hex address to begin execution, e.g. '0x1234'"},
+                "end_addr": {"type": "string", "description": "Hex address to stop execution (exclusive)"},
+                "initial_registers": {"type": "object", "description": "Register values at entry. Keys: x0-x30, sp. Values: hex strings or integers.", "additionalProperties": {}},
+                "step_limit": {"type": "integer", "description": "Max IL statements to execute (default 1000)", "default": 1000}
+            }, "required": ["start_addr", "end_addr"]})
+        },
+        handler: |frontend, args| frontend.tool_emulate_snippet_il(args),
+    },
+    ToolSpec {
+        name: "emulate_snippet_native",
+        description: "Execute an ARM64 code region in unicorn ARM64 sandbox. Full native emulation with memory support. Returns final register state, memory writes, and decoded strings.",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "start_addr": {"type": "string", "description": "Hex address to begin execution, e.g. '0x1234'"},
+                "end_addr": {"type": "string", "description": "Hex address to stop execution (exclusive)"},
+                "initial_registers": {"type": "object", "description": "Register values at entry. Keys: x0-x30, sp, pc, nzcv. Values: hex strings or integers.", "additionalProperties": {}},
+                "initial_memory": {"type": "object", "description": "Memory overlays. Keys: hex addresses. Values: hex string or array of bytes.", "additionalProperties": {}},
+                "step_limit": {"type": "integer", "description": "Max instructions to execute (default 1000)", "default": 1000}
+            }, "required": ["start_addr", "end_addr"]})
+        },
+        handler: |frontend, args| frontend.tool_emulate_snippet_native(args),
+    },
+    ToolSpec {
+        name: "emulate_snippet",
+        description: "Execute an ARM64 code region in a bounded sandbox. Alias for emulate_snippet_native. Returns final register state, memory writes, and any decoded strings. Use for reversing obfuscated loops, string decryption, or format decoders.",
+        input_schema: || {
+            json!({"type": "object", "properties": {
+                "start_addr": {"type": "string", "description": "Hex address to begin execution, e.g. '0x1234'"},
+                "end_addr": {"type": "string", "description": "Hex address to stop execution (exclusive)"},
+                "initial_registers": {"type": "object", "description": "Register values at entry. Keys: x0-x30, sp, pc, nzcv. Values: hex strings or integers.", "additionalProperties": {}},
+                "initial_memory": {"type": "object", "description": "Memory overlays. Keys: hex addresses. Values: hex string or array of bytes.", "additionalProperties": {}},
+                "step_limit": {"type": "integer", "description": "Max instructions to execute (default 1000)", "default": 1000}
+            }, "required": ["start_addr", "end_addr"]})
+        },
+        handler: |frontend, args| frontend.tool_emulate_snippet_native(args),
+    },
+    ToolSpec {
+        name: "emulate_snippet_native_advanced",
+        description: "Execute an ARM64 code region with advanced features: memory watchpoints, instruction hooks with register patching, PC tracing, and extended register state (SIMD).",
+        input_schema: || {
+            build_advanced_emulation_schema()
+        },
+        handler: |frontend, args| frontend.tool_emulate_snippet_native_advanced(args),
+    },
+];
+
+/// The tools as the MCP `tools/list` result.
 pub fn tools_list() -> Value {
-    json!({
-        "tools": [
-            tool_schema("load_binary",
-                "Load an ELF or raw AArch64 binary for analysis. Must be called before other tools.",
-                json!({"type": "object", "properties": {
-                    "path": {"type": "string", "description": "Path to binary"},
-                    "format": {"type": "string", "description": "Binary format: 'elf' or 'raw'", "default": "elf"},
-                    "base_addr": {"type": "string", "description": "Required for raw binaries: virtual base address in hex"}
-                }, "required": ["path"]})),
-
-            tool_schema("list_functions",
-                "List functions discovered from .eh_frame unwind tables. Supports pagination and name filtering.",
-                json!({"type": "object", "properties": {
-                    "offset": {"type": "integer", "description": "Start index", "default": 0},
-                    "limit": {"type": "integer", "description": "Max results", "default": 100},
-                    "name_filter": {"type": "string", "description": "Substring filter on symbol name"}
-                }})),
-
-            tool_schema("set_analysis_name",
-                "Backwards-compatible alias for rename_symbol. Attaches or overwrites a semantic symbol on an address.",
-                json!({"type": "object", "properties": {
-                    "addr": {"type": "string", "description": "Virtual address in hex"},
-                    "name": {"type": "string", "description": "Analysis name to assign to the address"}
-                }, "required": ["addr", "name"]})),
-
-            tool_schema("rename_symbol",
-                "Attach or overwrite a semantic symbol name on an address.",
-                json!({"type": "object", "properties": {
-                    "addr": {"type": "string", "description": "Virtual address in hex"},
-                    "name": {"type": "string", "description": "Semantic symbol name to assign to the address"}
-                }, "required": ["addr", "name"]})),
-
-            tool_schema("define_struct",
-                "Attach or overwrite a structure definition on an address.",
-                json!({"type": "object", "properties": {
-                    "addr": {"type": "string", "description": "Virtual address in hex"},
-                    "definition": {"type": "string", "description": "Structure definition text"}
-                }, "required": ["addr", "definition"]})),
-
-            tool_schema("add_hypothesis",
-                "Record a semantic hypothesis on an address. Duplicate notes are ignored.",
-                json!({"type": "object", "properties": {
-                    "addr": {"type": "string", "description": "Virtual address in hex"},
-                    "note": {"type": "string", "description": "Hypothesis or analyst note"}
-                }, "required": ["addr", "note"]})),
-
-            tool_schema("search_analysis_names",
-                "Search analysis names attached to addresses using a regex pattern.",
-                json!({"type": "object", "properties": {
-                    "pattern": {"type": "string", "description": "Regex pattern matched against analysis names"}
-                }, "required": ["pattern"]})),
-
-            tool_schema("get_blackboard_entry",
-                "Look up all semantic context recorded for an address: symbol name, struct definition, hypotheses, and containing function. Use to inspect what the blackboard knows about a specific address.",
-                json!({"type": "object", "properties": {
-                    "addr": {"type": "string", "description": "Address to look up in hex"}
-                }, "required": ["addr"]})),
-
-            tool_schema("get_il",
-                "Get the lifted AeonIL intermediate language listing for the function containing a given address.",
-                json!({"type": "object", "properties": {
-                    "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"}
-                }, "required": ["addr"]})),
-
-            tool_schema("get_function_il",
-                "Backwards-compatible alias for get_il.",
-                json!({"type": "object", "properties": {
-                    "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"}
-                }, "required": ["addr"]})),
-
-            tool_schema("get_reduced_il",
-                "Return block-structured reduced AeonIL for the function containing a given address.",
-                json!({"type": "object", "properties": {
-                    "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"}
-                }, "required": ["addr"]})),
-
-            tool_schema("get_ssa",
-                "Return reduced SSA form for the function containing a given address, optionally optimized.",
-                json!({"type": "object", "properties": {
-                    "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"},
-                    "optimize": {"type": "boolean", "description": "Run SSA optimization passes before returning JSON", "default": true}
-                }, "required": ["addr"]})),
-
-            tool_schema("get_stack_frame",
-                "Summarize the detected stack frame and visible stack-slot accesses for the function containing a given address.",
-                json!({"type": "object", "properties": {
-                    "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"}
-                }, "required": ["addr"]})),
-
-            tool_schema("get_function_cfg",
-                "Get the Control Flow Graph for a function. Returns adjacency list, terminal blocks, and reachability from Datalog analysis.",
-                json!({"type": "object", "properties": {
-                    "addr": {"type": "string", "description": "Function address in hex"}
-                }, "required": ["addr"]})),
-
-            tool_schema("get_function_skeleton",
-                "Get a dense summary of function properties for efficient triage: argument count, calls, strings, loops, crypto constants, stack frame size, and suspicious patterns.",
-                json!({"type": "object", "properties": {
-                    "addr": {"type": "string", "description": "Function address in hex"}
-                }, "required": ["addr"]})),
-
-
-            tool_schema("get_data_flow_slice",
-                "Trace value flow for a register backward or forward through a function: backward shows where a value comes from, forward shows where it goes. Detects data dependencies through assignments and control flow.",
-                json!({"type": "object", "properties": {
-                    "addr": {"type": "string", "description": "Instruction address in hex, e.g. '0x5e611fc'"},
-                    "register": {"type": "string", "description": "Register name (e.g., 'x0', 'w1', 'sp')"},
-                    "direction": {"type": "string", "enum": ["backward", "forward"], "description": "Direction of data flow to trace"}
-                }, "required": ["addr", "register", "direction"]})),
-
-            tool_schema("get_xrefs",
-                "Get cross-references for an address: outgoing calls from the function, and incoming calls from other functions.",
-                json!({"type": "object", "properties": {
-                    "addr": {"type": "string", "description": "Function address in hex"}
-                }, "required": ["addr"]})),
-
-            tool_schema("execute_datalog",
-                "Run a named Datalog query over a function or the whole binary. Returns structured facts derived by the ascent Datalog engine from lifted AeonIL.",
-                json!({"type": "object", "properties": {
-                    "query": {"type": "string", "enum": ["reachability", "defines", "reads_mem", "writes_mem", "flows_to", "call_graph", "call_graph_transitive"], "description": "Named Datalog query to execute"},
-                    "addr": {"type": "string", "description": "Virtual address in hex. For per-function queries, identifies the function. For cross-function queries, identifies the root function."},
-                    "register": {"type": "string", "description": "Register name (e.g. 'x0', 'w1', 'sp'). Required for 'defines' and 'flows_to' queries."},
-                    "limit": {"type": "integer", "description": "Maximum number of result tuples to return", "default": 500}
-                }, "required": ["query", "addr"]})),
-
-            tool_schema("scan_pointers",
-                "Scan non-executable mapped sections for pointer-sized values that reference other locations in the binary, classifying data-to-data and data-to-code edges.",
-                json!({"type": "object", "properties": {}})),
-
-            tool_schema("scan_vtables",
-                "Detect candidate C++ vtables in .rodata/.data-style sections by finding arrays of function pointers and grouping related tables.",
-                json!({"type": "object", "properties": {}})),
-
-            tool_schema("get_function_pointers",
-                "Enumerate pointer-valued operands and resolved code/data references for one function or a paginated slice of functions.",
-                json!({"type": "object", "properties": {
-                    "addr": {"type": "string", "description": "Optional function address in hex; when present, analyzes the containing function"},
-                    "offset": {"type": "integer", "description": "Start index when scanning multiple functions", "default": 0},
-                    "limit": {"type": "integer", "description": "Max functions to analyze when addr is omitted", "default": 50}
-                }})),
-
-            tool_schema("find_call_paths",
-                "Find shortest and optionally all bounded call-graph paths between two functions using direct calls and vtable-resolved indirect calls.",
-                json!({"type": "object", "properties": {
-                    "start_addr": {"type": "string", "description": "Start function address in hex"},
-                    "goal_addr": {"type": "string", "description": "Goal function address in hex"},
-                    "max_depth": {"type": "integer", "description": "Maximum call depth to explore", "default": 6},
-                    "include_all_paths": {"type": "boolean", "description": "Include all simple paths up to max_depth", "default": false},
-                    "max_paths": {"type": "integer", "description": "Maximum number of paths to return when include_all_paths is true", "default": 32}
-                }, "required": ["start_addr", "goal_addr"]})),
-
-            tool_schema("get_bytes",
-                "Read raw bytes from the binary at a virtual address. Returns hex-encoded string.",
-                json!({"type": "object", "properties": {
-                    "addr": {"type": "string", "description": "Virtual address in hex"},
-                    "size": {"type": "integer", "description": "Number of bytes", "default": 64}
-                }, "required": ["addr"]})),
-
-            tool_schema("search_rc4",
-                "Search for RC4 cipher implementations using Datalog behavioral subgraph isomorphism. Detects KSA (swap+256+mod256) and PRGA (swap+keystream XOR) patterns.",
-                json!({"type": "object", "properties": {}})),
-
-            tool_schema("get_coverage",
-                "Get IL lift coverage statistics: proper IL vs intrinsic vs nop vs decode errors.",
-                json!({"type": "object", "properties": {}})),
-
-            tool_schema("get_asm",
-                "Disassemble ARM64 instructions between two virtual addresses. Returns asm only, without AeonIL.",
-                json!({"type": "object", "properties": {
-                    "start_addr": {"type": "string", "description": "Start virtual address in hex, e.g. '0x512025c'"},
-                    "stop_addr": {"type": "string", "description": "Stop virtual address in hex (exclusive), e.g. '0x51202cc'"}
-                }, "required": ["start_addr", "stop_addr"]})),
-
-            tool_schema("get_function_at",
-                "Find the function containing a given address. Returns function metadata by default, and can optionally attach asm and/or AeonIL listings.",
-                json!({"type": "object", "properties": {
-                    "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"},
-                    "include_asm": {"type": "boolean", "description": "Include asm in the returned listing", "default": false},
-                    "include_il": {"type": "boolean", "description": "Include AeonIL in the returned listing", "default": false}
-                }, "required": ["addr"]})),
-
-            tool_schema("get_string",
-                "Read a null-terminated string at any virtual address (works across all ELF segments, not just .text).",
-                json!({"type": "object", "properties": {
-                    "addr": {"type": "string", "description": "Virtual address in hex"},
-                    "max_len": {"type": "integer", "description": "Max bytes to scan for null terminator", "default": 256}
-                }, "required": ["addr"]})),
-
-            tool_schema("get_data",
-                "Read raw bytes at any virtual address (works across all ELF segments). Returns hex + ASCII.",
-                json!({"type": "object", "properties": {
-                    "addr": {"type": "string", "description": "Virtual address in hex"},
-                    "size": {"type": "integer", "description": "Number of bytes to read", "default": 64}
-                }, "required": ["addr"]})),
-
-            tool_schema("emulate_snippet_il",
-                "Execute an ARM64 code region using AeonIL interpretation. Executes lifted IL statements without full binary emulation. Useful for symbolic execution or analyzing stripped code.",
-                json!({"type": "object", "properties": {
-                    "start_addr": {"type": "string", "description": "Hex address to begin execution, e.g. '0x1234'"},
-                    "end_addr": {"type": "string", "description": "Hex address to stop execution (exclusive)"},
-                    "initial_registers": {"type": "object", "description": "Register values at entry. Keys: x0-x30, sp. Values: hex strings or integers.", "additionalProperties": {}},
-                    "step_limit": {"type": "integer", "description": "Max IL statements to execute (default 1000)", "default": 1000}
-                }, "required": ["start_addr", "end_addr"]})),
-
-            tool_schema("emulate_snippet_native",
-                "Execute an ARM64 code region in unicorn ARM64 sandbox. Full native emulation with memory support. Returns final register state, memory writes, and decoded strings.",
-                json!({"type": "object", "properties": {
-                    "start_addr": {"type": "string", "description": "Hex address to begin execution, e.g. '0x1234'"},
-                    "end_addr": {"type": "string", "description": "Hex address to stop execution (exclusive)"},
-                    "initial_registers": {"type": "object", "description": "Register values at entry. Keys: x0-x30, sp, pc, nzcv. Values: hex strings or integers.", "additionalProperties": {}},
-                    "initial_memory": {"type": "object", "description": "Memory overlays. Keys: hex addresses. Values: hex string or array of bytes.", "additionalProperties": {}},
-                    "step_limit": {"type": "integer", "description": "Max instructions to execute (default 1000)", "default": 1000}
-                }, "required": ["start_addr", "end_addr"]})),
-
-            tool_schema("emulate_snippet",
-                "Execute an ARM64 code region in a bounded sandbox. Alias for emulate_snippet_native. Returns final register state, memory writes, and any decoded strings. Use for reversing obfuscated loops, string decryption, or format decoders.",
-                json!({"type": "object", "properties": {
-                    "start_addr": {"type": "string", "description": "Hex address to begin execution, e.g. '0x1234'"},
-                    "end_addr": {"type": "string", "description": "Hex address to stop execution (exclusive)"},
-                    "initial_registers": {"type": "object", "description": "Register values at entry. Keys: x0-x30, sp, pc, nzcv. Values: hex strings or integers.", "additionalProperties": {}},
-                    "initial_memory": {"type": "object", "description": "Memory overlays. Keys: hex addresses. Values: hex string or array of bytes.", "additionalProperties": {}},
-                    "step_limit": {"type": "integer", "description": "Max instructions to execute (default 1000)", "default": 1000}
-                }, "required": ["start_addr", "end_addr"]}))
-        ]
-    });
-
-    let mut tools_vec = tools_list_base();
-    tools_vec.push(tool_schema("emulate_snippet_native_advanced",
-        "Execute an ARM64 code region with advanced features: memory watchpoints, instruction hooks with register patching, PC tracing, and extended register state (SIMD).",
-        build_advanced_emulation_schema()));
-
-    json!({
-        "tools": tools_vec
-    })
+    let tools: Vec<Value> = TOOLS
+        .iter()
+        .map(|tool| {
+            json!({
+                "name": tool.name,
+                "description": tool.description,
+                "inputSchema": tool.input_schema(),
+            })
+        })
+        .collect();
+    json!({ "tools": tools })
 }
 
 fn build_advanced_emulation_schema() -> Value {
@@ -708,270 +939,29 @@ fn build_advanced_emulation_schema() -> Value {
     json!({"type": "object", "properties": props, "required": ["start_addr", "end_addr"]})
 }
 
-fn tools_list_base() -> Vec<Value> {
-    vec![
-        tool_schema("load_binary",
-            "Load an ELF or raw AArch64 binary for analysis. Must be called before other tools.",
-            json!({"type": "object", "properties": {
-                "path": {"type": "string", "description": "Path to binary"},
-                "format": {"type": "string", "description": "Binary format: 'elf' or 'raw'", "default": "elf"},
-                "base_addr": {"type": "string", "description": "Required for raw binaries: virtual base address in hex"}
-            }, "required": ["path"]})),
-
-        tool_schema("list_functions",
-            "List functions discovered from .eh_frame unwind tables. Supports pagination and name filtering.",
-            json!({"type": "object", "properties": {
-                "offset": {"type": "integer", "description": "Start index", "default": 0},
-                "limit": {"type": "integer", "description": "Max results", "default": 100},
-                "name_filter": {"type": "string", "description": "Substring filter on symbol name"}
-            }})),
-
-        tool_schema("set_analysis_name",
-            "Backwards-compatible alias for rename_symbol. Attaches or overwrites a semantic symbol on an address.",
-            json!({"type": "object", "properties": {
-                "addr": {"type": "string", "description": "Virtual address in hex"},
-                "name": {"type": "string", "description": "Analysis name to assign to the address"}
-            }, "required": ["addr", "name"]})),
-
-        tool_schema("rename_symbol",
-            "Attach or overwrite a semantic symbol name on an address.",
-            json!({"type": "object", "properties": {
-                "addr": {"type": "string", "description": "Virtual address in hex"},
-                "name": {"type": "string", "description": "Semantic symbol name to assign to the address"}
-            }, "required": ["addr", "name"]})),
-
-        tool_schema("define_struct",
-            "Attach or overwrite a structure definition on an address.",
-            json!({"type": "object", "properties": {
-                "addr": {"type": "string", "description": "Virtual address in hex"},
-                "definition": {"type": "string", "description": "Structure definition text"}
-            }, "required": ["addr", "definition"]})),
-
-        tool_schema("add_hypothesis",
-            "Record a semantic hypothesis on an address. Duplicate notes are ignored.",
-            json!({"type": "object", "properties": {
-                "addr": {"type": "string", "description": "Virtual address in hex"},
-                "note": {"type": "string", "description": "Hypothesis or analyst note"}
-            }, "required": ["addr", "note"]})),
-
-        tool_schema("search_analysis_names",
-            "Search analysis names attached to addresses using a regex pattern.",
-            json!({"type": "object", "properties": {
-                "pattern": {"type": "string", "description": "Regex pattern matched against analysis names"}
-            }, "required": ["pattern"]})),
-
-        tool_schema("get_blackboard_entry",
-            "Look up all semantic context recorded for an address: symbol name, struct definition, hypotheses, and containing function. Use to inspect what the blackboard knows about a specific address.",
-            json!({"type": "object", "properties": {
-                "addr": {"type": "string", "description": "Address to look up in hex"}
-            }, "required": ["addr"]})),
-
-        tool_schema("get_il",
-            "Get the lifted AeonIL intermediate language listing for the function containing a given address.",
-            json!({"type": "object", "properties": {
-                "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"}
-            }, "required": ["addr"]})),
-
-        tool_schema("get_function_il",
-            "Backwards-compatible alias for get_il.",
-            json!({"type": "object", "properties": {
-                "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"}
-            }, "required": ["addr"]})),
-
-        tool_schema("get_reduced_il",
-            "Return block-structured reduced AeonIL for the function containing a given address.",
-            json!({"type": "object", "properties": {
-                "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"}
-            }, "required": ["addr"]})),
-
-        tool_schema("get_ssa",
-            "Return reduced SSA form for the function containing a given address, optionally optimized.",
-            json!({"type": "object", "properties": {
-                "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"},
-                "optimize": {"type": "boolean", "description": "Run SSA optimization passes before returning JSON", "default": true}
-            }, "required": ["addr"]})),
-
-        tool_schema("get_stack_frame",
-            "Summarize the detected stack frame and visible stack-slot accesses for the function containing a given address.",
-            json!({"type": "object", "properties": {
-                "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"}
-            }, "required": ["addr"]})),
-
-        tool_schema("get_function_cfg",
-            "Get the Control Flow Graph for a function. Returns adjacency list, terminal blocks, and reachability from Datalog analysis.",
-            json!({"type": "object", "properties": {
-                "addr": {"type": "string", "description": "Function address in hex"}
-            }, "required": ["addr"]})),
-
-        tool_schema("get_function_skeleton",
-            "Get a dense summary of function properties for efficient triage: argument count, calls, strings, loops, crypto constants, stack frame size, and suspicious patterns.",
-            json!({"type": "object", "properties": {
-                "addr": {"type": "string", "description": "Function address in hex"}
-            }, "required": ["addr"]})),
-
-        tool_schema("get_data_flow_slice",
-            "Trace value flow for a register backward or forward through a function: backward shows where a value comes from, forward shows where it goes. Detects data dependencies through assignments and control flow.",
-            json!({"type": "object", "properties": {
-                "addr": {"type": "string", "description": "Instruction address in hex, e.g. '0x5e611fc'"},
-                "register": {"type": "string", "description": "Register name (e.g., 'x0', 'w1', 'sp')"},
-                "direction": {"type": "string", "enum": ["backward", "forward"], "description": "Direction of data flow to trace"}
-            }, "required": ["addr", "register", "direction"]})),
-
-        tool_schema("get_xrefs",
-            "Get cross-references for an address: outgoing calls from the function, and incoming calls from other functions.",
-            json!({"type": "object", "properties": {
-                "addr": {"type": "string", "description": "Function address in hex"}
-            }, "required": ["addr"]})),
-
-        tool_schema("execute_datalog",
-            "Run a named Datalog query over a function or the whole binary. Returns structured facts derived by the ascent Datalog engine from lifted AeonIL.",
-            json!({"type": "object", "properties": {
-                "query": {"type": "string", "enum": ["reachability", "defines", "reads_mem", "writes_mem", "flows_to", "call_graph", "call_graph_transitive"], "description": "Named Datalog query to execute"},
-                "addr": {"type": "string", "description": "Virtual address in hex. For per-function queries, identifies the function. For cross-function queries, identifies the root function."},
-                "register": {"type": "string", "description": "Register name (e.g. 'x0', 'w1', 'sp'). Required for 'defines' and 'flows_to' queries."},
-                "limit": {"type": "integer", "description": "Maximum number of result tuples to return", "default": 500}
-            }, "required": ["query", "addr"]})),
-
-        tool_schema("scan_pointers",
-            "Scan non-executable mapped sections for pointer-sized values that reference other locations in the binary, classifying data-to-data and data-to-code edges.",
-            json!({"type": "object", "properties": {}})),
-
-        tool_schema("scan_vtables",
-            "Detect candidate C++ vtables in .rodata/.data-style sections by finding arrays of function pointers and grouping related tables.",
-            json!({"type": "object", "properties": {}})),
-
-        tool_schema("get_function_pointers",
-            "Enumerate pointer-valued operands and resolved code/data references for one function or a paginated slice of functions.",
-            json!({"type": "object", "properties": {
-                "addr": {"type": "string", "description": "Optional function address in hex; when present, analyzes the containing function"},
-                "offset": {"type": "integer", "description": "Start index when scanning multiple functions", "default": 0},
-                "limit": {"type": "integer", "description": "Max functions to analyze when addr is omitted", "default": 50}
-            }})),
-
-        tool_schema("find_call_paths",
-            "Find shortest and optionally all bounded call-graph paths between two functions using direct calls and vtable-resolved indirect calls.",
-            json!({"type": "object", "properties": {
-                "start_addr": {"type": "string", "description": "Start function address in hex"},
-                "goal_addr": {"type": "string", "description": "Goal function address in hex"},
-                "max_depth": {"type": "integer", "description": "Maximum call depth to explore", "default": 6},
-                "include_all_paths": {"type": "boolean", "description": "Include all simple paths up to max_depth", "default": false},
-                "max_paths": {"type": "integer", "description": "Maximum number of paths to return when include_all_paths is true", "default": 32}
-            }, "required": ["start_addr", "goal_addr"]})),
-
-        tool_schema("get_bytes",
-            "Read raw bytes from the binary at a virtual address. Returns hex-encoded string.",
-            json!({"type": "object", "properties": {
-                "addr": {"type": "string", "description": "Virtual address in hex"},
-                "size": {"type": "integer", "description": "Number of bytes", "default": 64}
-            }, "required": ["addr"]})),
-
-        tool_schema("search_rc4",
-            "Search for RC4 cipher implementations using Datalog behavioral subgraph isomorphism. Detects KSA (swap+256+mod256) and PRGA (swap+keystream XOR) patterns.",
-            json!({"type": "object", "properties": {}})),
-
-        tool_schema("get_coverage",
-            "Get IL lift coverage statistics: proper IL vs intrinsic vs nop vs decode errors.",
-            json!({"type": "object", "properties": {}})),
-
-        tool_schema("get_asm",
-            "Disassemble ARM64 instructions between two virtual addresses. Returns asm only, without AeonIL.",
-            json!({"type": "object", "properties": {
-                "start_addr": {"type": "string", "description": "Start virtual address in hex, e.g. '0x512025c'"},
-                "stop_addr": {"type": "string", "description": "Stop virtual address in hex (exclusive), e.g. '0x51202cc'"}
-            }, "required": ["start_addr", "stop_addr"]})),
-
-        tool_schema("get_function_at",
-            "Find the function containing a given address. Returns function metadata by default, and can optionally attach asm and/or AeonIL listings.",
-            json!({"type": "object", "properties": {
-                "addr": {"type": "string", "description": "Any virtual address in hex, e.g. '0x5e611fc'"},
-                "include_asm": {"type": "boolean", "description": "Include asm in the returned listing", "default": false},
-                "include_il": {"type": "boolean", "description": "Include AeonIL in the returned listing", "default": false}
-            }, "required": ["addr"]})),
-
-        tool_schema("get_string",
-            "Read a null-terminated string at any virtual address (works across all ELF segments, not just .text).",
-            json!({"type": "object", "properties": {
-                "addr": {"type": "string", "description": "Virtual address in hex"},
-                "max_len": {"type": "integer", "description": "Max bytes to scan for null terminator", "default": 256}
-            }, "required": ["addr"]})),
-
-        tool_schema("get_data",
-            "Read raw bytes at any virtual address (works across all ELF segments). Returns hex + ASCII.",
-            json!({"type": "object", "properties": {
-                "addr": {"type": "string", "description": "Virtual address in hex"},
-                "size": {"type": "integer", "description": "Number of bytes to read", "default": 64}
-            }, "required": ["addr"]})),
-
-        tool_schema("emulate_snippet_il",
-            "Execute an ARM64 code region using AeonIL interpretation. Executes lifted IL statements without full binary emulation. Useful for symbolic execution or analyzing stripped code.",
-            json!({"type": "object", "properties": {
-                "start_addr": {"type": "string", "description": "Hex address to begin execution, e.g. '0x1234'"},
-                "end_addr": {"type": "string", "description": "Hex address to stop execution (exclusive)"},
-                "initial_registers": {"type": "object", "description": "Register values at entry. Keys: x0-x30, sp. Values: hex strings or integers.", "additionalProperties": {}},
-                "step_limit": {"type": "integer", "description": "Max IL statements to execute (default 1000)", "default": 1000}
-            }, "required": ["start_addr", "end_addr"]})),
-
-        tool_schema("emulate_snippet_native",
-            "Execute an ARM64 code region in unicorn ARM64 sandbox. Full native emulation with memory support. Returns final register state, memory writes, and decoded strings.",
-            json!({"type": "object", "properties": {
-                "start_addr": {"type": "string", "description": "Hex address to begin execution, e.g. '0x1234'"},
-                "end_addr": {"type": "string", "description": "Hex address to stop execution (exclusive)"},
-                "initial_registers": {"type": "object", "description": "Register values at entry. Keys: x0-x30, sp, pc, nzcv. Values: hex strings or integers.", "additionalProperties": {}},
-                "initial_memory": {"type": "object", "description": "Memory overlays. Keys: hex addresses. Values: hex string or array of bytes.", "additionalProperties": {}},
-                "step_limit": {"type": "integer", "description": "Max instructions to execute (default 1000)", "default": 1000}
-            }, "required": ["start_addr", "end_addr"]})),
-
-        tool_schema("emulate_snippet",
-            "Execute an ARM64 code region in a bounded sandbox. Alias for emulate_snippet_native. Returns final register state, memory writes, and any decoded strings. Use for reversing obfuscated loops, string decryption, or format decoders.",
-            json!({"type": "object", "properties": {
-                "start_addr": {"type": "string", "description": "Hex address to begin execution, e.g. '0x1234'"},
-                "end_addr": {"type": "string", "description": "Hex address to stop execution (exclusive)"},
-                "initial_registers": {"type": "object", "description": "Register values at entry. Keys: x0-x30, sp, pc, nzcv. Values: hex strings or integers.", "additionalProperties": {}},
-                "initial_memory": {"type": "object", "description": "Memory overlays. Keys: hex addresses. Values: hex string or array of bytes.", "additionalProperties": {}},
-                "step_limit": {"type": "integer", "description": "Max instructions to execute (default 1000)", "default": 1000}
-            }, "required": ["start_addr", "end_addr"]})),
-    ]
-}
-
 pub fn tools_markdown_table() -> String {
     let mut lines = vec![
         "| Tool | Description |".to_string(),
         "|------|-------------|".to_string(),
     ];
 
-    if let Some(tools) = tools_list().get("tools").and_then(Value::as_array) {
-        for tool in tools {
-            let Some(name) = tool.get("name").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(description) = tool.get("description").and_then(Value::as_str) else {
-                continue;
-            };
-            lines.push(format!(
-                "| `{}` | {} |",
-                escape_markdown_cell(name),
-                escape_markdown_cell(description)
-            ));
-        }
+    for tool in TOOLS {
+        lines.push(format!(
+            "| `{}` | {} |",
+            escape_markdown_cell(tool.name),
+            escape_markdown_cell(tool.description)
+        ));
     }
 
     lines.join("\n")
 }
 
-fn tool_schema(name: &str, description: &str, input_schema: Value) -> Value {
-    json!({
-        "name": name,
-        "description": description,
-        "inputSchema": input_schema
-    })
-}
-
-fn parse_addr_arg(args: &Value) -> Result<u64, String> {
+fn parse_addr_arg(args: &Value) -> Result<u64, ArgError> {
     let s = args
         .get("addr")
         .and_then(|value| value.as_str())
         .ok_or("Missing required parameter: addr")?;
-    parse_hex(s).ok_or_else(|| format!("Invalid hex address: {}", s))
+    Ok(parse_hex(s).ok_or_else(|| format!("Invalid hex address: {}", s))?)
 }
 
 fn parse_hex(s: &str) -> Option<u64> {
@@ -979,24 +969,24 @@ fn parse_hex(s: &str) -> Option<u64> {
     u64::from_str_radix(s, 16).ok()
 }
 
-fn parse_bool_arg(args: &Value, key: &str, default: bool) -> Result<bool, String> {
+fn parse_bool_arg(args: &Value, key: &str, default: bool) -> Result<bool, ArgError> {
     match args.get(key) {
-        Some(value) => value
+        Some(value) => Ok(value
             .as_bool()
-            .ok_or_else(|| format!("Invalid boolean parameter: {}", key)),
+            .ok_or_else(|| format!("Invalid boolean parameter: {}", key))?),
         None => Ok(default),
     }
 }
 
-fn parse_hex_arg(args: &Value, key: &str) -> Result<u64, String> {
+fn parse_hex_arg(args: &Value, key: &str) -> Result<u64, ArgError> {
     let s = args
         .get(key)
         .and_then(|value| value.as_str())
         .ok_or_else(|| format!("Missing required parameter: {}", key))?;
-    parse_hex(s).ok_or_else(|| format!("Invalid hex address for {}: {}", key, s))
+    Ok(parse_hex(s).ok_or_else(|| format!("Invalid hex address for {}: {}", key, s))?)
 }
 
-fn parse_register_map(args: &Value) -> Result<std::collections::HashMap<String, u64>, String> {
+fn parse_register_map(args: &Value) -> Result<std::collections::HashMap<String, u64>, ArgError> {
     use std::collections::HashMap;
     let mut result = HashMap::new();
 
@@ -1007,7 +997,7 @@ fn parse_register_map(args: &Value) -> Result<std::collections::HashMap<String, 
             } else if let Some(n) = value.as_u64() {
                 n
             } else {
-                return Err(format!("Invalid register value for {}: expected hex string or integer", name));
+                return Err(format!("Invalid register value for {}: expected hex string or integer", name).into());
             };
             result.insert(name.clone(), val);
         }
@@ -1016,7 +1006,7 @@ fn parse_register_map(args: &Value) -> Result<std::collections::HashMap<String, 
     Ok(result)
 }
 
-fn parse_memory_map(args: &Value) -> Result<std::collections::HashMap<u64, Vec<u8>>, String> {
+fn parse_memory_map(args: &Value) -> Result<std::collections::HashMap<u64, Vec<u8>>, ArgError> {
     use std::collections::HashMap;
     let mut result = HashMap::new();
 
@@ -1043,7 +1033,7 @@ fn parse_memory_map(args: &Value) -> Result<std::collections::HashMap<u64, Vec<u
                 }
                 bytes
             } else {
-                return Err(format!("Invalid memory value at {}: expected hex string or array of bytes", addr_str));
+                return Err(format!("Invalid memory value at {}: expected hex string or array of bytes", addr_str).into());
             };
 
             result.insert(addr, bytes);
@@ -1053,7 +1043,7 @@ fn parse_memory_map(args: &Value) -> Result<std::collections::HashMap<u64, Vec<u
     Ok(result)
 }
 
-fn parse_watchpoints(args: &Value) -> Result<Vec<aeon::sandbox::WatchpointSpec>, String> {
+fn parse_watchpoints(args: &Value) -> Result<Vec<aeon::sandbox::WatchpointSpec>, ArgError> {
     let mut result = Vec::new();
 
     if let Some(watchpoints) = args.get("watchpoints").and_then(|v| v.as_array()) {
@@ -1095,7 +1085,7 @@ fn parse_watchpoints(args: &Value) -> Result<Vec<aeon::sandbox::WatchpointSpec>,
     Ok(result)
 }
 
-fn parse_address_hooks(args: &Value) -> Result<Vec<aeon::sandbox::AddressHookSpec>, String> {
+fn parse_address_hooks(args: &Value) -> Result<Vec<aeon::sandbox::AddressHookSpec>, ArgError> {
     let mut result = Vec::new();
 
     if let Some(hooks) = args.get("address_hooks").and_then(|v| v.as_array()) {
@@ -1153,7 +1143,7 @@ mod tests {
 
     use serde_json::{json, Value};
 
-    use super::{tools_list, tools_markdown_table, AeonFrontend};
+    use super::{tools_list, tools_markdown_table, AeonFrontend, ErrorCode, TOOLS};
 
     const README_BEGIN: &str = "<!-- BEGIN GENERATED TOOL SURFACE -->";
     const README_END: &str = "<!-- END GENERATED TOOL SURFACE -->";
@@ -1244,6 +1234,80 @@ mod tests {
                 .is_some_and(|slots| !slots.is_empty()),
             "stack frame output should expose stack-slot summaries"
         );
+    }
+
+    #[test]
+    fn every_listed_tool_is_callable_and_named_once() {
+        let listed = tools_list();
+        let listed = listed["tools"].as_array().expect("tools array");
+        assert_eq!(listed.len(), TOOLS.len());
+
+        let mut names = std::collections::HashSet::new();
+        let mut frontend = AeonFrontend::new();
+        for tool in TOOLS {
+            assert!(names.insert(tool.name), "duplicate tool {}", tool.name);
+            assert!(!tool.description.is_empty(), "{} has no description", tool.name);
+            assert_eq!(
+                tool.input_schema()["type"],
+                "object",
+                "{} schema is not an object",
+                tool.name
+            );
+            // With no binary loaded and no arguments a tool must fail, but
+            // never because it is unknown.
+            let error = frontend
+                .call_tool_typed(tool.name, &json!({}))
+                .expect_err("no binary is loaded");
+            assert_ne!(error.code, ErrorCode::UnknownTool, "{}", tool.name);
+        }
+    }
+
+    #[test]
+    fn errors_carry_stable_codes() {
+        let mut frontend = AeonFrontend::new();
+        let code = |frontend: &mut AeonFrontend, name: &str, args: Value| {
+            frontend
+                .call_tool_typed(name, &args)
+                .expect_err("call should fail")
+                .code
+        };
+
+        assert_eq!(code(&mut frontend, "no_such_tool", json!({})), ErrorCode::UnknownTool);
+        assert_eq!(
+            code(&mut frontend, "get_il", json!({ "addr": "0x718" })),
+            ErrorCode::NoBinaryLoaded
+        );
+        assert_eq!(code(&mut frontend, "load_binary", json!({})), ErrorCode::InvalidArgument);
+        assert_eq!(
+            code(&mut frontend, "load_binary", json!({ "path": "x", "format": "pe" })),
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            code(&mut frontend, "load_binary", json!({ "path": "/nonexistent/binary" })),
+            ErrorCode::Analysis
+        );
+
+        frontend
+            .call_tool("load_binary", &json!({ "path": sample_binary_path() }))
+            .expect("sample binary should load");
+        assert_eq!(code(&mut frontend, "get_il", json!({})), ErrorCode::InvalidArgument);
+        assert_eq!(
+            code(&mut frontend, "get_il", json!({ "addr": "zzz" })),
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            code(&mut frontend, "get_ssa", json!({ "addr": "0x718", "optimize": "yes" })),
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            code(&mut frontend, "get_reduced_il", json!({ "addr": "0xffffffff" })),
+            ErrorCode::Analysis
+        );
+
+        // The string forms are what clients see; they must stay distinct.
+        let strings: std::collections::HashSet<_> =
+            ErrorCode::ALL.iter().map(|code| code.as_str()).collect();
+        assert_eq!(strings.len(), ErrorCode::ALL.len());
     }
 
     #[test]

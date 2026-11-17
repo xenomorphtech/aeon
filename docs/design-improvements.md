@@ -149,6 +149,27 @@ in `crates/aeon-instrument/src/dynffi.rs`, which match one Android build.
 **Fix:** one lazily computed per-function artifact store as the single owner,
 with Datalog facts derived from it. Drop ECS unless a concrete plan needs it.
 
+**Status (2026-11-17): done.** `AeonSession` has three owners and nothing is
+stored twice: the immutable `binary`, a cache of per-function
+`FunctionArtifacts` (decoded instructions, reduced CFG, SSA, facts, each
+computed on demand), and the `Blackboard` of analyst annotations.
+
+- `AeonEngine` is gone. It held a second copy of the binary, an ECS world
+  and its own `function_analyses` map; what is left of it is
+  `blackboard::Blackboard`.
+- `bevy_ecs` is removed. The function-details listing is computed from the
+  decoded function directly.
+- `facts::analyze_function`, a second decode-lift-reduce-SSA pipeline, is
+  removed; facts come from `FunctionArtifacts::facts()`.
+- The `RefCell`s are a `RwLock` and a `Mutex`, and a compile-time assertion
+  keeps `AeonSession` `Send + Sync`.
+
+Left: several analyses still run their own decode loop instead of asking for
+a `DecodedFunction` (`pointer_analysis`, `object_layout`, the disassembly
+listings in `api.rs` and `rc4_search`). They do not store anything, so they
+are duplication rather than a second source of truth. The frontends still
+wrap the whole service in one `Mutex`; the session no longer forces that.
+
 ## 6. The API boundary is untyped JSON with string errors
 
 - The core returns `serde_json::Value` and `Result<_, String>` or
@@ -163,6 +184,30 @@ with Datalog facts derived from it. Drop ECS unless a concrete plan needs it.
 with one registry generating dispatch, schema and docs. Add an error enum with
 stable codes. Put serde derives behind a feature in `aeonil` and delete most of
 the view layer.
+
+**Status (2026-11-17): registry and frontend error codes done; the rest open.**
+
+- `aeon-frontend`'s `TOOLS` table is the only list of tools: name,
+  description, argument schema and handler in one entry. Dispatch, the
+  `tools/list` result and the README table are derived from it. Before, the
+  dispatch match and the schema list were separate, and the schema list
+  existed twice, one copy dead. A test calls every listed tool.
+- Tool calls fail with a `ToolError` carrying an `ErrorCode` whose string
+  form is stable: `unknown_tool`, `no_binary_loaded`, `invalid_argument`,
+  `analysis_failed`. HTTP returns it as `"code"` next to `"error"`; MCP puts
+  it in the result's `_meta`. `call_tool` still returns the message alone.
+
+Open:
+
+- The core still returns `Result<_, String>`, so everything it reports is
+  one code, `analysis_failed`. Splitting that (not found, out of range,
+  load failure, ...) needs an error enum in `aeon`.
+- Arguments are still pulled out of `serde_json::Value` by hand in each
+  handler, and the schema is written separately from that code. Typed
+  request structs deriving `Deserialize` and `JsonSchema` would make the
+  schema and the parsing one thing; that adds a `schemars` dependency.
+- Responses are still `serde_json::Value`, and the `ExprView`/`StmtView`
+  mirror enums are still there.
 
 ## 7. Smaller items
 
@@ -234,8 +279,9 @@ folding, so reducing first gains nothing there.
 ## Order of work
 
 1, then 2: they fix a correctness risk rather than tidiness, and they make the
-JIT split in 3 mostly mechanical. Items 1 to 4 and 8 are done, and the
+JIT split in 3 mostly mechanical. Items 1 to 5 and 8 are done, and the
 differential test from item 2 covers scalar code, memory, branches, a sample
-of SIMD and the reducer, with no known disagreements. Next: items 5 and 6,
-then explicit widths in the IL (see item 8), and the pass manager from item 7
-with per-pass differential validation.
+of SIMD and the reducer, with no known disagreements. Item 6 is started.
+Next: the rest of item 6 (a core error enum, typed requests), then explicit
+widths in the IL (see item 8), and the pass manager from item 7 with per-pass
+differential validation.
