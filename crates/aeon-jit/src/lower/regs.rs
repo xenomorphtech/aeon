@@ -153,13 +153,12 @@ impl LoweringState {
         if let Some(var) = self.x_regs[index].var {
             return Ok(builder.use_var(var));
         }
+        // No X variable yet means the register has not been written in this
+        // block (write_w and write_x both define it). A W variable may still
+        // exist from an earlier 32-bit read, but that only holds the low half,
+        // so the full value has to come from the context.
         let var = builder.declare_var(types::I64);
-        let value = if let Some(w_var) = self.w_regs[index].var {
-            let w = builder.use_var(w_var);
-            builder.ins().uextend(types::I64, w)
-        } else {
-            Self::load_ctx_scalar(self.ctx_ptr, builder, types::I64, x_offset(index))
-        };
+        let value = Self::load_ctx_scalar(self.ctx_ptr, builder, types::I64, x_offset(index));
         builder.def_var(var, value);
         self.x_regs[index].var = Some(var);
         Ok(value)
@@ -409,6 +408,12 @@ impl LoweringState {
         };
         builder.def_var(var, value);
         self.simd_slot_mut(kind, index).valid = true;
+        if kind != SimdKind::Vec {
+            // Writing a scalar view clears the rest of the 128-bit register.
+            let zero = builder.ins().iconst(types::I64, 0);
+            Self::store_ctx_scalar(self.ctx_ptr, builder, zero, simd_offset(index));
+            Self::store_ctx_scalar(self.ctx_ptr, builder, zero, simd_offset(index) + 8);
+        }
         Self::store_ctx_scalar(self.ctx_ptr, builder, value, simd_offset(index));
         self.invalidate_simd_aliases(index, kind);
         Ok(())

@@ -65,6 +65,7 @@ dependencies = [
  "aeon",
  "aeon-reduce",
  "aeonil",
+ "bad64",
  "cranelift-codegen",
  "cranelift-frontend",
  "cranelift-jit",
@@ -75,6 +76,7 @@ dependencies = [
  "object 0.36.7",
  "target-lexicon",
  "tempfile",
+ "unicorn-engine",
 ]
 
 [[package]]

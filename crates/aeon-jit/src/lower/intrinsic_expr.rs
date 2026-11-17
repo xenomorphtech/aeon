@@ -62,8 +62,62 @@ impl LoweringState {
         hint: Option<Type>,
     ) -> Result<LoweredValue, JitError> {
         match name.op() {
-            IntrinsicOp::Scvtf | IntrinsicOp::Ucvtf | IntrinsicOp::Fcvtzs | IntrinsicOp::Fcvtzu => {
+            IntrinsicOp::Scvtf | IntrinsicOp::Ucvtf | IntrinsicOp::Fcvtzs | IntrinsicOp::Fcvtzu
+                if name.suffix().is_some() =>
+            {
                 self.lower_vector_conversion_intrinsic(module, builder, imports, name, operands)
+            }
+            IntrinsicOp::Scvtf | IntrinsicOp::Ucvtf => {
+                let Some(operand) = operands.first() else {
+                    return Err(JitError::UnsupportedExpr("int to float operand count"));
+                };
+                let target = self.resolve_float_type(hint, None)?;
+                let source_ty = self.resolve_int_type(None, Some(operand))?;
+                let inner = self.lower_expr(module, builder, imports, operand, Some(source_ty))?;
+                let inner = self.coerce_int(builder, inner, source_ty)?;
+                let value = if name.op() == IntrinsicOp::Ucvtf {
+                    builder.ins().fcvt_from_uint(target, inner.value)
+                } else {
+                    builder.ins().fcvt_from_sint(target, inner.value)
+                };
+                Ok(LoweredValue { value, ty: target })
+            }
+            IntrinsicOp::Fcvtzs
+            | IntrinsicOp::Fcvtzu
+            | IntrinsicOp::Fcvtms
+            | IntrinsicOp::Fcvtmu
+            | IntrinsicOp::Fcvtps
+            | IntrinsicOp::Fcvtpu
+            | IntrinsicOp::Fcvtns
+            | IntrinsicOp::Fcvtnu => {
+                let Some(operand) = operands.first() else {
+                    return Err(JitError::UnsupportedExpr("float to int operand count"));
+                };
+                let target = self.resolve_int_type(hint, None)?;
+                let source_ty = self.resolve_float_type(None, Some(operand))?;
+                let inner = self.lower_expr(module, builder, imports, operand, Some(source_ty))?;
+                let inner = self.coerce_float(builder, inner, source_ty)?.value;
+                let op = name.op();
+                let rounded = match op {
+                    IntrinsicOp::Fcvtms | IntrinsicOp::Fcvtmu => builder.ins().floor(inner),
+                    IntrinsicOp::Fcvtps | IntrinsicOp::Fcvtpu => builder.ins().ceil(inner),
+                    IntrinsicOp::Fcvtns | IntrinsicOp::Fcvtnu => builder.ins().nearest(inner),
+                    _ => inner,
+                };
+                let unsigned = matches!(
+                    op,
+                    IntrinsicOp::Fcvtzu
+                        | IntrinsicOp::Fcvtmu
+                        | IntrinsicOp::Fcvtpu
+                        | IntrinsicOp::Fcvtnu
+                );
+                // Saturating, NaN to 0: the AArch64 behaviour.
+                let value = if unsigned {
+                    builder.ins().fcvt_to_uint_sat(target, rounded)
+                } else {
+                    builder.ins().fcvt_to_sint_sat(target, rounded)
+                };
+                Ok(LoweredValue { value, ty: target })
             }
             // Bitwise vector operations (arrangement-independent)
             IntrinsicOp::And => {
@@ -418,6 +472,14 @@ impl LoweringState {
                         };
                         (v, shift_imm)
                     }
+                    // Constant folding turns `imm16 << shift` into one
+                    // immediate; its 16-bit field is the one holding its
+                    // lowest set bit.
+                    Expr::Imm(shifted) if *shifted != 0 => {
+                        let shift = (shifted.trailing_zeros() / 16 * 16) as u8;
+                        let value = self.iconst(builder, ty, shifted >> shift)?;
+                        (LoweredValue { value, ty }, shift)
+                    }
                     _ => {
                         let v =
                             self.lower_expr(module, builder, imports, &operands[1], Some(ty))?;
@@ -521,7 +583,7 @@ impl LoweringState {
                 let mut ints = builder.ins().splat(I64X2, zero);
                 for lane in 0..2 {
                     let value = builder.ins().extractlane(floats, lane);
-                    let value = builder.ins().fcvt_to_sint(types::I64, value);
+                    let value = builder.ins().fcvt_to_sint_sat(types::I64, value);
                     ints = builder.ins().insertlane(ints, value, lane);
                 }
                 Ok(LoweredValue {
@@ -535,7 +597,7 @@ impl LoweringState {
                 let mut ints = builder.ins().splat(I64X2, zero);
                 for lane in 0..2 {
                     let value = builder.ins().extractlane(floats, lane);
-                    let value = builder.ins().fcvt_to_uint(types::I64, value);
+                    let value = builder.ins().fcvt_to_uint_sat(types::I64, value);
                     ints = builder.ins().insertlane(ints, value, lane);
                 }
                 Ok(LoweredValue {

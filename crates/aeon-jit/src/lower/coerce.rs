@@ -97,10 +97,19 @@ impl LoweringState {
             | Expr::Shl(lhs, rhs)
             | Expr::Lsr(lhs, rhs)
             | Expr::Asr(lhs, rhs)
-            | Expr::Ror(lhs, rhs) => self
-                .infer_expr_type(lhs)
-                .or_else(|| self.infer_expr_type(rhs))
-                .or(Some(types::I64)),
+            | Expr::Ror(lhs, rhs) => {
+                // An immediate has no width of its own, so `0 - w1` is a
+                // 32-bit operation: let the other operand decide.
+                let untyped =
+                    |expr: &Expr| matches!(expr, Expr::Imm(_) | Expr::AdrpImm(_) | Expr::AdrImm(_));
+                let typed = if untyped(lhs) && !untyped(rhs) {
+                    self.infer_expr_type(rhs)
+                } else {
+                    self.infer_expr_type(lhs)
+                        .or_else(|| self.infer_expr_type(rhs))
+                };
+                typed.or(Some(types::I64))
+            }
             Expr::Neg(inner)
             | Expr::Abs(inner)
             | Expr::Not(inner)
@@ -502,9 +511,11 @@ impl LoweringState {
             Condition::EQ => Ok(FloatCC::Equal),
             Condition::NE => Ok(FloatCC::NotEqual),
             Condition::GE => Ok(FloatCC::GreaterThanOrEqual),
-            Condition::LT => Ok(FloatCC::LessThan),
+            // After an AArch64 FP compare, LT and LE also hold when the
+            // operands are unordered.
+            Condition::LT => Ok(FloatCC::UnorderedOrLessThan),
             Condition::GT => Ok(FloatCC::GreaterThan),
-            Condition::LE => Ok(FloatCC::LessThanOrEqual),
+            Condition::LE => Ok(FloatCC::UnorderedOrLessThanOrEqual),
             _ => Err(JitError::UnsupportedCondition(cond)),
         }
     }

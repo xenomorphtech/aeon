@@ -16,6 +16,8 @@ target-lexicon = "0.13.5"
 [dev-dependencies]
 aeon = { path = "../aeon" }
 aeon-reduce = { path = "../aeon-reduce" }
+bad64 = "0.6"
 libc = "0.2"
 object = { version = "0.36", default-features = false, features = ["read", "elf"] }
 tempfile = "3"
+unicorn-engine = "2.1"

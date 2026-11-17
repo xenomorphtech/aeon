@@ -54,6 +54,12 @@ intrinsic_ops! {
     Adc => "adc",
     Sbc => "sbc",
     Ngc => "ngc",
+    // Flag-setting carry arithmetic. These are statements, not expressions:
+    // the result and the new flags both depend on the old carry, so neither
+    // can be computed after the other has been written.
+    Adcs => "adcs",
+    Sbcs => "sbcs",
+    Ngcs => "ngcs",
     Rev16 => "rev16",
     Rev32 => "rev32",
     Extr => "extr",
@@ -110,6 +116,14 @@ intrinsic_ops! {
     Ucvtf => "ucvtf",
     Fcvtzs => "fcvtzs",
     Fcvtzu => "fcvtzu",
+    Fcvtms => "fcvtms",
+    Fcvtmu => "fcvtmu",
+    Fcvtps => "fcvtps",
+    Fcvtpu => "fcvtpu",
+    Fcvtns => "fcvtns",
+    Fcvtnu => "fcvtnu",
+    Fcvtas => "fcvtas",
+    Fcvtau => "fcvtau",
     Fcmla => "fcmla",
     Fmulx => "fmulx",
 
@@ -136,7 +150,21 @@ intrinsic_ops! {
 
     // SIMD arithmetic and compare
     Add => "add",
+    Sub => "sub",
+    Mul => "mul",
+    Neg => "neg",
+    Abs => "abs",
+    Mov => "mov",
     Cmeq => "cmeq",
+    Cmhi => "cmhi",
+    Cmhs => "cmhs",
+    Cmgt => "cmgt",
+    Cmge => "cmge",
+    Umax => "umax",
+    Umin => "umin",
+    Smax => "smax",
+    Smin => "smin",
+    Rev64 => "rev64",
     Mla => "mla",
     Mls => "mls",
     Umull2 => "umull2",
@@ -147,6 +175,8 @@ intrinsic_ops! {
     Sqrdmlsh => "sqrdmlsh",
 
     // SIMD shifts
+    Shl => "shl",
+    Sshr => "sshr",
     Ushr => "ushr",
     Urshr => "urshr",
     Usra => "usra",

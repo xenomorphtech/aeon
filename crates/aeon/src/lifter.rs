@@ -1,5 +1,5 @@
 use crate::il::*;
-use bad64::{Imm, Instruction, Op, Operand, Shift};
+use bad64::{ArrSpec, Imm, Instruction, Op, Operand, Shift};
 
 pub struct LiftResult {
     pub disasm: String,
@@ -248,9 +248,24 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
             ft(&mut edges, next_pc);
             lift_binary(operands, e_udiv)
         }
-        Op::NEG | Op::NEGS => {
+        Op::NEG => {
             ft(&mut edges, next_pc);
             lift_unary(operands, e_neg)
+        }
+        Op::NEGS => {
+            // NEGS Rd, Rm is SUBS Rd, zr, Rm.
+            ft(&mut edges, next_pc);
+            let dst = reg_op(operands, 0);
+            let m = expr_op(operands, 1);
+            Stmt::Pair(
+                Box::new(Stmt::SetFlags {
+                    expr: e_sub(Expr::Imm(0), m.clone()),
+                }),
+                Box::new(Stmt::Assign {
+                    dst,
+                    src: e_neg(m),
+                }),
+            )
         }
 
         Op::MADD => {
@@ -364,14 +379,7 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         }
         Op::ADCS => {
             ft(&mut edges, next_pc);
-            let dst = reg_op(operands, 0);
-            let a = expr_op(operands, 1);
-            let b = expr_op(operands, 2);
-            let expr = e_intrinsic("adc", vec![a.clone(), b.clone()]);
-            Stmt::Pair(
-                Box::new(Stmt::SetFlags { expr: expr.clone() }),
-                Box::new(Stmt::Assign { dst, src: expr }),
-            )
+            lift_intrinsic_all(operands, "adcs")
         }
         Op::SBC => {
             ft(&mut edges, next_pc);
@@ -379,14 +387,7 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         }
         Op::SBCS => {
             ft(&mut edges, next_pc);
-            let dst = reg_op(operands, 0);
-            let a = expr_op(operands, 1);
-            let b = expr_op(operands, 2);
-            let expr = e_intrinsic("sbc", vec![a.clone(), b.clone()]);
-            Stmt::Pair(
-                Box::new(Stmt::SetFlags { expr: expr.clone() }),
-                Box::new(Stmt::Assign { dst, src: expr }),
-            )
+            lift_intrinsic_all(operands, "sbcs")
         }
         Op::NGC => {
             ft(&mut edges, next_pc);
@@ -394,13 +395,7 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         }
         Op::NGCS => {
             ft(&mut edges, next_pc);
-            let dst = reg_op(operands, 0);
-            let a = expr_op(operands, 1);
-            let expr = e_intrinsic("ngc", vec![a]);
-            Stmt::Pair(
-                Box::new(Stmt::SetFlags { expr: expr.clone() }),
-                Box::new(Stmt::Assign { dst, src: expr }),
-            )
+            lift_intrinsic_all(operands, "ngcs")
         }
 
         // ── Logic ──────────────────────────────────────────────────
@@ -553,19 +548,34 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
             ft(&mut edges, next_pc);
             lift_csel(operands, |t, f, c| e_cond_select(c, t, f))
         }
-        Op::CSINC | Op::CINC => {
+        Op::CSINC => {
             ft(&mut edges, next_pc);
             lift_csel(operands, |t, f, c| {
                 e_cond_select(c, t, e_add(f, Expr::Imm(1)))
             })
         }
-        Op::CSINV | Op::CINV => {
+        Op::CSINV => {
             ft(&mut edges, next_pc);
             lift_csel(operands, |t, f, c| e_cond_select(c, t, e_not(f)))
         }
-        Op::CSNEG | Op::CNEG => {
+        Op::CSNEG => {
             ft(&mut edges, next_pc);
             lift_csel(operands, |t, f, c| e_cond_select(c, t, e_neg(f)))
+        }
+        // The two-register aliases apply the operation when the condition
+        // holds: `CINC Rd, Rn, cond` is Rd = cond ? Rn + 1 : Rn. That is the
+        // opposite arm from CSINC, whose increment is on the false side.
+        Op::CINC => {
+            ft(&mut edges, next_pc);
+            lift_cond_unary(operands, |n| e_add(n, Expr::Imm(1)))
+        }
+        Op::CINV => {
+            ft(&mut edges, next_pc);
+            lift_cond_unary(operands, e_not)
+        }
+        Op::CNEG => {
+            ft(&mut edges, next_pc);
+            lift_cond_unary(operands, e_neg)
         }
         Op::CSET => {
             ft(&mut edges, next_pc);
@@ -850,7 +860,8 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
             if first_vector_arrangement(&disasm).is_some() {
                 lift_unary_intrinsic_with_arrangement(&disasm, operands, "ucvtf")
             } else {
-                lift_unary(operands, e_int_to_float)
+                // `IntToFloat` is the signed conversion.
+                lift_unary_intrinsic(operands, "ucvtf")
             }
         }
         Op::FCVTZS
@@ -867,8 +878,13 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
             if first_vector_arrangement(&disasm).is_some() {
                 let name = format!("{:?}", insn.op()).to_lowercase();
                 lift_unary_intrinsic_with_arrangement(&disasm, operands, &name)
-            } else {
+            } else if insn.op() == Op::FCVTZS {
+                // `FloatToInt` is the signed, round-toward-zero conversion;
+                // every other signedness or rounding mode keeps its name.
                 lift_unary(operands, e_float_to_int)
+            } else {
+                let name = format!("{:?}", insn.op()).to_lowercase();
+                lift_unary_intrinsic(operands, &name)
             }
         }
 
@@ -1197,10 +1213,107 @@ pub fn lift(insn: &Instruction, pc: u64, next_pc: Option<u64>) -> LiftResult {
         }
     };
 
+    let stmt = keep_vector_shape(insn, &disasm, operands, stmt);
+
     LiftResult {
         disasm,
         stmt,
         edges,
+    }
+}
+
+/// Lane width in bits of an arrangement and, for an element such as
+/// `v3.s[1]`, its index.
+fn arrspec_lane(spec: &ArrSpec) -> (u16, Option<u32>) {
+    match spec {
+        ArrSpec::Full(index) => (128, *index),
+        ArrSpec::TwoDoubles(index) | ArrSpec::OneDouble(index) => (64, *index),
+        ArrSpec::FourSingles(index) | ArrSpec::TwoSingles(index) | ArrSpec::OneSingle(index) => {
+            (32, *index)
+        }
+        ArrSpec::EightHalves(index)
+        | ArrSpec::FourHalves(index)
+        | ArrSpec::TwoHalves(index)
+        | ArrSpec::OneHalf(index) => (16, *index),
+        ArrSpec::SixteenBytes(index)
+        | ArrSpec::EightBytes(index)
+        | ArrSpec::FourBytes(index)
+        | ArrSpec::OneByte(index) => (8, *index),
+    }
+}
+
+/// The register, bit offset and width of a single-lane operand such as
+/// `v3.s[1]`.
+fn lane_element(op: &Operand) -> Option<(Reg, u8, u8)> {
+    let Operand::Reg {
+        reg,
+        arrspec: Some(spec),
+    } = op
+    else {
+        return None;
+    };
+    let (bits, Some(index)) = arrspec_lane(spec) else {
+        return None;
+    };
+    let lsb = u32::from(bits).checked_mul(index)?;
+    if bits > 64 || lsb + u32::from(bits) > 128 {
+        return None;
+    }
+    Some((reg_from_bad64(*reg)?, lsb as u8, bits as u8))
+}
+
+/// Whether the operand is a whole vector with an arrangement (`v0.4s`).
+fn has_arrangement(op: &Operand) -> bool {
+    match op {
+        Operand::Reg {
+            arrspec: Some(spec),
+            ..
+        }
+        | Operand::MultiReg {
+            arrspec: Some(spec),
+            ..
+        } => !matches!(spec, ArrSpec::Full(_)) && arrspec_lane(spec).1.is_none(),
+        _ => false,
+    }
+}
+
+/// Many mnemonics have both a scalar and a vector form, and the handlers
+/// above are written for the scalar one. Applied to a vector form they would
+/// produce IL that reads as a scalar operation on a 128-bit register and has
+/// lost the lane width or lane index. This puts that information back.
+fn keep_vector_shape(insn: &Instruction, disasm: &str, operands: &[Operand], stmt: Stmt) -> Stmt {
+    // A write to one lane (`ins v3.s[1], w0`, `mov v15.d[0], x1`) keeps the
+    // rest of the register.
+    if operands.len() == 2 {
+        if let Some((reg, lsb, width)) = lane_element(&operands[0]) {
+            return Stmt::Assign {
+                dst: reg.clone(),
+                src: e_insert(Expr::Reg(reg), expr_from_operand(&operands[1]), lsb, width),
+            };
+        }
+    }
+
+    if !operands.iter().any(has_arrangement) {
+        return stmt;
+    }
+    let keeps_arrangement = match &stmt {
+        Stmt::Intrinsic { .. } => true,
+        Stmt::Assign {
+            src: Expr::Intrinsic { name, .. },
+            ..
+        } => name.arrangement().is_some(),
+        // A whole-register move needs no arrangement.
+        Stmt::Assign {
+            dst: Reg::V(_) | Reg::Q(_),
+            src: Expr::Reg(Reg::V(_) | Reg::Q(_)),
+        } => first_vector_arrangement(disasm).as_deref() == Some("16b"),
+        _ => false,
+    };
+    if keeps_arrangement {
+        stmt
+    } else {
+        let name = format!("{:?}", insn.op()).to_lowercase();
+        lift_intrinsic_all_with_arrangement(disasm, operands, &name)
     }
 }
 
@@ -1351,20 +1464,22 @@ fn intrinsic_name_with_arrangement(disasm: &str, name: &str) -> String {
     }
 }
 
+/// The arrangement of the first operand that has one (`4s` in
+/// `add v0.4s, ...`, `16b` in `addv b8, v0.16b`).
 fn first_vector_arrangement(disasm: &str) -> Option<String> {
     let (_, operands) = disasm.split_once(' ')?;
-    let first = operands
-        .split(',')
-        .next()?
-        .trim()
-        .trim_start_matches('{')
-        .trim_end_matches('}');
-    let (_, arrangement) = first.split_once('.')?;
-    if arrangement.chars().next()?.is_ascii_digit() {
-        Some(arrangement.to_string())
-    } else {
-        None
-    }
+    operands.split(',').find_map(|operand| {
+        let operand = operand
+            .trim()
+            .trim_start_matches('{')
+            .trim_end_matches('}');
+        let (_, arrangement) = operand.split_once('.')?;
+        arrangement
+            .chars()
+            .next()?
+            .is_ascii_digit()
+            .then(|| arrangement.to_string())
+    })
 }
 
 fn parse_lane_operand(disasm: &str, operand_index: usize) -> Option<(Reg, u8, u8)> {
@@ -1462,16 +1577,25 @@ fn lift_load_pair(operands: &[Operand], signed: bool) -> Stmt {
     } else {
         load2
     };
-    let stmt = Stmt::Pair(
-        Box::new(Stmt::Assign {
-            dst: dst1,
-            src: src1,
-        }),
-        Box::new(Stmt::Assign {
-            dst: dst2,
-            src: src2,
-        }),
-    );
+    let first = Stmt::Assign {
+        dst: dst1.clone(),
+        src: src1,
+    };
+    let second = Stmt::Assign {
+        dst: dst2,
+        src: src2,
+    };
+    // Both loads use the base as it was before the instruction. If the first
+    // destination is the base register, load the second one first.
+    let first_clobbers_base = operands
+        .get(2)
+        .and_then(mem_base_reg)
+        .is_some_and(|base| gpr_number(&base).is_some() && gpr_number(&base) == gpr_number(&dst1));
+    let stmt = if first_clobbers_base {
+        Stmt::Pair(Box::new(second), Box::new(first))
+    } else {
+        Stmt::Pair(Box::new(first), Box::new(second))
+    };
     if let Some(mem) = operands.get(2) {
         wrap_mem_writeback(mem, stmt)
     } else {
@@ -1598,6 +1722,17 @@ fn lift_store_pair(operands: &[Operand]) -> Stmt {
         wrap_mem_writeback(mem, stmt)
     } else {
         stmt
+    }
+}
+
+/// `Rd = cond ? make(Rn) : Rn`, for CINC, CINV and CNEG.
+fn lift_cond_unary(operands: &[Operand], make: fn(Expr) -> Expr) -> Stmt {
+    let dst = reg_op(operands, 0);
+    let n = expr_op(operands, 1);
+    let cond = cond_op(operands, 2);
+    Stmt::Assign {
+        dst,
+        src: e_cond_select(cond, make(n.clone()), n),
     }
 }
 
@@ -1741,7 +1876,11 @@ fn operand_to_reg(op: &Operand) -> Option<Reg> {
 
 fn expr_from_operand(op: &Operand) -> Expr {
     match op {
-        Operand::Reg { reg, .. } => reg_from_bad64(*reg).map(Expr::Reg).unwrap_or(Expr::Imm(0)),
+        Operand::Reg { reg, .. } => match lane_element(op) {
+            // `v4.h[3]` is one lane of the register, not the register.
+            Some((reg, lsb, width)) => e_extract(Expr::Reg(reg), lsb, width),
+            None => reg_from_bad64(*reg).map(Expr::Reg).unwrap_or(Expr::Imm(0)),
+        },
         Operand::ShiftReg { reg, shift } => {
             let base = reg_from_bad64(*reg).map(Expr::Reg).unwrap_or(Expr::Imm(0));
             apply_shift(base, *shift)
@@ -1833,6 +1972,25 @@ fn mem_to_addr(op: &Operand) -> Expr {
             e_add(base, idx)
         }
         _ => Expr::Imm(0),
+    }
+}
+
+fn mem_base_reg(mem: &Operand) -> Option<Reg> {
+    match mem {
+        Operand::MemReg(reg)
+        | Operand::MemOffset { reg, .. }
+        | Operand::MemPreIdx { reg, .. }
+        | Operand::MemPostIdxImm { reg, .. } => reg_from_bad64(*reg),
+        Operand::MemPostIdxReg(regs) | Operand::MemExt { regs, .. } => reg_from_bad64(regs[0]),
+        _ => None,
+    }
+}
+
+/// The general-purpose register number behind an `X` or `W` view.
+fn gpr_number(reg: &Reg) -> Option<u8> {
+    match reg {
+        Reg::X(number) | Reg::W(number) => Some(*number),
+        _ => None,
     }
 }
 

@@ -3,7 +3,7 @@ use crate::lower::{reg_type, LoweredValue, LoweringState, VectorShiftKind};
 use crate::JitError;
 use aeonil::{Expr, IntrinsicName, IntrinsicOp, Reg};
 use cranelift_codegen::ir::types::{self};
-use cranelift_codegen::ir::{InstBuilder, MemFlags, Value};
+use cranelift_codegen::ir::{InstBuilder, Value};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
@@ -201,20 +201,7 @@ impl LoweringState {
                     let a = self.coerce_float(builder, a, ty)?;
                     let b = self.lower_expr(module, builder, imports, &operands[1], Some(ty))?;
                     let b = self.coerce_float(builder, b, ty)?;
-                    // Compute SUB-style flags from float comparison
-                    let fsub_result = builder.ins().fsub(a.value, b.value);
-                    let result_bits = if ty == types::F32 {
-                        let bits = builder
-                            .ins()
-                            .bitcast(types::I32, MemFlags::new(), fsub_result);
-                        builder.ins().uextend(types::I64, bits)
-                    } else {
-                        builder
-                            .ins()
-                            .bitcast(types::I64, MemFlags::new(), fsub_result)
-                    };
-                    let fcmp_flags =
-                        self.pack_nzcv(builder, result_bits, types::I64, None, None)?;
+                    let fcmp_flags = self.compute_fcmp_flags(builder, a.value, b.value);
 
                     // Select: if condition, use fcmp flags; else use immediate nzcv
                     let imm_flags = builder.ins().iconst(types::I64, nzcv_imm as i64);
@@ -382,6 +369,84 @@ impl LoweringState {
                 };
                 self.write_reg(builder, &dst_reg, LoweredValue { value: result, ty })
             }
+            IntrinsicOp::Adcs | IntrinsicOp::Sbcs | IntrinsicOp::Ngcs => {
+                // operands: [dst, lhs, rhs], or [dst, rhs] for NGCS.
+                let op = name.op();
+                let expected = if op == IntrinsicOp::Ngcs { 2 } else { 3 };
+                if operands.len() < expected {
+                    return Err(JitError::UnsupportedStmt("carry arithmetic operand count"));
+                }
+                let dst_reg = match &operands[0] {
+                    Expr::Reg(reg) => reg.clone(),
+                    _ => return Err(JitError::UnsupportedStmt("carry arithmetic dest")),
+                };
+                let ty = self.resolve_int_type(Some(reg_type(&dst_reg)?), None)?;
+                let lhs = if op == IntrinsicOp::Ngcs {
+                    builder.ins().iconst(ty, 0)
+                } else {
+                    let lhs = self.lower_expr(module, builder, imports, &operands[1], Some(ty))?;
+                    self.coerce_int(builder, lhs, ty)?.value
+                };
+                let rhs = &operands[expected - 1];
+                let rhs = self.lower_expr(module, builder, imports, rhs, Some(ty))?;
+                let rhs = self.coerce_int(builder, rhs, ty)?.value;
+                let rhs = if op == IntrinsicOp::Adcs {
+                    rhs
+                } else {
+                    builder.ins().bnot(rhs)
+                };
+                let (result, flags) = self.compute_add_with_carry(builder, lhs, rhs, ty)?;
+                self.write_flags_value(builder, flags)?;
+                self.write_reg(builder, &dst_reg, LoweredValue { value: result, ty })
+            }
+            op if crc32_params(op).is_some() => {
+                // operands: [dst, accumulator, data]
+                let (poly, bytes) = crc32_params(op).expect("checked above");
+                if operands.len() < 3 {
+                    return Err(JitError::UnsupportedStmt("crc32 operand count"));
+                }
+                let dst_reg = match &operands[0] {
+                    Expr::Reg(reg) => reg.clone(),
+                    _ => return Err(JitError::UnsupportedStmt("crc32 dest")),
+                };
+                let acc =
+                    self.lower_expr(module, builder, imports, &operands[1], Some(types::I32))?;
+                let acc = self.coerce_int(builder, acc, types::I32)?.value;
+                let data_ty = if bytes == 8 { types::I64 } else { types::I32 };
+                let data =
+                    self.lower_expr(module, builder, imports, &operands[2], Some(data_ty))?;
+                let data = self.coerce_int(builder, data, data_ty)?.value;
+
+                // Bit-serial CRC, unrolled: no table and no helper call, so it
+                // lowers the same way for the JIT and for object output.
+                let poly = builder.ins().iconst(types::I32, i64::from(poly));
+                let mut crc = acc;
+                for index in 0..bytes {
+                    let byte = builder.ins().ushr_imm(data, i64::from(index) * 8);
+                    let byte = builder.ins().band_imm(byte, 0xff);
+                    let byte = if data_ty == types::I64 {
+                        builder.ins().ireduce(types::I32, byte)
+                    } else {
+                        byte
+                    };
+                    crc = builder.ins().bxor(crc, byte);
+                    for _ in 0..8 {
+                        let low = builder.ins().band_imm(crc, 1);
+                        let mask = builder.ins().ineg(low);
+                        let term = builder.ins().band(poly, mask);
+                        let shifted = builder.ins().ushr_imm(crc, 1);
+                        crc = builder.ins().bxor(shifted, term);
+                    }
+                }
+                self.write_reg(
+                    builder,
+                    &dst_reg,
+                    LoweredValue {
+                        value: crc,
+                        ty: types::I32,
+                    },
+                )
+            }
             _ => Err(JitError::UnsupportedStmt("stmt intrinsic")),
         }
     }
@@ -457,5 +522,20 @@ impl LoweringState {
                 ty: result_ty,
             },
         )
+    }
+}
+
+/// Reflected polynomial and data width in bytes of a CRC32 instruction.
+fn crc32_params(op: IntrinsicOp) -> Option<(u32, u8)> {
+    match op {
+        IntrinsicOp::Crc32b => Some((0xedb8_8320, 1)),
+        IntrinsicOp::Crc32h => Some((0xedb8_8320, 2)),
+        IntrinsicOp::Crc32w => Some((0xedb8_8320, 4)),
+        IntrinsicOp::Crc32x => Some((0xedb8_8320, 8)),
+        IntrinsicOp::Crc32cb => Some((0x82f6_3b78, 1)),
+        IntrinsicOp::Crc32ch => Some((0x82f6_3b78, 2)),
+        IntrinsicOp::Crc32cw => Some((0x82f6_3b78, 4)),
+        IntrinsicOp::Crc32cx => Some((0x82f6_3b78, 8)),
+        _ => None,
     }
 }

@@ -2,7 +2,7 @@ use crate::imports::Imports;
 use crate::lower::{LoweredValue, LoweringState};
 use crate::JitError;
 use aeonil::Expr;
-use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::immediates::{Ieee32, Ieee64};
 use cranelift_codegen::ir::types::{self, I16X8, I32X4, I64X2, I8X16};
 use cranelift_codegen::ir::{InstBuilder, MemFlags, Type, Value};
@@ -91,8 +91,21 @@ impl LoweringState {
                 let rhs = self.lower_expr(module, builder, imports, rhs, Some(ty))?;
                 let lhs = self.coerce_int(builder, lhs, ty)?;
                 let rhs = self.coerce_int(builder, rhs, ty)?;
+                // AArch64 SDIV never traps: x / 0 is 0 and MIN / -1 is MIN.
+                // Divide by 1 in both cases so the host instruction cannot
+                // fault, then zero the result for the divide-by-zero case.
+                let by_zero = builder.ins().icmp_imm(IntCC::Equal, rhs.value, 0);
+                let by_minus_one = builder.ins().icmp_imm(IntCC::Equal, rhs.value, -1);
+                let min = builder.ins().iconst(ty, i64::MIN >> (64 - ty.bits()));
+                let lhs_is_min = builder.ins().icmp(IntCC::Equal, lhs.value, min);
+                let overflows = builder.ins().band(by_minus_one, lhs_is_min);
+                let unsafe_divisor = builder.ins().bor(by_zero, overflows);
+                let one = builder.ins().iconst(ty, 1);
+                let divisor = builder.ins().select(unsafe_divisor, one, rhs.value);
+                let quotient = builder.ins().sdiv(lhs.value, divisor);
+                let zero = builder.ins().iconst(ty, 0);
                 Ok(LoweredValue {
-                    value: builder.ins().sdiv(lhs.value, rhs.value),
+                    value: builder.ins().select(by_zero, zero, quotient),
                     ty,
                 })
             }
@@ -102,8 +115,14 @@ impl LoweringState {
                 let rhs = self.lower_expr(module, builder, imports, rhs, Some(ty))?;
                 let lhs = self.coerce_int(builder, lhs, ty)?;
                 let rhs = self.coerce_int(builder, rhs, ty)?;
+                // AArch64 UDIV never traps: x / 0 is 0.
+                let by_zero = builder.ins().icmp_imm(IntCC::Equal, rhs.value, 0);
+                let one = builder.ins().iconst(ty, 1);
+                let divisor = builder.ins().select(by_zero, one, rhs.value);
+                let quotient = builder.ins().udiv(lhs.value, divisor);
+                let zero = builder.ins().iconst(ty, 0);
                 Ok(LoweredValue {
-                    value: builder.ins().udiv(lhs.value, rhs.value),
+                    value: builder.ins().select(by_zero, zero, quotient),
                     ty,
                 })
             }
@@ -318,22 +337,26 @@ impl LoweringState {
             }
             Expr::FAdd(lhs, rhs) => {
                 self.lower_float_binop(module, builder, imports, lhs, rhs, hint, |b, a, c| {
-                    b.ins().fadd(a, c)
+                    let result = b.ins().fadd(a, c);
+                    default_nan_if_generated(b, result, a, c)
                 })
             }
             Expr::FSub(lhs, rhs) => {
                 self.lower_float_binop(module, builder, imports, lhs, rhs, hint, |b, a, c| {
-                    b.ins().fsub(a, c)
+                    let result = b.ins().fsub(a, c);
+                    default_nan_if_generated(b, result, a, c)
                 })
             }
             Expr::FMul(lhs, rhs) => {
                 self.lower_float_binop(module, builder, imports, lhs, rhs, hint, |b, a, c| {
-                    b.ins().fmul(a, c)
+                    let result = b.ins().fmul(a, c);
+                    default_nan_if_generated(b, result, a, c)
                 })
             }
             Expr::FDiv(lhs, rhs) => {
                 self.lower_float_binop(module, builder, imports, lhs, rhs, hint, |b, a, c| {
-                    b.ins().fdiv(a, c)
+                    let result = b.ins().fdiv(a, c);
+                    default_nan_if_generated(b, result, a, c)
                 })
             }
             Expr::FNeg(inner) => {
@@ -348,7 +371,8 @@ impl LoweringState {
             }
             Expr::FSqrt(inner) => {
                 self.lower_float_unop(module, builder, imports, inner, hint, |b, v| {
-                    b.ins().sqrt(v)
+                    let result = b.ins().sqrt(v);
+                    default_nan_if_generated(b, result, v, v)
                 })
             }
             Expr::FMax(lhs, rhs) => {
@@ -391,7 +415,8 @@ impl LoweringState {
                 let inner = self.lower_expr(module, builder, imports, inner, Some(source_ty))?;
                 let inner = self.coerce_float(builder, inner, source_ty)?;
                 Ok(LoweredValue {
-                    value: builder.ins().fcvt_to_sint(target, inner.value),
+                    // FCVTZS saturates and maps NaN to 0; it never traps.
+                    value: builder.ins().fcvt_to_sint_sat(target, inner.value),
                     ty: target,
                 })
             }
@@ -530,4 +555,27 @@ impl LoweringState {
             ty,
         })
     }
+}
+
+/// AArch64 returns the default NaN (sign clear) when an operation on non-NaN
+/// inputs is invalid, such as `0.0 / 0.0`. The host may set the sign bit, so
+/// replace a NaN that did not come from an operand.
+fn default_nan_if_generated(
+    builder: &mut FunctionBuilder<'_>,
+    result: Value,
+    lhs: Value,
+    rhs: Value,
+) -> Value {
+    let ty = builder.func.dfg.value_type(result);
+    let result_is_nan = builder.ins().fcmp(FloatCC::Unordered, result, result);
+    let inputs_ordered = builder.ins().fcmp(FloatCC::Ordered, lhs, rhs);
+    let generated = builder.ins().band(result_is_nan, inputs_ordered);
+    let default_nan = if ty == types::F32 {
+        builder.ins().f32const(Ieee32::with_bits(0x7fc0_0000))
+    } else {
+        builder
+            .ins()
+            .f64const(Ieee64::with_bits(0x7ff8_0000_0000_0000))
+    };
+    builder.ins().select(generated, default_nan, result)
 }

@@ -37,9 +37,67 @@ Inside `emulation.rs`, `Executor` and `BlockExecutor` are near-copies: the same
 `BackingStore` trait. Then make interpreter-vs-JIT-vs-Unicorn differential
 testing a first-class harness; `crates/aeon-jit/tests/roundtrip.rs` is a start.
 
-**Status (2026-11-17): interpreter merged, harness not started.** `Executor` and
+**Status (2026-11-17): interpreter merged, harness in place.** `Executor` and
 `BlockExecutor` are now one `Executor` with an `ExecMode`; a snippet is a block
-run with no backing store. The differential harness is still to do.
+run with no backing store.
+
+`crates/aeon-jit/tests/differential.rs` runs 201 AArch64 snippets through
+Unicorn (the reference) and three engines over 35 input vectors: the
+interpreter, the JIT, and the JIT fed with IL reduced by
+`aeon_reduce::pipeline::reduce_block_local` (what `aeon-instrument` compiles).
+It compares x0-x30, SP, NZCV, v0-v31 and a data region mapped at the same
+address everywhere. Snippets can branch, so the interpreter and the JIT are
+driven block by block. Engines known to disagree are listed in the test's
+`KNOWN` table; the test fails on an unlisted disagreement and on a listed one
+that starts passing. `tests/differential/gen_cases.py` generates the case
+table; regenerating needs the `aarch64-linux-gnu` binutils, running does not.
+
+Bugs it found and that are fixed:
+
+- Lifter
+  - `NEGS` set no flags.
+  - `CINC`, `CINV` and `CNEG` applied the operation on the wrong arm.
+  - `ADCS`, `SBCS` and `NGCS` updated the flags and then computed the result
+    from the new carry. They are now single statements (`adcs [dst, a, b]`).
+  - `UCVTF` was lifted as the signed conversion, and every `FCVT*` rounding
+    mode and signedness as signed round-toward-zero.
+  - `LDP` with the base register as first destination loaded the second value
+    from the wrong address.
+  - Vector instructions lost their shape: a lane index was dropped
+    (`ins v3.s[1], w0` became `v3 = w0`), and vector forms of mnemonics that
+    also have a scalar form (`sub`, `mul`, `neg`, `rev64`, `fadd`, ...) were
+    lifted as scalar expressions on 128-bit registers, losing the lane width.
+    Lanes are now `Extract`/`Insert`, and arranged forms are intrinsics that
+    carry the arrangement (`sub.4s`).
+- JIT
+  - Reading an X register after a 32-bit read of it returned the low half.
+  - Integer division trapped instead of returning 0 or `MIN`.
+  - An operation with an immediate on the left was typed 64-bit.
+  - `ADCS`/`SBCS` set no carry or overflow; `FCMP`/`FCCMP` flags came from
+    the bits of a subtraction; `FCVTZS` did not saturate; an invalid operation
+    returned the host's NaN instead of the default NaN.
+  - A scalar FP write left the rest of the vector register in place.
+  - `MOVK` with a constant-folded immediate inserted at bit 0.
+  - CRC32 was missing.
+- Interpreter
+  - `SDIV` divided unsigned; 32-bit shifts and rotates ran at 64 bits.
+  - A load overlapping an earlier store returned the stale backing bytes.
+  - Scalar FP writes and 64-bit arrangements kept the upper bytes of the
+    vector register.
+  - Missing: `ADC`/`SBC`/`NGC`, `EXTR`, `REV16`/`REV32`, `RET`, all scalar
+    floating point, and most lane-wise integer SIMD. All added.
+
+What `KNOWN` still lists:
+
+- **Unsupported SIMD** (no wrong answers): 37 instructions in the
+  interpreter and 86 in the JIT. Both lack widening, narrowing, permutes,
+  table lookup, reductions and vector floating point. The JIT has lowerings
+  for many lane-wise operations, but as expression intrinsics; the lifter
+  emits statements (`add.4s [dst, a, b]`), which it does not accept.
+- **Reduced IL gives wrong results in 26 cases.** See item 8.
+
+Not covered yet: calls, system registers, exclusive and atomic memory
+operations, and SIMD beyond the instructions sampled.
 
 ## 3. `aeon-jit` is a single 8,640-line `lib.rs`
 
@@ -117,8 +175,41 @@ the view layer.
   the lifter, ELF and service paths, where a hostile binary should not kill a
   persistent session.
 
+## 8. The block-local reducer changes behaviour, and its output is compiled
+
+Found by the differential test (item 2). `aeon-instrument` passes every block
+through `aeon_reduce::pipeline::reduce_block_local` before compiling it, and
+that pipeline is not semantics-preserving. Causes identified so far:
+
+- `fuse_flags` deletes a `SetFlags` when the next reader is a conditional
+  select, which still needs the flags, and `eliminate_dead_flags` treats flags
+  as dead at the end of a block, though a later block may read them. Neither
+  knows that `adc`/`sbc`, `ccmp` or `fccmp` read flags. `CMN` and `TST` are
+  fused into a `Compare` that is then evaluated as a subtraction (by reading
+  the code; the cases fail earlier for the reason above).
+- Constant folding turns `MIN / -1` into 0.
+- A register copy is forwarded past a redefinition of its source (`mov x29,
+  sp` after SP moved), into an operand that an intrinsic writes (the base of a
+  post-index `LD1`), and across a GPR-to-FP move as if the type were kept.
+- Folding `movk x, #0, lsl #16` to `movk(x, 0)` loses which field is cleared.
+  This is an IL problem: `MOVK` should be an `Insert`, not an intrinsic whose
+  shift is implied by its operand.
+
+The passes were written to make IL readable, where dropping a `SetFlags` is
+harmless. Compiling their output needs a different contract.
+
+**Fix:** decide which it is. Either `aeon-instrument` stops reducing before
+compiling (Cranelift does its own folding), or the reducer gets a
+semantics-preserving mode: flags live out of a block unless proven otherwise,
+copy forwarding invalidated by any write to a register the copy mentions, and
+no forwarding into intrinsic operands. The pass manager in item 7 is where
+per-pass differential validation belongs.
+
 ## Order of work
 
 1, then 2: they fix a correctness risk rather than tidiness, and they make the
-JIT split in 3 mostly mechanical. Items 1, 3 and 4 are done; the differential
-harness from item 2 is next.
+JIT split in 3 mostly mechanical. Items 1 to 4 are done, and the differential
+test from item 2 covers scalar code, memory, branches and a sample of SIMD.
+Next: item 8, because it is a correctness bug in a shipping path; then SIMD
+coverage in the JIT (accept the statement form the lifter emits); then items 5
+and 6.
