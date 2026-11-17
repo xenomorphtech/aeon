@@ -298,6 +298,47 @@ Open:
   the lifter, ELF and service paths, where a hostile binary should not kill a
   persistent session.
 
+  **Status (2026-11-18): done for the service path, by testing rather than
+  by counting.** Outside test code the library crates hold about 65
+  panicking calls, nearly all infallible (fixed-size conversions,
+  serialising our own types). What a hostile binary could actually do was
+  found with `aeon-service/tests/hostile_input.rs`: it corrupts the sample
+  ELF in seeded ways (headers, section table, unwind tables, code,
+  truncation) and runs every read-only tool against each mutant, requiring
+  an error rather than a panic. 300 mutants run by default and in CI;
+  6,000 pass. It found, and these are fixed:
+  - address arithmetic that overflowed on addresses near the top of the
+    address space (`get_bytes`, and the `LoadedBinary` accessors, which now
+    share one checked `text_file_range`);
+  - a section header claiming an exabyte-sized section, which made
+    `scan_pointers` loop for ever: header-claimed file sizes are clamped to
+    the file when the binary is loaded;
+  - a program header claiming a huge memory size, which made native
+    emulation abort on allocation: the sandbox refuses segments over 1 GiB
+    and checks its address arithmetic;
+  - SCCP never terminating when the entry block branches to itself;
+  - SSA construction overflowing the stack on an unreachable cycle of
+    single-predecessor blocks. Fixing that showed that a function starting
+    with a loop got wrong SSA (the value on entry was not merged with the
+    one carried round the loop); such functions now get an empty preheader
+    block as their SSA entry.
+
+  The last two are not specific to hostile input: a compiler can emit
+  both shapes.
+
+  Two boundaries catch what is left. `AeonSession::emulate_snippet_il`
+  turns an interpreter panic into an emulation error, because the
+  interpreter panics by design on IL it does not implement. The service
+  catches a panic in any tool and returns an `internal` error, so the
+  session survives; the hostile-input test fails if that ever fires.
+
+  Not done: the interpreter has no typed "unsupported" stop, so its gaps
+  still surface as caught panics; the service's own catch has no test that
+  makes a tool panic on purpose; the mutation test starts from one small
+  binary and does not cover the write tools, `execute_datalog`, the
+  advanced emulation tool or raw loading; and a panic still prints to
+  stderr.
+
 ## 8. The block-local reducer changed behaviour
 
 Found by the differential test (item 2). `aeon_reduce::pipeline::reduce_block_local`
@@ -377,5 +418,7 @@ differential test from item 2 covers scalar code, memory, branches, a sample
 of SIMD and the reducer, with no known disagreements. Item 6 is done
 but for typed non-IL responses. Constants carry their width where it
 matters (item 8), and the reducer's passes are tables that are validated
-pass by pass (item 7). What remains is the rest of item 7 (layering, repo
-hygiene, CI, panics) and the leftovers listed under items 5, 6 and 8.
+pass by pass, and item 7 is done: the service is its own crate, the root
+is tidy, CI runs the workspace's tests, and corrupted binaries are run
+through every tool without a panic. What remains is the leftovers listed
+under items 5, 6, 7 and 8.

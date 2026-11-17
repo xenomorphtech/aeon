@@ -597,17 +597,19 @@ fn vtable_sections(binary: &LoadedBinary) -> impl Iterator<Item = &SectionInfo> 
 
 fn read_section_pointers(binary: &LoadedBinary, section: &SectionInfo) -> Vec<RawSectionPointer> {
     let start_addr = align_up(section.address, POINTER_SIZE);
-    let end_addr = section.address + section.file_size;
+    let end_addr = section.address.saturating_add(section.file_size);
     let mut pointers = Vec::new();
     let mut addr = start_addr;
 
-    while addr + POINTER_SIZE <= end_addr {
-        let Some(file_offset) = binary.vaddr_to_file_offset(addr) else {
+    while addr.checked_add(POINTER_SIZE).is_some_and(|end| end <= end_addr) {
+        let word = binary
+            .read_vaddr(addr, POINTER_SIZE as usize)
+            .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok());
+        let Some(word) = word else {
             addr += POINTER_SIZE;
             continue;
         };
-        let slice = &binary.data[file_offset..file_offset + POINTER_SIZE as usize];
-        let raw = u64::from_le_bytes(slice.try_into().unwrap());
+        let raw = u64::from_le_bytes(word);
         if raw == 0 {
             addr += POINTER_SIZE;
             continue;

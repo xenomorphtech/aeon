@@ -75,11 +75,21 @@ pub fn load_raw(path: &str, base_addr: u64) -> Result<LoadedBinary, Box<dyn std:
 impl LoadedBinary {
     /// Get raw bytes for a function within .text
     pub fn function_bytes(&self, func: &FunctionInfo) -> Option<&[u8]> {
-        let offset_in_text = func.addr.checked_sub(self.text_section_addr)?;
-        let file_offset = self.text_section_file_offset + offset_in_text;
-        let end = file_offset + func.size;
+        let range = self.text_file_range(func.addr, func.size)?;
+        Some(&self.data[range])
+    }
+
+    /// The file range holding `len` bytes at `addr`, addressed relative to
+    /// `.text`. `None` if the address is before `.text`, the arithmetic
+    /// overflows or the range is not wholly inside the file. Every number
+    /// involved comes from the binary or the caller, so nothing here may
+    /// assume they are sane.
+    pub fn text_file_range(&self, addr: u64, len: u64) -> Option<std::ops::Range<usize>> {
+        let offset_in_text = addr.checked_sub(self.text_section_addr)?;
+        let start = self.text_section_file_offset.checked_add(offset_in_text)?;
+        let end = start.checked_add(len)?;
         if end <= self.data.len() as u64 {
-            Some(&self.data[file_offset as usize..end as usize])
+            Some(start as usize..end as usize)
         } else {
             None
         }
@@ -92,7 +102,7 @@ impl LoadedBinary {
             return None;
         }
         let func = &self.functions[idx - 1];
-        if addr < func.addr + func.size {
+        if addr - func.addr < func.size {
             Some(func)
         } else {
             None
@@ -102,10 +112,12 @@ impl LoadedBinary {
     /// Resolve a virtual address to a file offset using LOAD segments
     pub fn vaddr_to_file_offset(&self, vaddr: u64) -> Option<usize> {
         for seg in &self.segments {
-            if vaddr >= seg.vaddr && vaddr < seg.vaddr + seg.file_size {
-                let offset = seg.file_offset + (vaddr - seg.vaddr);
-                if (offset as usize) < self.data.len() {
-                    return Some(offset as usize);
+            if vaddr >= seg.vaddr && vaddr - seg.vaddr < seg.file_size {
+                match seg.file_offset.checked_add(vaddr - seg.vaddr) {
+                    Some(offset) if offset < self.data.len() as u64 => {
+                        return Some(offset as usize)
+                    }
+                    _ => {}
                 }
             }
         }
@@ -116,27 +128,27 @@ impl LoadedBinary {
     pub fn contains_vaddr(&self, vaddr: u64) -> bool {
         self.segments
             .iter()
-            .any(|seg| vaddr >= seg.vaddr && vaddr < seg.vaddr + seg.mem_size)
+            .any(|seg| vaddr >= seg.vaddr && vaddr - seg.vaddr < seg.mem_size)
     }
 
     /// Find the section containing a virtual address.
     pub fn section_containing(&self, vaddr: u64) -> Option<&SectionInfo> {
         self.sections
             .iter()
-            .find(|section| vaddr >= section.address && vaddr < section.address + section.size)
+            .find(|section| vaddr >= section.address && vaddr - section.address < section.size)
     }
 
     /// Read raw bytes at a virtual address, up to `len` bytes
     pub fn read_vaddr(&self, vaddr: u64, len: usize) -> Option<&[u8]> {
         let off = self.vaddr_to_file_offset(vaddr)?;
-        let end = (off + len).min(self.data.len());
+        let end = off.saturating_add(len).min(self.data.len());
         Some(&self.data[off..end])
     }
 
     /// Read a null-terminated string at a virtual address
     pub fn read_string(&self, vaddr: u64, max_len: usize) -> Option<String> {
         let off = self.vaddr_to_file_offset(vaddr)?;
-        let end = (off + max_len).min(self.data.len());
+        let end = off.saturating_add(max_len).min(self.data.len());
         let slice = &self.data[off..end];
         let nul = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
         String::from_utf8(slice[..nul].to_vec()).ok()
@@ -144,10 +156,18 @@ impl LoadedBinary {
 
     /// Get raw bytes for the entire .text section
     pub fn text_bytes(&self) -> &[u8] {
-        let start = self.text_section_file_offset as usize;
-        let end = start + self.text_section_size as usize;
-        &self.data[start..end.min(self.data.len())]
+        let len = self.data.len() as u64;
+        let start = self.text_section_file_offset.min(len);
+        let end = start.saturating_add(self.text_section_size).min(len);
+        &self.data[start as usize..end as usize]
     }
+}
+
+/// How many of the `size` bytes a header claims at `offset` the file really
+/// has. Headers are untrusted: a section can claim to be exabytes long, and
+/// anything that walks it would never finish.
+fn clamp_to_file(offset: u64, size: u64, file_len: usize) -> u64 {
+    size.min((file_len as u64).saturating_sub(offset))
 }
 
 pub fn load_elf(path: &str) -> Result<LoadedBinary, Box<dyn std::error::Error>> {
@@ -164,11 +184,14 @@ pub fn load_elf(path: &str) -> Result<LoadedBinary, Box<dyn std::error::Error>> 
             .program_headers(endian, &*data)?
             .iter()
             .filter(|ph| ph.p_type(endian) == object::elf::PT_LOAD)
-            .map(|ph| Segment {
-                file_offset: ph.p_offset(endian).into(),
-                vaddr: ph.p_vaddr(endian).into(),
-                file_size: ph.p_filesz(endian).into(),
-                mem_size: ph.p_memsz(endian).into(),
+            .map(|ph| {
+                let file_offset: u64 = ph.p_offset(endian).into();
+                Segment {
+                    file_offset,
+                    vaddr: ph.p_vaddr(endian).into(),
+                    file_size: clamp_to_file(file_offset, ph.p_filesz(endian).into(), data.len()),
+                    mem_size: ph.p_memsz(endian).into(),
+                }
             })
             .collect::<Vec<_>>()
     };
@@ -198,6 +221,7 @@ pub fn load_elf(path: &str) -> Result<LoadedBinary, Box<dyn std::error::Error>> 
             .filter_map(|section| {
                 let name = section.name().ok()?.to_string();
                 let (file_offset, file_size) = section.file_range().unwrap_or((0, 0));
+                let file_size = clamp_to_file(file_offset, file_size, data.len());
                 let flags = match section.flags() {
                     SectionFlags::Elf { sh_flags } => sh_flags,
                     _ => 0,

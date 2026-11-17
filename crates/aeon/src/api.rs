@@ -866,17 +866,16 @@ impl AeonSession {
 
     pub fn get_bytes(&self, addr: u64, size: usize) -> Result<Value, Error> {
         let size = size.min(4096);
-        let offset_in_text = addr
-            .checked_sub(self.binary.text_section_addr)
-            .ok_or_else(|| Error::out_of_range("Address before .text section"))?;
-        let file_offset = self.binary.text_section_file_offset + offset_in_text;
-        let end = (file_offset + size as u64).min(self.binary.data.len() as u64);
-        let start = file_offset as usize;
-        let end = end as usize;
-
-        if start >= self.binary.data.len() {
-            return Err(Error::out_of_range(format!("Address 0x{:x} out of range", addr)));
+        if addr < self.binary.text_section_addr {
+            return Err(Error::out_of_range("Address before .text section"));
         }
+        // The first byte has to exist; the read is then clipped to the file.
+        let start = self
+            .binary
+            .text_file_range(addr, 1)
+            .ok_or_else(|| Error::out_of_range(format!("Address 0x{:x} out of range", addr)))?
+            .start;
+        let end = start.saturating_add(size).min(self.binary.data.len());
 
         let bytes = &self.binary.data[start..end];
         let engine = self.blackboard();
@@ -937,19 +936,17 @@ impl AeonSession {
             return Err(Error::invalid_input("Range too large (max 1MB)"));
         }
 
-        let offset_in_text = start_addr
-            .checked_sub(self.binary.text_section_addr)
-            .ok_or_else(|| Error::out_of_range("start_addr before .text section"))?;
-        let file_start = (self.binary.text_section_file_offset + offset_in_text) as usize;
-        let file_end = file_start + size as usize;
-        if file_end > self.binary.data.len() {
-            return Err(Error::out_of_range(format!(
+        if start_addr < self.binary.text_section_addr {
+            return Err(Error::out_of_range("start_addr before .text section"));
+        }
+        let range = self.binary.text_file_range(start_addr, size).ok_or_else(|| {
+            Error::out_of_range(format!(
                 "Address range 0x{:x}..0x{:x} extends past binary data",
                 start_addr, stop_addr
-            )));
-        }
+            ))
+        })?;
 
-        let bytes = &self.binary.data[file_start..file_end];
+        let bytes = &self.binary.data[range];
         let engine = self.blackboard();
         let listing =
             render_instruction_listing(bytes, start_addr, &self.binary, &engine, ListingMode::Asm);
@@ -1053,7 +1050,7 @@ impl AeonSession {
             .vaddr_to_file_offset(start_addr)
             .ok_or_else(|| Error::out_of_range(format!("Cannot read bytes at 0x{:x}", start_addr)))?;
 
-        if file_offset + binary_len > self.binary.data.len() {
+        if binary_len > self.binary.data.len() - file_offset {
             return Err(Error::out_of_range(format!("Cannot read 0x{:x} bytes at 0x{:x}", binary_len, start_addr)));
         }
 
@@ -1093,7 +1090,7 @@ impl AeonSession {
         impl<'a> emulation::BackingStore for BinaryBacking<'a> {
             fn load(&self, addr: u64, size: u8) -> Option<Vec<u8>> {
                 let off = self.0.vaddr_to_file_offset(addr)?;
-                let end = off + size as usize;
+                let end = off.checked_add(size as usize)?;
                 if end <= self.0.data.len() {
                     Some(self.0.data[off..end].to_vec())
                 } else {
@@ -1103,14 +1100,26 @@ impl AeonSession {
         }
 
         // Execute IL snippet with BlockExecutor (tracks reads + writes)
-        let result = emulation::execute_block(
-            &stmts,
-            regs_map,
-            BTreeMap::new(),
-            &BinaryBacking(&self.binary),
-            emulation::MissingMemoryPolicy::ContinueAsUnknown,
-            step_limit,
-        );
+        // The interpreter panics on IL it does not implement, so that the
+        // differential test cannot mistake a gap for an answer. Here the
+        // code being run is whatever the binary contains, so a gap is an
+        // error to report, not a reason to bring the session down.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            emulation::execute_block(
+                &stmts,
+                regs_map,
+                BTreeMap::new(),
+                &BinaryBacking(&self.binary),
+                emulation::MissingMemoryPolicy::ContinueAsUnknown,
+                step_limit,
+            )
+        }))
+        .map_err(|payload| {
+            Error::emulation(format!(
+                "the IL interpreter cannot run this code: {}",
+                crate::error::panic_message(payload.as_ref())
+            ))
+        })?;
 
         // Convert result to JSON
         let mut final_regs = std::collections::HashMap::new();

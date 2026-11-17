@@ -49,6 +49,10 @@ pub struct AddressHookHit {
     pub patches_applied: Vec<String>,
 }
 
+/// The most memory one segment may ask the sandbox to map. A corrupt or
+/// hostile program header can claim any size at all.
+const MAX_SEGMENT_BYTES: u64 = 1 << 30;
+
 /// Configuration for sandbox execution
 pub struct SandboxConfig {
     pub step_limit: usize,
@@ -220,10 +224,23 @@ pub fn run_sandbox(
     let mut uc = Unicorn::new(Arch::ARM64, Mode::LITTLE_ENDIAN)
         .map_err(|e| format!("unicorn init: {:?}", e))?;
 
-    // Map binary segments (page-aligned)
+    // Map binary segments (page-aligned). The sizes and addresses come
+    // from the program headers, so they are checked before anything is
+    // allocated on their say-so.
     for seg in &binary.segments {
+        if seg.mem_size > MAX_SEGMENT_BYTES {
+            return Err(format!(
+                "segment at 0x{:x} claims 0x{:x} bytes of memory, more than the sandbox maps",
+                seg.vaddr, seg.mem_size
+            ));
+        }
         let map_base = seg.vaddr & !0xFFF;
-        let map_end = ((seg.vaddr + seg.mem_size + 0xFFF) & !0xFFF).max(map_base + 0x1000);
+        let map_end = seg
+            .vaddr
+            .checked_add(seg.mem_size)
+            .and_then(|end| end.checked_add(0xFFF))
+            .map(|end| (end & !0xFFF).max(map_base + 0x1000))
+            .ok_or_else(|| format!("segment at 0x{:x} wraps the address space", seg.vaddr))?;
         let map_size = map_end - map_base;
 
         // Try to map; ignore if already mapped
@@ -231,9 +248,9 @@ pub fn run_sandbox(
         let _ = uc.mem_map(map_base, map_size, prot);
 
         // Write file data
-        if seg.file_size > 0 {
-            let file_data = &binary.data[seg.file_offset as usize..];
-            let write_size = seg.file_size.min(file_data.len() as u64) as usize;
+        let file_data = binary.data.get(seg.file_offset as usize..).unwrap_or(&[]);
+        let write_size = seg.file_size.min(file_data.len() as u64).min(seg.mem_size) as usize;
+        if write_size > 0 {
             let _ = uc.mem_write(seg.vaddr, &file_data[..write_size]);
         }
 
@@ -259,7 +276,11 @@ pub fn run_sandbox(
     // Apply initial memory overlays (may require mapping)
     for (addr, data) in initial_memory {
         let map_base = addr & !0xFFF;
-        let map_end = ((addr + data.len() as u64 + 0xFFF) & !0xFFF).max(map_base + 0x1000);
+        let map_end = addr
+            .checked_add(data.len() as u64)
+            .and_then(|end| end.checked_add(0xFFF))
+            .map(|end| (end & !0xFFF).max(map_base + 0x1000))
+            .ok_or_else(|| format!("initial memory at 0x{:x} wraps the address space", addr))?;
         let map_size = map_end - map_base;
         let _ = uc.mem_map(map_base, map_size, Prot::ALL);
         let _ = uc.mem_write(*addr, data);

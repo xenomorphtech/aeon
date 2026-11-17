@@ -46,6 +46,8 @@ struct SsaBuilder {
     blocks: Vec<SsaBlock>,
     /// Predecessor info from the Cfg
     predecessors: HashMap<BlockId, Vec<BlockId>>,
+    /// The function's entry block: the CFG's, or a preheader in front of it.
+    entry: BlockId,
 }
 
 impl SsaBuilder {
@@ -62,11 +64,42 @@ impl SsaBuilder {
                 predecessors: bb.predecessors.clone(),
             });
         }
+        // A read that reaches a block without predecessors has reached the
+        // function's entry and takes the incoming value. That breaks down
+        // when the entry block is itself a branch target (a function that
+        // starts with a loop): the value on entry would not be merged with
+        // the one carried round the loop. Give such a function an empty
+        // preheader, so that its entry has no predecessors and the old
+        // entry block merges both.
+        let mut entry = cfg.entry;
+        let entry_is_a_target = cfg
+            .blocks
+            .get(cfg.entry as usize)
+            .is_some_and(|block| !block.predecessors.is_empty());
+        if entry_is_a_target {
+            let preheader = blocks.len() as BlockId;
+            let old_entry = cfg.entry as usize;
+            blocks.push(SsaBlock {
+                id: preheader,
+                addr: blocks[old_entry].addr,
+                stmts: Vec::new(),
+                successors: vec![cfg.entry],
+                predecessors: Vec::new(),
+            });
+            blocks[old_entry].predecessors.insert(0, preheader);
+            predecessors
+                .entry(cfg.entry)
+                .or_insert_with(Vec::new)
+                .insert(0, preheader);
+            predecessors.insert(preheader, Vec::new());
+            entry = preheader;
+        }
         SsaBuilder {
             current_def: HashMap::new(),
             version_counter: HashMap::new(),
             blocks,
             predecessors,
+            entry,
         }
     }
 
@@ -102,8 +135,35 @@ impl SsaBuilder {
                 width: loc.full_width(),
             }
         } else if preds.len() == 1 {
-            // Single predecessor: no phi needed
-            self.read_variable(preds[0], loc)
+            // Single predecessor: no phi needed. Walk up the chain of
+            // single-predecessor blocks with a loop rather than recursion,
+            // and notice when it closes on itself: such a cycle is entered
+            // from nowhere (it is unreachable code), and recursing round it
+            // would never end.
+            let mut chain = vec![block];
+            let mut current = preds[0];
+            let var = loop {
+                if let Some(var) = self.current_def.get(&current).and_then(|m| m.get(&loc)) {
+                    break *var;
+                }
+                let above = self.predecessors.get(&current).cloned().unwrap_or_default();
+                if above.len() != 1 {
+                    break self.read_variable_recursive(current, loc);
+                }
+                if chain.contains(&current) {
+                    break SsaVar {
+                        loc,
+                        version: 0,
+                        width: loc.full_width(),
+                    };
+                }
+                chain.push(current);
+                current = above[0];
+            };
+            for passed in chain {
+                self.write_variable(passed, loc, var);
+            }
+            var
         } else {
             // Multiple predecessors: insert phi
             let version = self.new_version(loc);
@@ -633,9 +693,9 @@ impl SsaBuilder {
     }
 
     /// Finalize: produce the SsaFunction.
-    fn finish(self, entry: BlockId) -> SsaFunction {
+    fn finish(self) -> SsaFunction {
         SsaFunction {
-            entry,
+            entry: self.entry,
             blocks: self.blocks,
         }
     }
@@ -649,7 +709,7 @@ impl SsaBuilder {
 pub fn build_ssa(cfg: &Cfg) -> SsaFunction {
     let mut builder = SsaBuilder::new(cfg);
     builder.process_all_blocks(cfg);
-    builder.finish(cfg.entry)
+    builder.finish()
 }
 
 // ---------------------------------------------------------------------------
@@ -688,6 +748,102 @@ mod tests {
     fn multi_block_ssa(instrs: Vec<(u64, Stmt, Vec<u64>)>) -> SsaFunction {
         let cfg = build_cfg(&instrs);
         build_ssa(&cfg)
+    }
+
+    fn x(n: u8) -> Expr {
+        Expr::Reg(Reg::X(n))
+    }
+
+    /// `loop: x1 = x0 + 1; x0 = x1; cbnz x1, loop; ret`. The first read of
+    /// x0 sees the value on entry the first time round and the loop's own
+    /// definition after that, so it needs a phi of the two.
+    #[test]
+    fn entry_block_that_is_a_loop_head_merges_the_entry_value() {
+        let func = multi_block_ssa(vec![
+            (
+                0x1000,
+                Stmt::Assign {
+                    dst: Reg::X(1),
+                    src: Expr::Add(Box::new(x(0)), Box::new(Expr::Imm(1))),
+                },
+                vec![0x1004],
+            ),
+            (
+                0x1004,
+                Stmt::Assign {
+                    dst: Reg::X(0),
+                    src: x(1),
+                },
+                vec![0x1008],
+            ),
+            (
+                0x1008,
+                Stmt::CondBranch {
+                    cond: BranchCond::NotZero(x(1)),
+                    target: Expr::Imm(0x1000),
+                    fallthrough: 0x100c,
+                },
+                vec![0x1000, 0x100c],
+            ),
+            (0x100c, Stmt::Ret, vec![]),
+        ]);
+
+        let entry = &func.blocks[func.entry as usize];
+        assert!(entry.predecessors.is_empty());
+        assert!(entry.stmts.is_empty());
+        assert_eq!(entry.successors, vec![0]);
+
+        let phis: Vec<_> = func.blocks[0]
+            .stmts
+            .iter()
+            .filter_map(|stmt| match stmt {
+                SsaStmt::Assign {
+                    dst,
+                    src: SsaExpr::Phi(operands),
+                } if dst.loc == RegLocation::Gpr(0) => Some(operands.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(phis.len(), 1, "{:#?}", func.blocks[0].stmts);
+        let from_entry = phis[0].iter().find(|(pred, _)| *pred == func.entry);
+        assert_eq!(from_entry.map(|(_, var)| var.version), Some(0));
+        let from_loop = phis[0].iter().find(|(pred, _)| *pred == 0);
+        assert!(from_loop.is_some_and(|(_, var)| var.version != 0));
+        let report = crate::ssa::validate::validate_ssa(&func);
+        assert!(report.is_valid, "{:#?}", report.issues);
+    }
+
+    /// Two blocks that branch to each other and are reached from nowhere:
+    /// each has one predecessor, so a read used to chase round them for
+    /// ever and overflow the stack.
+    #[test]
+    fn unreachable_cycle_of_single_predecessor_blocks_terminates() {
+        let func = multi_block_ssa(vec![
+            (0x1000, Stmt::Ret, vec![]),
+            (
+                0x1004,
+                Stmt::Assign {
+                    dst: Reg::X(1),
+                    src: x(0),
+                },
+                vec![0x1008],
+            ),
+            (
+                0x1008,
+                Stmt::Branch {
+                    target: Expr::Imm(0x100c),
+                },
+                vec![0x100c],
+            ),
+            (
+                0x100c,
+                Stmt::Branch {
+                    target: Expr::Imm(0x1004),
+                },
+                vec![0x1004],
+            ),
+        ]);
+        assert_eq!(func.entry, 0);
     }
 
     // -- helpers to find statements in an SsaFunction --

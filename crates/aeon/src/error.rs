@@ -76,3 +76,14 @@ impl From<Error> for String {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// The message a caught panic was raised with, for turning it into an error.
+pub fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        message
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message
+    } else {
+        "no message"
+    }
+}

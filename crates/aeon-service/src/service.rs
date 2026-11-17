@@ -159,7 +159,22 @@ impl AeonFrontend {
         let tool = TOOLS.iter().find(|tool| tool.name == name).ok_or_else(|| {
             ToolError::new(ErrorCode::UnknownTool, format!("Unknown tool: {}", name))
         })?;
-        (tool.handler)(self, args)
+        // Last line of defence for a long-lived session: whatever a tool
+        // trips over in a binary, the caller gets an error and the session
+        // stays up. The session keeps no state that a panic half-way
+        // through a tool could leave inconsistent: its locks recover from
+        // poisoning and its caches are filled only with finished values.
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (tool.handler)(self, args)))
+            .unwrap_or_else(|payload| {
+                Err(ToolError::new(
+                    ErrorCode::Internal,
+                    format!(
+                        "tool `{}` panicked: {}",
+                        name,
+                        aeon::error::panic_message(payload.as_ref())
+                    ),
+                ))
+            })
     }
 
     fn require_session(&self) -> Result<&aeon::AeonSession, ToolError> {

@@ -330,25 +330,20 @@ fn evaluate_stmt(func: &SsaFunction, block_id: BlockId, stmt_idx: usize, state: 
 pub fn run(func: &mut SsaFunction, use_def: &mut UseDefMap) -> bool {
     let mut state = SccpState::new();
 
-    // Initialize: mark entry block executable via a self-edge seed.
+    // Initialize: the entry block is executable without an incoming edge.
+    // It is evaluated here rather than through a sentinel edge on the
+    // worklist: an entry block that branches to itself has a real
+    // (entry, entry) edge, which a sentinel cannot be told apart from.
     state.executable_blocks.insert(func.entry);
-    state.cfg_worklist.push_back((func.entry, func.entry));
+    evaluate_block(func, func.entry, &mut state);
+    for &succ in &func.blocks[func.entry as usize].successors {
+        state.cfg_worklist.push_back((func.entry, succ));
+    }
 
     // Main loop: drain both worklists until fixed point.
     while !state.cfg_worklist.is_empty() || !state.ssa_worklist.is_empty() {
         // Process CFG worklist.
         while let Some((src, dst)) = state.cfg_worklist.pop_front() {
-            if src == dst && src == func.entry {
-                // Self-edge seed: evaluate the entry block.
-                evaluate_block(func, dst, &mut state);
-                // Mark successor edges of the entry block.
-                let succs: Vec<BlockId> = func.blocks[dst as usize].successors.clone();
-                for succ in succs {
-                    state.cfg_worklist.push_back((dst, succ));
-                }
-                continue;
-            }
-
             if !state.executable_edges.insert((src, dst)) {
                 continue; // already processed
             }
@@ -498,6 +493,48 @@ mod tests {
         assert!(changed);
 
         // v2's src should now be Imm(50).
+        assert_eq!(
+            func.blocks[0].stmts[1],
+            SsaStmt::Assign {
+                dst: v2,
+                src: SsaExpr::Imm(50),
+            }
+        );
+    }
+
+    /// An entry block that is its own successor used to keep the worklist
+    /// busy for ever: the (entry, entry) edge was mistaken for the seed.
+    #[test]
+    fn sccp_terminates_when_the_entry_block_loops_to_itself() {
+        let v1 = var(0, 1);
+        let v2 = var(1, 1);
+        let mut func = make_func(
+            0,
+            vec![
+                make_block(
+                    0,
+                    vec![
+                        SsaStmt::Assign {
+                            dst: v1,
+                            src: SsaExpr::Imm(42),
+                        },
+                        SsaStmt::Assign {
+                            dst: v2,
+                            src: SsaExpr::Add(
+                                Box::new(SsaExpr::Var(v1)),
+                                Box::new(SsaExpr::Imm(8)),
+                            ),
+                        },
+                    ],
+                    vec![0, 1],
+                    vec![0],
+                ),
+                make_block(1, vec![SsaStmt::Ret], vec![], vec![0]),
+            ],
+        );
+        let mut ud = UseDefMap::build(&func);
+
+        assert!(run(&mut func, &mut ud));
         assert_eq!(
             func.blocks[0].stmts[1],
             SsaStmt::Assign {
