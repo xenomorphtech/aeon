@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-aeonil = { path = "../aeonil" }
-aeon-reduce = { path = "../aeon-reduce" }
+aeonil = { path = "../aeonil", features = ["serde"] }
+aeon-reduce = { path = "../aeon-reduce", features = ["serde"] }
 ascent = "0.7"
 bad64 = "0.6"
 regex = "1.11"

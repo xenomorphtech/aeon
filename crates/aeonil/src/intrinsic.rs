@@ -389,6 +389,21 @@ impl PartialEq<String> for IntrinsicName {
     }
 }
 
+/// An intrinsic name is its text on the wire: `"add.2d"`.
+#[cfg(feature = "serde")]
+impl serde::Serialize for IntrinsicName {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.text)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for IntrinsicName {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Self::new)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

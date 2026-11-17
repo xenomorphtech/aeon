@@ -7,6 +7,7 @@ pub type BlockId = u32;
 
 /// Canonical hardware register location, abstracting over aliased views.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RegLocation {
     Gpr(u8), // General-purpose 0..31
     Fpr(u8), // SIMD/FP 0..31
@@ -16,6 +17,7 @@ pub enum RegLocation {
 
 /// Width at which a location is accessed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RegWidth {
     W8 = 1,
     W16 = 2,
@@ -27,6 +29,7 @@ pub enum RegWidth {
 
 /// SSA variable: a versioned definition of a register location.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SsaVar {
     pub loc: RegLocation,
     pub version: u32,
@@ -78,6 +81,7 @@ impl RegWidth {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SsaExpr {
     Var(SsaVar),
     Imm(u64),
@@ -163,6 +167,7 @@ pub enum SsaExpr {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SsaBranchCond {
     Flag(Condition, SsaVar), // reads a specific flags version
     Zero(SsaExpr),
@@ -177,6 +182,7 @@ pub enum SsaBranchCond {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SsaStmt {
     Assign {
         dst: SsaVar,

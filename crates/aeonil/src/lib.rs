@@ -6,6 +6,7 @@ pub mod simd;
 pub use intrinsic::{IntrinsicName, IntrinsicOp, VectorArrangement};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Reg {
     X(u8),     // 64-bit general purpose
     W(u8),     // 32-bit general purpose
@@ -22,6 +23,7 @@ pub enum Reg {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Condition {
     EQ,
     NE,
@@ -42,12 +44,14 @@ pub enum Condition {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TrapKind {
     Brk,
     Udf,
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum BranchCond {
     Flag(Condition),
     Zero(Expr),
@@ -62,6 +66,7 @@ pub enum BranchCond {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Expr {
     // Basics
     Reg(Reg),
@@ -171,6 +176,7 @@ pub enum Expr {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Stmt {
     Assign {
         dst: Reg,

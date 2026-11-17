@@ -3,8 +3,13 @@ name = "aeon-reduce"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# `Serialize`/`Deserialize` for the SSA types, in serde's default shape.
+serde = ["dep:serde", "aeonil/serde"]
+
 [dependencies]
 aeonil = { path = "../aeonil" }
+serde = { version = "1.0", features = ["derive"], optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
