@@ -148,7 +148,6 @@ Option 3: Persistent JIT Cache (Blocked)
 
 **Tests & Examples**:
 - `crates/aeon-instrument/tests/engine_integration.rs` (+4 lines)
-- `crates/aeon-instrument/examples/frida_trace.rs` (+2 lines)
 
 **Documentation**:
 - `PHASE_2_OPTIMIZATION_PROGRESS.md` (156 lines, NEW)

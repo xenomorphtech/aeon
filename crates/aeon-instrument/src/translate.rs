@@ -13,12 +13,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const DEFAULT_BASE: u64 = 0x9b5f_e000;
 pub const DEFAULT_DEST: u64 = 0x7000_0000_00;
-pub const DEFAULT_INPUT: &str = "capture/manual/jit_exec_alias_0x9b5fe000.bin";
-pub const DEFAULT_OUTPUT_ELF: &str = "capture/manual/jit_exec_alias_0x9b5fe000.translated.elf";
-pub const DEFAULT_OUTPUT_OBJ: &str = "capture/manual/jit_exec_alias_0x9b5fe000.translated.o";
-pub const DEFAULT_OUTPUT_MAP: &str = "capture/manual/jit_exec_alias_0x9b5fe000.translated.map.json";
 pub const MAX_BLOCK_INSNS: usize = 256;
 const PIC_PAGE_ALIGN: u64 = 0x1000;
 const PIC_TEXT_BASE: u64 = 0x1000;
@@ -1709,7 +1704,7 @@ mod tests {
             .compile_block(
                 0x1000,
                 &[Stmt::Intrinsic {
-                    name: "fcmla.8h".to_string(),
+                    name: "fcmla.8h".into(),
                     operands: vec![
                         Expr::Reg(Reg::V(0)),
                         Expr::Reg(Reg::V(1)),

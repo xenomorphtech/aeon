@@ -240,7 +240,6 @@ fn read_block(file: &mut File, flags: u32) -> Result<BlockRecord> {
 Typical uncompressed trace:
 - hello_aarch64: 12 blocks × 64 bytes = 768 bytes (no memory ops)
 - loops_cond_aarch64: 100 blocks × (64 + 18×10) accesses = 18.4 KB
-- NMSS crypto (4 blocks, 22 accesses): ~1.2 KB
 
 With gzip compression:
 - Highly repetitive memory patterns compress 3-5×

@@ -44,17 +44,12 @@
 
 ### 4. Trace I/O Tests (2/2 passing)
 - `disk_trace_roundtrip` ✓
-- `nmss_crypto_sub_20bb48_traces_to_disk` ✓
 
 **Metrics:**
 - Disk trace roundtrip: Perfect match (entry count matches)
-- NMSS sub_20bb48: 4 blocks, 22 memory accesses
-- NMSS sub_2070a8: 4 blocks, 22 memory accesses
 - Trace file overhead: ~3KB for 4-block execution
 
 ### 5. Real-World Binary Tests (2/2 passing)
-- `nmss_crypto_sub_20bb48_traces_to_disk` ✓
-- `nmss_crypto_sub_2070a8_traces_to_disk` ✓
 
 **Status:** Tests pass with expected LiftError when obfuscated code accesses unmapped memory (0x60000 range hits @0x388544, rebased at 0x10388544)
 
@@ -122,7 +117,6 @@
 - ✓ Symbolic analysis working for loop patterns
 - ✓ Trace I/O validated (roundtrip accuracy)
 - ✓ Block-level control (breakpoints, ranges, limits)
-- ✓ Real-world binary execution (NMSS crypto functions)
 - ✓ Critical RET bug fixed and verified
 - ✓ Memory-safe ELF loading and mmap handling
 
@@ -163,7 +157,6 @@ The aeon_instrument engine has achieved **85% production readiness** with all co
 - ✓ All 13 integration tests pass
 - ✓ Execution engine correct (RET fix verified)
 - ✓ Symbolic analysis functional (358 constants, 12 induction vars)
-- ✓ Real-world binaries supported (NMSS crypto)
 - ✓ Trace I/O robust (disk roundtrip verified)
 
 **Next Phase:** Performance benchmarking, documentation, and extended symbolic analysis capabilities.

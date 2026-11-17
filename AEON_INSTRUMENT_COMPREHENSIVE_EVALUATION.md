@@ -39,7 +39,7 @@ aeon-instrument/
 │   ├── trace.rs (246 lines) - Execution trace logging
 │   ├── translate.rs (1,777 lines) - Block translation & linking
 │   ├── parallel_cfg.rs (64 lines) - Parallel CFG infrastructure (future)
-│   └── bin/ (4 binaries: jit_linear_sweep, live_cert_eval, jit_dynamic_replay, jit_translate_object)
+│   └── bin/ (3 binaries: jit_linear_sweep, jit_dynamic_replay, jit_translate_object)
 ├── tests/
 │   └── engine_integration.rs (726 lines) - 13 integration tests
 └── Cargo.toml
@@ -332,9 +332,7 @@ Integration Tests (13) in engine_integration.rs:
 ├── disk_trace_roundtrip
 ├── breakpoint_stops_engine
 ├── code_range_stops_when_execution_leaves_function
-├── max_steps_stops_engine
-├── nmss_crypto_sub_2070a8_traces_to_disk
-└── nmss_crypto_sub_20bb48_traces_to_disk
+└── max_steps_stops_engine
 ```
 
 ### 3.2 Test Coverage Assessment
@@ -349,7 +347,7 @@ Integration Tests (13) in engine_integration.rs:
 - Integration with aeon-jit
 - Error handling (invalid addresses, unsupported opcodes)
 - Breakpoint support
-- Multi-block execution (hello, loops, nmss binaries)
+- Multi-block execution (hello, loops binaries)
 
 **✅ Well Covered**:
 - Call/return transformation
@@ -408,7 +406,6 @@ Integration Tests (13) in engine_integration.rs:
 File              Lines    Module                   Status
 translate.rs      1,777    Block linking           Core
 dynffi.rs         1,675    FFI/instrumentation     Core
-live_cert_eval    6,504    Evaluation binary       Demo
 jit_linear_sweep  2,422    Analysis binary         Demo
 symbolic.rs         738    Symbolic analysis       Core
 dynruntime.rs       629    Execution engine        Core
@@ -503,7 +500,7 @@ From integration test runs:
 
 ### 6.3 Scalability
 
-- ✅ Handles multi-block execution (hello, loops, nmss)
+- ✅ Handles multi-block execution (hello, loops)
 - ✅ Supports large functions (256+ instruction blocks)
 - ✅ Trace streaming to disk for large traces
 - ⚠️ No parallel execution (Phase 2 future work)
@@ -589,7 +586,7 @@ From integration test runs:
 - [x] Error handling comprehensive
 - [x] Cache efficiency validated (cache hits tracked)
 - [x] Multi-block execution confirmed
-- [x] Real binaries used in testing (hello, loops, nmss)
+- [x] Real binaries used in testing (hello, loops)
 
 ---
 

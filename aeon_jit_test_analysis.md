@@ -67,8 +67,6 @@
   - `loops_has_stride_1_induction_variable`
   - `loops_symbolic_fold_finds_invariants`
   - `max_steps_stops_engine`
-  - `nmss_crypto_sub_20bb48_traces_to_disk`
-  - `nmss_crypto_sub_2070a8_traces_to_disk`
 - These are integration tests that exercise the full engine with embedded tracing
 
 ---

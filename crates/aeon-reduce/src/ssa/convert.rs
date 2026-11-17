@@ -460,7 +460,7 @@ mod tests {
     #[test]
     fn convert_intrinsic() {
         let expr = Expr::Intrinsic {
-            name: "dmb".to_string(),
+            name: "dmb".into(),
             operands: vec![Expr::Imm(0xf)],
         };
         match convert_expr(&expr) {

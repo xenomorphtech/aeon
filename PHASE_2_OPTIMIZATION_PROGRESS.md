@@ -161,7 +161,6 @@ loop {
 
 - `crates/aeon-instrument/src/symbolic_cache.rs` - NEW
 - `crates/aeon-instrument/src/lib.rs` - Added module export
-- `crates/aeon-instrument/examples/frida_trace.rs` - Updated config
 
 ## Testing
 

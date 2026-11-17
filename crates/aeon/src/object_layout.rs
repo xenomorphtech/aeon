@@ -336,7 +336,7 @@ fn string_preview(binary: &LoadedBinary, addr: u64) -> Option<String> {
 
 fn object_base_expr() -> Expr {
     Expr::Intrinsic {
-        name: "__aeon_object_base".to_string(),
+        name: "__aeon_object_base".into(),
         operands: Vec::new(),
     }
 }

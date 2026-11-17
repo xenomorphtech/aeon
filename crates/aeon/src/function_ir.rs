@@ -1076,7 +1076,7 @@ impl ExprView {
             },
             Expr::MrsRead(name) => Self::MrsRead { name: name.clone() },
             Expr::Intrinsic { name, operands } => Self::Intrinsic {
-                name: name.clone(),
+                name: name.to_string(),
                 operands: operands.iter().map(Self::from_expr).collect(),
             },
         }
@@ -1154,7 +1154,7 @@ impl StmtView {
                 imm: hex(u64::from(*imm)),
             },
             Stmt::Intrinsic { name, operands } => Self::Intrinsic {
-                name: name.clone(),
+                name: name.to_string(),
                 operands: operands.iter().map(ExprView::from_expr).collect(),
             },
         }
@@ -1354,7 +1354,7 @@ impl SsaExprView {
             },
             SsaExpr::MrsRead(name) => Self::MrsRead { name: name.clone() },
             SsaExpr::Intrinsic { name, operands } => Self::Intrinsic {
-                name: name.clone(),
+                name: name.to_string(),
                 operands: operands.iter().map(Self::from_expr).collect(),
             },
             SsaExpr::Phi(inputs) => Self::Phi {
@@ -1441,7 +1441,7 @@ impl SsaStmtView {
                 imm: hex(u64::from(*imm)),
             },
             SsaStmt::Intrinsic { name, operands } => Self::Intrinsic {
-                name: name.clone(),
+                name: name.to_string(),
                 operands: operands.iter().map(SsaExprView::from_expr).collect(),
             },
             SsaStmt::Pair(first, second) => Self::Pair {

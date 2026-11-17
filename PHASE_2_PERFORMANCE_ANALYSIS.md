@@ -91,7 +91,7 @@ With both optimizations:  152K blocks/sec (4×) combined
 - Second run: cache hits, measure speedup
 - Expected: 2× or more
 
-### Test Scenario 2: Breadth-Heavy Code (NMSS crypto)
+### Test Scenario 2: Breadth-Heavy Code
 
 **Characteristics**:
 - Multiple function calls (4+ blocks discovered)
@@ -221,7 +221,6 @@ println!("Batch speedup: {:.2}×", speedup);
 - Combined: 1.5-2.5×
 
 **Examples**:
-- NMSS crypto functions (expected 1.8-2×)
 - Complex control flow with unique paths
 - Data-dependent branching
 
