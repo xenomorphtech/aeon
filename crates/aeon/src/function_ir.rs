@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 
 use crate::analysis::AeonAnalysis;
 use crate::elf::{FunctionInfo, LoadedBinary};
+use crate::error::Error;
 use crate::facts::FunctionFacts;
 use crate::lifter;
 
@@ -129,10 +130,10 @@ impl FunctionArtifacts {
 pub fn decode_function(
     binary: &LoadedBinary,
     func: &FunctionInfo,
-) -> Result<DecodedFunction, String> {
-    let bytes = binary
-        .function_bytes(func)
-        .ok_or_else(|| format!("Function bytes out of range for 0x{:x}", func.addr))?;
+) -> Result<DecodedFunction, Error> {
+    let bytes = binary.function_bytes(func).ok_or_else(|| {
+        Error::out_of_range(format!("Function bytes out of range for 0x{:x}", func.addr))
+    })?;
 
     let mut instructions = Vec::new();
     let mut offset = 0usize;

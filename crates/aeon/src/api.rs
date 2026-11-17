@@ -6,6 +6,7 @@ use bad64;
 
 use crate::coverage::analyze_lift_coverage;
 use crate::elf::{self, FunctionInfo, LoadedBinary};
+use crate::error::Error;
 use crate::blackboard::{Blackboard, SemanticContext};
 use crate::function_ir::{
     decode_function, function_details, DecodedFunction, FunctionArtifacts, ReducedFunctionView, SsaFunctionView,
@@ -34,8 +35,8 @@ pub struct AeonSession {
 }
 
 impl AeonSession {
-    pub fn load(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let binary = elf::load_elf(path)?;
+    pub fn load(path: &str) -> Result<Self, Error> {
+        let binary = elf::load_elf(path).map_err(|e| Error::load(e.to_string()))?;
         Ok(Self {
             path: path.to_string(),
             blackboard: RwLock::new(Blackboard::new()),
@@ -44,8 +45,9 @@ impl AeonSession {
         })
     }
 
-    pub fn load_raw(path: &str, base_addr: u64) -> Result<Self, Box<dyn std::error::Error>> {
-        let binary = elf::load_raw(path, base_addr)?;
+    pub fn load_raw(path: &str, base_addr: u64) -> Result<Self, Error> {
+        let binary =
+            elf::load_raw(path, base_addr).map_err(|e| Error::load(e.to_string()))?;
         Ok(Self {
             path: path.to_string(),
             blackboard: RwLock::new(Blackboard::new()),
@@ -110,11 +112,11 @@ impl AeonSession {
         })
     }
 
-    pub fn search_analysis_names(&self, pattern: &str) -> Result<Value, String> {
+    pub fn search_analysis_names(&self, pattern: &str) -> Result<Value, Error> {
         let engine = self.blackboard();
         let matches = engine
             .search_analysis_names(pattern)
-            .map_err(|e| format!("Invalid regex: {}", e))?;
+            .map_err(|e| Error::invalid_input(format!("Invalid regex: {}", e)))?;
 
         let matches: Vec<Value> = matches
             .into_iter()
@@ -201,7 +203,7 @@ impl AeonSession {
         })
     }
 
-    pub fn get_il(&self, addr: u64) -> Result<Value, String> {
+    pub fn get_il(&self, addr: u64) -> Result<Value, Error> {
         let engine = self.blackboard();
         self.with_function_artifacts(addr, |func, artifacts| {
             let listing =
@@ -222,11 +224,11 @@ impl AeonSession {
         })
     }
 
-    pub fn get_function_il(&self, addr: u64) -> Result<Value, String> {
+    pub fn get_function_il(&self, addr: u64) -> Result<Value, Error> {
         self.get_il(addr)
     }
 
-    pub fn get_reduced_il(&self, addr: u64) -> Result<Value, String> {
+    pub fn get_reduced_il(&self, addr: u64) -> Result<Value, Error> {
         let engine = self.blackboard();
         self.with_function_artifacts(addr, |func, artifacts| {
             let mut value =
@@ -243,7 +245,7 @@ impl AeonSession {
         })
     }
 
-    pub fn get_ssa(&self, addr: u64, optimize: bool) -> Result<Value, String> {
+    pub fn get_ssa(&self, addr: u64, optimize: bool) -> Result<Value, Error> {
         let engine = self.blackboard();
         self.with_function_artifacts(addr, |func, artifacts| {
             let mut value = serde_json::to_value(SsaFunctionView::from_artifacts(addr, artifacts, optimize))
@@ -260,7 +262,7 @@ impl AeonSession {
         })
     }
 
-    pub fn get_stack_frame(&self, addr: u64) -> Result<Value, String> {
+    pub fn get_stack_frame(&self, addr: u64) -> Result<Value, Error> {
         self.with_function_artifacts(addr, |_, artifacts| {
             Ok(
                 serde_json::to_value(StackFrameArtifactView::from_artifacts(addr, artifacts))
@@ -272,7 +274,7 @@ impl AeonSession {
     pub fn lift_function_instructions(
         &self,
         addr: u64,
-    ) -> Result<Vec<(u64, Stmt, Vec<u64>)>, String> {
+    ) -> Result<Vec<(u64, Stmt, Vec<u64>)>, Error> {
         self.with_function_artifacts(addr, |_, artifacts| {
             Ok(artifacts.decoded().instruction_tuples())
         })
@@ -281,11 +283,11 @@ impl AeonSession {
     pub fn analyze_constructor_object_layout(
         &self,
         addr: u64,
-    ) -> Result<ConstructorObjectLayout, String> {
+    ) -> Result<ConstructorObjectLayout, Error> {
         let func = self
             .binary
             .function_containing(addr)
-            .ok_or_else(|| format!("No function containing 0x{:x}", addr))?;
+            .ok_or_else(|| Error::not_found(format!("No function containing 0x{:x}", addr)))?;
         Ok(crate::object_layout::analyze_constructor_object_layout(
             &self.binary,
             func,
@@ -293,7 +295,7 @@ impl AeonSession {
         ))
     }
 
-    pub fn get_function_details(&self, addr: u64) -> Result<Value, String> {
+    pub fn get_function_details(&self, addr: u64) -> Result<Value, Error> {
         let func = self.find_function(addr)?;
         let mut details = self.with_function_artifacts(addr, |_, artifacts| {
             Ok(function_details(artifacts.decoded()))
@@ -304,7 +306,7 @@ impl AeonSession {
         Ok(details)
     }
 
-    pub fn get_function_skeleton(&self, addr: u64) -> Result<Value, String> {
+    pub fn get_function_skeleton(&self, addr: u64) -> Result<Value, Error> {
         let func = self.find_function(addr)?;
 
         // Get stack frame size outside the closure to avoid borrow conflicts
@@ -386,12 +388,12 @@ impl AeonSession {
         })
     }
 
-    pub fn get_data_flow_slice(&self, addr: u64, register: &str, direction: &str) -> Result<Value, String> {
+    pub fn get_data_flow_slice(&self, addr: u64, register: &str, direction: &str) -> Result<Value, Error> {
         let _func = self.find_function(addr)?;
 
         let direction_lower = direction.to_lowercase();
         if direction_lower != "backward" && direction_lower != "forward" {
-            return Err("Direction must be 'backward' or 'forward'".to_string());
+            return Err(Error::invalid_input("Direction must be 'backward' or 'forward'"));
         }
 
         self.with_function_artifacts(addr, |_, artifacts| {
@@ -399,7 +401,7 @@ impl AeonSession {
             let instructions = &decoded.instructions;
 
             let target_idx = instructions.iter().position(|instr| instr.addr == addr)
-                .ok_or_else(|| format!("No instruction at address 0x{:x}", addr))?;
+                .ok_or_else(|| Error::not_found(format!("No instruction at address 0x{:x}", addr)))?;
 
             let mut slice_instructions = Vec::new();
             let mut complexity_flags = std::collections::HashSet::new();
@@ -535,7 +537,7 @@ impl AeonSession {
     }
 
 
-    pub fn get_function_cfg(&self, addr: u64) -> Result<Value, String> {
+    pub fn get_function_cfg(&self, addr: u64) -> Result<Value, Error> {
         let func = self.find_function(addr)?;
         let details = self.get_function_details(addr)?;
         let engine = self.blackboard();
@@ -657,7 +659,7 @@ impl AeonSession {
         addr: Option<u64>,
         offset: usize,
         limit: usize,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, Error> {
         let report = pointer_analysis::scan_function_pointers(&self.binary, addr, offset, limit)?;
         Ok(serde_json::to_value(report).unwrap())
     }
@@ -669,7 +671,7 @@ impl AeonSession {
         max_depth: usize,
         include_all_paths: bool,
         max_paths: usize,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, Error> {
         let report = pointer_analysis::find_call_paths(
             &self.binary,
             start_addr,
@@ -690,7 +692,7 @@ impl AeonSession {
         addr: u64,
         register: Option<&str>,
         limit: Option<usize>,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, Error> {
         let limit = limit.unwrap_or(500).min(5000);
         match query {
             "reachability" | "defines" | "reads_mem" | "writes_mem" | "flows_to" => {
@@ -699,10 +701,10 @@ impl AeonSession {
             "call_graph" | "call_graph_transitive" => {
                 self.execute_cross_function_datalog(query, addr, limit)
             }
-            _ => Err(format!(
+            _ => Err(Error::invalid_input(format!(
                 "Unknown query: '{}'. Supported: reachability, defines, reads_mem, writes_mem, flows_to, call_graph, call_graph_transitive",
                 query
-            )),
+            ))),
         }
     }
 
@@ -712,7 +714,7 @@ impl AeonSession {
         addr: u64,
         register: Option<&str>,
         limit: usize,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, Error> {
         use crate::datalog::{extract_function_facts, FunctionDatalog};
 
         self.with_function_artifacts(addr, |func, artifacts| {
@@ -783,7 +785,7 @@ impl AeonSession {
                     }
                 }
                 "flows_to" => {
-                    let filter_reg = register.ok_or("flows_to query requires 'register' parameter")?;
+                    let filter_reg = register.ok_or_else(|| Error::invalid_input("flows_to query requires 'register' parameter"))?;
                     for (def_addr, reg_name, use_addr) in &prog.flows_to {
                         if reg_name == filter_reg && results.len() < limit {
                             results.push(json!({
@@ -812,7 +814,7 @@ impl AeonSession {
         query: &str,
         addr: u64,
         limit: usize,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, Error> {
         use crate::datalog::{extract_cross_function_facts, CrossFunctionDatalog};
 
         let mut prog = CrossFunctionDatalog::default();
@@ -862,18 +864,18 @@ impl AeonSession {
         }))
     }
 
-    pub fn get_bytes(&self, addr: u64, size: usize) -> Result<Value, String> {
+    pub fn get_bytes(&self, addr: u64, size: usize) -> Result<Value, Error> {
         let size = size.min(4096);
         let offset_in_text = addr
             .checked_sub(self.binary.text_section_addr)
-            .ok_or("Address before .text section")?;
+            .ok_or_else(|| Error::out_of_range("Address before .text section"))?;
         let file_offset = self.binary.text_section_file_offset + offset_in_text;
         let end = (file_offset + size as u64).min(self.binary.data.len() as u64);
         let start = file_offset as usize;
         let end = end as usize;
 
         if start >= self.binary.data.len() {
-            return Err(format!("Address 0x{:x} out of range", addr));
+            return Err(Error::out_of_range(format!("Address 0x{:x} out of range", addr)));
         }
 
         let bytes = &self.binary.data[start..end];
@@ -881,22 +883,22 @@ impl AeonSession {
         Ok(data_view(addr, bytes, &self.binary, &engine))
     }
 
-    pub fn get_data(&self, addr: u64, size: usize) -> Result<Value, String> {
+    pub fn get_data(&self, addr: u64, size: usize) -> Result<Value, Error> {
         let size = size.min(4096);
         let bytes = self
             .binary
             .read_vaddr(addr, size)
-            .ok_or_else(|| format!("Cannot read address 0x{:x} — not in any LOAD segment", addr))?;
+            .ok_or_else(|| Error::out_of_range(format!("Cannot read address 0x{:x} — not in any LOAD segment", addr)))?;
         let engine = self.blackboard();
         Ok(data_view(addr, bytes, &self.binary, &engine))
     }
 
-    pub fn get_string(&self, addr: u64, max_len: usize) -> Result<Value, String> {
+    pub fn get_string(&self, addr: u64, max_len: usize) -> Result<Value, Error> {
         let max_len = max_len.min(4096);
         let string = self
             .binary
             .read_string(addr, max_len)
-            .ok_or_else(|| format!("Cannot read address 0x{:x} — not in any LOAD segment", addr))?;
+            .ok_or_else(|| Error::out_of_range(format!("Cannot read address 0x{:x} — not in any LOAD segment", addr)))?;
         let engine = self.blackboard();
 
         Ok(json!({
@@ -925,26 +927,26 @@ impl AeonSession {
         )
     }
 
-    pub fn get_asm(&self, start_addr: u64, stop_addr: u64) -> Result<Value, String> {
+    pub fn get_asm(&self, start_addr: u64, stop_addr: u64) -> Result<Value, Error> {
         if stop_addr <= start_addr {
-            return Err("stop_addr must be greater than start_addr".into());
+            return Err(Error::invalid_input("stop_addr must be greater than start_addr"));
         }
 
         let size = stop_addr - start_addr;
         if size > 1_048_576 {
-            return Err("Range too large (max 1MB)".into());
+            return Err(Error::invalid_input("Range too large (max 1MB)"));
         }
 
         let offset_in_text = start_addr
             .checked_sub(self.binary.text_section_addr)
-            .ok_or("start_addr before .text section")?;
+            .ok_or_else(|| Error::out_of_range("start_addr before .text section"))?;
         let file_start = (self.binary.text_section_file_offset + offset_in_text) as usize;
         let file_end = file_start + size as usize;
         if file_end > self.binary.data.len() {
-            return Err(format!(
+            return Err(Error::out_of_range(format!(
                 "Address range 0x{:x}..0x{:x} extends past binary data",
                 start_addr, stop_addr
-            ));
+            )));
         }
 
         let bytes = &self.binary.data[file_start..file_end];
@@ -967,11 +969,11 @@ impl AeonSession {
         addr: u64,
         include_asm: bool,
         include_il: bool,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, Error> {
         let func = self
             .binary
             .function_containing(addr)
-            .ok_or_else(|| format!("No function containing 0x{:x}", addr))?;
+            .ok_or_else(|| Error::not_found(format!("No function containing 0x{:x}", addr)))?;
         let engine = self.blackboard();
         let mut response = json!({
             "query_addr": format!("0x{:x}", addr),
@@ -1034,25 +1036,25 @@ impl AeonSession {
         end_addr: u64,
         initial_registers: HashMap<String, u64>,
         step_limit: usize,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, Error> {
         use crate::emulation::{self, Value as EmulValue};
         use std::collections::BTreeMap;
 
         if start_addr >= end_addr {
-            return Err("start_addr must be less than end_addr".to_string());
+            return Err(Error::invalid_input("start_addr must be less than end_addr"));
         }
 
         let binary_len = (end_addr - start_addr) as usize;
         if binary_len > 0x10000 {
-            return Err("snippet too large (max 64KB)".to_string());
+            return Err(Error::invalid_input("snippet too large (max 64KB)"));
         }
 
         let file_offset = self.binary
             .vaddr_to_file_offset(start_addr)
-            .ok_or_else(|| format!("Cannot read bytes at 0x{:x}", start_addr))?;
+            .ok_or_else(|| Error::out_of_range(format!("Cannot read bytes at 0x{:x}", start_addr)))?;
 
         if file_offset + binary_len > self.binary.data.len() {
-            return Err(format!("Cannot read 0x{:x} bytes at 0x{:x}", binary_len, start_addr));
+            return Err(Error::out_of_range(format!("Cannot read 0x{:x} bytes at 0x{:x}", binary_len, start_addr)));
         }
 
         let raw_bytes = &self.binary.data[file_offset..file_offset + binary_len];
@@ -1159,14 +1161,15 @@ impl AeonSession {
         initial_registers: HashMap<String, u64>,
         initial_memory: HashMap<u64, Vec<u8>>,
         step_limit: usize,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, Error> {
         use crate::sandbox::{run_sandbox, SandboxConfig};
         let config = SandboxConfig { step_limit, ..Default::default() };
-        let result = run_sandbox(&self.binary, start_addr, end_addr, &initial_registers, &initial_memory, &config)?;
-        serde_json::to_value(&result).map_err(|e| format!("serialize result: {}", e))
+        let result = run_sandbox(&self.binary, start_addr, end_addr, &initial_registers, &initial_memory, &config)
+            .map_err(Error::emulation)?;
+        serde_json::to_value(&result).map_err(|e| Error::internal(format!("serialize result: {}", e)))
     }
 
-    pub fn emulate_snippet_native_advanced(&self, req: AdvancedEmulationRequest) -> Result<Value, String> {
+    pub fn emulate_snippet_native_advanced(&self, req: AdvancedEmulationRequest) -> Result<Value, Error> {
         use crate::sandbox::{run_sandbox, SandboxConfig};
         let config = SandboxConfig {
             step_limit: req.step_limit,
@@ -1175,8 +1178,9 @@ impl AeonSession {
             record_pc_trace: req.record_pc_trace,
             ..Default::default()
         };
-        let result = run_sandbox(&self.binary, req.start_addr, req.end_addr, &req.initial_registers, &req.initial_memory, &config)?;
-        serde_json::to_value(&result).map_err(|e| format!("serialize result: {}", e))
+        let result = run_sandbox(&self.binary, req.start_addr, req.end_addr, &req.initial_registers, &req.initial_memory, &config)
+            .map_err(Error::emulation)?;
+        serde_json::to_value(&result).map_err(|e| Error::internal(format!("serialize result: {}", e)))
     }
 
     // A panic while a lock is held leaves the data as it was before the
@@ -1200,12 +1204,12 @@ impl AeonSession {
     fn with_function_artifacts<T>(
         &self,
         addr: u64,
-        f: impl FnOnce(&FunctionInfo, &mut FunctionArtifacts) -> Result<T, String>,
-    ) -> Result<T, String> {
+        f: impl FnOnce(&FunctionInfo, &mut FunctionArtifacts) -> Result<T, Error>,
+    ) -> Result<T, Error> {
         let func = self
             .binary
             .function_containing(addr)
-            .ok_or_else(|| format!("No function containing 0x{:x}", addr))?;
+            .ok_or_else(|| Error::not_found(format!("No function containing 0x{:x}", addr)))?;
         let mut cache = self.function_cache();
 
         let artifacts = match cache.entry(func.addr) {
@@ -1219,12 +1223,12 @@ impl AeonSession {
         f(func, artifacts)
     }
 
-    fn find_function(&self, addr: u64) -> Result<&FunctionInfo, String> {
+    fn find_function(&self, addr: u64) -> Result<&FunctionInfo, Error> {
         self.binary
             .functions
             .iter()
             .find(|f| f.addr == addr)
-            .ok_or_else(|| format!("No function at 0x{:x}", addr))
+            .ok_or_else(|| Error::not_found(format!("No function at 0x{:x}", addr)))
     }
 }
 

@@ -8,19 +8,31 @@ pub enum ErrorCode {
     UnknownTool,
     /// The tool needs a binary and none is loaded.
     NoBinaryLoaded,
-    /// An argument is missing, of the wrong type, or not parseable.
+    /// An argument is missing, of the wrong type, not parseable, or asks
+    /// for something malformed (a bad pattern, an empty range).
     InvalidArgument,
-    /// The arguments were understood and the analysis itself failed: no
-    /// function at that address, a file that would not load, and so on.
-    Analysis,
+    /// Nothing is known at that address: no function, no instruction.
+    NotFound,
+    /// The address or range is not part of the loaded image.
+    OutOfRange,
+    /// The binary could not be read or parsed.
+    LoadFailed,
+    /// Emulation could not be set up or failed to run.
+    EmulationFailed,
+    /// A failure that is not the caller's doing.
+    Internal,
 }
 
 impl ErrorCode {
-    pub const ALL: [ErrorCode; 4] = [
+    pub const ALL: [ErrorCode; 8] = [
         ErrorCode::UnknownTool,
         ErrorCode::NoBinaryLoaded,
         ErrorCode::InvalidArgument,
-        ErrorCode::Analysis,
+        ErrorCode::NotFound,
+        ErrorCode::OutOfRange,
+        ErrorCode::LoadFailed,
+        ErrorCode::EmulationFailed,
+        ErrorCode::Internal,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -28,7 +40,24 @@ impl ErrorCode {
             ErrorCode::UnknownTool => "unknown_tool",
             ErrorCode::NoBinaryLoaded => "no_binary_loaded",
             ErrorCode::InvalidArgument => "invalid_argument",
-            ErrorCode::Analysis => "analysis_failed",
+            ErrorCode::NotFound => "not_found",
+            ErrorCode::OutOfRange => "out_of_range",
+            ErrorCode::LoadFailed => "load_failed",
+            ErrorCode::EmulationFailed => "emulation_failed",
+            ErrorCode::Internal => "internal",
+        }
+    }
+}
+
+impl From<aeon::ErrorKind> for ErrorCode {
+    fn from(kind: aeon::ErrorKind) -> Self {
+        match kind {
+            aeon::ErrorKind::NotFound => ErrorCode::NotFound,
+            aeon::ErrorKind::OutOfRange => ErrorCode::OutOfRange,
+            aeon::ErrorKind::InvalidInput => ErrorCode::InvalidArgument,
+            aeon::ErrorKind::Load => ErrorCode::LoadFailed,
+            aeon::ErrorKind::Emulation => ErrorCode::EmulationFailed,
+            aeon::ErrorKind::Internal => ErrorCode::Internal,
         }
     }
 }
@@ -61,11 +90,9 @@ impl std::fmt::Display for ToolError {
 
 impl std::error::Error for ToolError {}
 
-/// The core reports failures as strings; they are all analysis failures.
-/// Argument problems are raised here in the frontend, as [`ArgError`].
-impl From<String> for ToolError {
-    fn from(message: String) -> Self {
-        Self::new(ErrorCode::Analysis, message)
+impl From<aeon::Error> for ToolError {
+    fn from(error: aeon::Error) -> Self {
+        Self::new(error.kind.into(), error.message)
     }
 }
 
@@ -149,14 +176,16 @@ impl AeonFrontend {
 
     fn load_binary(&mut self, request: LoadBinary) -> ToolResult {
         let session = match request.format.as_str() {
-            "elf" => aeon::AeonSession::load(&request.path)
-                .map_err(|e| format!("Failed to load ELF binary: {}", e))?,
+            "elf" => aeon::AeonSession::load(&request.path).map_err(|e| {
+                ToolError::new(e.kind.into(), format!("Failed to load ELF binary: {}", e))
+            })?,
             "raw" => {
                 let base_addr = request.base_addr.ok_or(ArgError::from(
                     "Missing required parameter for raw binaries: base_addr",
                 ))?;
-                aeon::AeonSession::load_raw(&request.path, base_addr.0)
-                    .map_err(|e| format!("Failed to load raw binary: {}", e))?
+                aeon::AeonSession::load_raw(&request.path, base_addr.0).map_err(|e| {
+                    ToolError::new(e.kind.into(), format!("Failed to load raw binary: {}", e))
+                })?
             }
             other => {
                 return Err(ArgError::from(format!(
@@ -805,7 +834,7 @@ mod tests {
         );
         assert_eq!(
             code(&mut frontend, "load_binary", json!({ "path": "/nonexistent/binary" })),
-            ErrorCode::Analysis
+            ErrorCode::LoadFailed
         );
 
         frontend
@@ -822,7 +851,23 @@ mod tests {
         );
         assert_eq!(
             code(&mut frontend, "get_reduced_il", json!({ "addr": "0xffffffff" })),
-            ErrorCode::Analysis
+            ErrorCode::NotFound
+        );
+        assert_eq!(
+            code(&mut frontend, "get_bytes", json!({ "addr": "0xffffffff" })),
+            ErrorCode::OutOfRange
+        );
+        assert_eq!(
+            code(&mut frontend, "search_analysis_names", json!({ "pattern": "(" })),
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            code(
+                &mut frontend,
+                "execute_datalog",
+                json!({ "addr": "0x718", "query": "no_such_query" })
+            ),
+            ErrorCode::InvalidArgument
         );
 
         // The string forms are what clients see; they must stay distinct.

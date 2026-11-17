@@ -5,6 +5,7 @@ pub mod coverage;
 pub mod datalog;
 pub mod elf;
 pub mod emulation;
+pub mod error;
 pub mod facts;
 pub mod function_ir;
 pub mod il;
@@ -15,3 +16,4 @@ pub mod rc4_search;
 pub mod sandbox;
 
 pub use api::AeonSession;
+pub use error::{Error, ErrorKind};

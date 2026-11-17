@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use crate::error::Error;
 use aeon_reduce::env::RegisterEnv;
 
 use bad64::{Op, Operand};
@@ -439,14 +440,14 @@ pub fn scan_function_pointers(
     query_addr: Option<u64>,
     offset: usize,
     limit: usize,
-) -> Result<FunctionPointerScanReport, String> {
+) -> Result<FunctionPointerScanReport, Error> {
     let vtable_report = scan_vtables(binary);
     let vtable_index = VTableIndex::build(&vtable_report.vtables);
 
     let functions: Vec<&FunctionInfo> = if let Some(addr) = query_addr {
         vec![binary
             .function_containing(addr)
-            .ok_or_else(|| format!("No function containing 0x{:x}", addr))?]
+            .ok_or_else(|| Error::not_found(format!("No function containing 0x{:x}", addr)))?]
     } else {
         binary
             .functions
@@ -477,13 +478,13 @@ pub fn find_call_paths(
     max_depth: usize,
     include_all_paths: bool,
     max_paths: usize,
-) -> Result<CallPathSearchReport, String> {
+) -> Result<CallPathSearchReport, Error> {
     let start = binary
         .function_containing(start_addr)
-        .ok_or_else(|| format!("No function containing 0x{:x}", start_addr))?;
+        .ok_or_else(|| Error::not_found(format!("No function containing 0x{:x}", start_addr)))?;
     let goal = binary
         .function_containing(goal_addr)
-        .ok_or_else(|| format!("No function containing 0x{:x}", goal_addr))?;
+        .ok_or_else(|| Error::not_found(format!("No function containing 0x{:x}", goal_addr)))?;
 
     if start.addr == goal.addr {
         return Ok(CallPathSearchReport {
