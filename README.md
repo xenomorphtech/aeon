@@ -18,7 +18,7 @@ The repository includes a small sample ARM64 ELF at `samples/hello_aarch64.elf` 
 
 - **ARM64 ELF ingestion** - parses ELF images and discovers functions from `.eh_frame`
 - **AeonIL lifting** - lifts ARM64 instructions into a BNIL-style intermediate representation
-- **ECS-backed program model** - stores instruction facts and relationships in `bevy_ecs`
+- **Per-function artifacts** - decoded instructions, reduced CFG, SSA and facts, computed on demand and cached per function
 - **Datalog analysis** - computes CFG edges, reachability, terminal blocks, and cross-references with `ascent`
 - **Behavioral crypto search** - detects RC4 KSA and PRGA patterns structurally rather than by signature
 - **Pointer and vtable recovery** - scans mapped data for internal pointers, detects candidate C++ vtables, and groups related tables
@@ -29,11 +29,18 @@ The repository includes a small sample ARM64 ELF at `samples/hello_aarch64.elf` 
 
 ## Workspace Layout
 
-- `crates/aeon-eval` - evaluation corpus, task, claim, and evidence models
 - `crates/aeonil` - standalone AeonIL crate
+- `crates/aeon-reduce` - IL simplification passes and SSA
 - `crates/aeon` - reusable analysis library
+- `crates/aeon-service` - stateful tool service shared by every transport
 - `crates/aeon-frontend` - CLI, MCP, and HTTP frontends
+- `crates/aeon-swarm` - multi-agent orchestrator over the service
+- `crates/aeon-jit` - Cranelift JIT and object backend for AeonIL
+- `crates/aeon-instrument` - dynamic execution and tracing on the JIT
+- `crates/aeon-eval` - evaluation corpus, task, claim, and evidence models
 - `crates/survey` - standalone opcode survey utility
+
+See `docs/architecture.md` for how the crates fit together.
 
 ## Build
 
@@ -204,34 +211,39 @@ Generated from `crates/aeon-service/src/service.rs` via `cargo run -p aeon-front
 ELF binary
   -> bad64 decode
     -> AeonIL lifting
-      -> bevy_ecs fact store
-        -> ascent Datalog analysis
-          -> CLI / MCP / HTTP agent interface
+      -> reduction and SSA
+        -> per-function facts
+          -> ascent Datalog analysis
+            -> CLI / MCP / HTTP agent interface
 ```
+
+`docs/architecture.md` describes the crates, the session model, the three
+execution engines and the reducer in more detail.
 
 ## Key Modules
 
 | File | Purpose |
 |------|---------|
-| `crates/aeon-eval/src/lib.rs` | Evaluation corpus, task, and evidence models |
 | `crates/aeonil/src/lib.rs` | AeonIL data types and expression helpers |
 | `crates/aeon/src/api.rs` | High-level session API |
 | `crates/aeon/src/elf.rs` | ELF parsing and function discovery |
 | `crates/aeon/src/lifter.rs` | ARM64 to AeonIL lifting |
-| `crates/aeon/src/il.rs` | Compatibility re-export of `aeonil` |
+| `crates/aeon/src/emulation.rs` | AeonIL interpreter |
+| `crates/aeon/src/function_ir.rs` | Per-function artifacts: decoded code, reduced CFG, SSA, facts |
+| `crates/aeon/src/blackboard.rs` | Analyst annotations: names, structs, hypotheses |
 | `crates/aeon/src/object_layout.rs` | Constructor object-layout recovery for pointer fields |
-| `crates/aeon/src/components.rs` | ECS components for lifted facts |
 | `crates/aeon/src/analysis.rs` | Datalog rules for CFG and reachability |
 | `crates/aeon/src/rc4_search.rs` | Behavioral RC4 detection |
-| `crates/aeon/src/engine.rs` | Session orchestration and analysis internals |
+| `crates/aeon-reduce/src/pass.rs` | Reducer pass tables and runners |
+| `crates/aeon-jit/src/lower/` | AeonIL to Cranelift lowering |
 | `crates/aeon-service/src/service.rs` | Shared stateful tool dispatch |
 | `crates/aeon-frontend/src/mcp.rs` | MCP frontend |
 | `crates/aeon-frontend/src/http.rs` | HTTP frontend |
+| `crates/aeon-eval/src/lib.rs` | Evaluation corpus, task, and evidence models |
 
 ## Dependencies
 
 - [bad64](https://crates.io/crates/bad64) - ARM64 instruction decoding
-- [bevy_ecs](https://crates.io/crates/bevy_ecs) - entity-component storage
 - [ascent](https://crates.io/crates/ascent) - Datalog engine
 - [object](https://crates.io/crates/object) - ELF parsing
 - [gimli](https://crates.io/crates/gimli) - DWARF and `.eh_frame` reading

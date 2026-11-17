@@ -61,7 +61,7 @@ This is the anti-hallucination workstream. LLMs are poor CPU simulators, but the
   Expose an MCP tool such as `execute_datalog(query_string)` that accepts agent-authored rules, runs them against the extracted facts, and returns exact result tuples.
 
 - Design input
-  `datalog_plugin.md` already sketches the dynamic query path and should become the design seed for this workstream.
+  `datalog-plugin.md` already sketches the dynamic query path and should become the design seed for this workstream.
 
 - Workflow
   Instead of reading code linearly to understand a behavior, the agent writes a rule like "find all paths from `recv()` to the command dispatcher" or "find all callers that reach the license check without passing through the signature verifier." aeon executes the query and returns exact addresses and relations. The model stays responsible for hypotheses; aeon stays responsible for proof.

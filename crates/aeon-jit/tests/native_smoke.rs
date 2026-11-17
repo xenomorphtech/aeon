@@ -156,7 +156,8 @@ fn native_jit_indirect_call_via_x30_invokes_callee() {
 
     let mut ctx = JitContext::default();
     let next = unsafe { entry(&mut ctx) };
-    assert_eq!(next, 0);
+    // `Ret` returns x30, which the caller loaded with the callee's address.
+    assert_eq!(next, callee_ptr);
     assert_eq!(ctx.x[0], 42);
 }
 
@@ -211,8 +212,9 @@ fn native_jit_indirect_call_via_x30_bridges_to_printf() {
     let entry: JitEntry = unsafe { std::mem::transmute(caller_code) };
     let mut ctx = JitContext::default();
     let out = capture_stdout(|| {
+        // `Ret` returns x30, which still holds the bridged target.
         let next = unsafe { entry(&mut ctx) };
-        assert_eq!(next, 0);
+        assert_eq!(next, printf_target as u64);
     });
     compiler.set_branch_bridge_callback(None);
     EXPECTED_BRIDGE_TARGET.store(0, Ordering::SeqCst);

@@ -269,13 +269,31 @@ Open:
   slots) are not executed by any engine, so they are only covered by their
   unit tests and the goldens; and there is no width check on the IL between
   passes.
-- **Layering:** `aeon-swarm` depends on `aeon-frontend`, an orchestrator
-  depending on the transport layer. Extract the service into its own crate.
-- **Repo hygiene:** the root has about 35 generated status reports, and the
-  README's workspace layout omits `aeon-jit`, `aeon-instrument`, `aeon-reduce`
-  and `aeon-swarm`. Archive the reports under `docs/history/` and keep one
-  living architecture doc.
-- **No CI:** there is no `.github` directory despite a sizeable test suite.
+- **Layering:** `aeon-swarm` depended on `aeon-frontend`, an orchestrator
+  depending on the transport layer.
+
+  **Status (2026-11-18): done.** The service and its typed requests are the
+  `aeon-service` crate. `aeon-frontend` keeps the CLI, MCP and HTTP
+  transports, and `aeon-swarm` depends on `aeon-service` alone. The service
+  type is still called `AeonFrontend`.
+- **Repo hygiene:** the root had about 30 generated status reports, and the
+  README's workspace layout omitted `aeon-jit`, `aeon-instrument`,
+  `aeon-reduce` and `aeon-swarm`.
+
+  **Status (2026-11-18): done.** The reports are under `docs/history/`,
+  unedited. `roadmap.md`, `datalog-plugin.md` and
+  `instrument-trace-format.md` moved to `docs/`. `docs/architecture.md` is
+  the living architecture doc, and the README's layout, pipeline and module
+  table match the code again (they still described `bevy_ecs` and the
+  deleted `engine.rs`).
+- **No CI:** there was no `.github` directory despite a sizeable test suite.
+
+  **Status (2026-11-18): done.** `.github/workflows/ci.yml` checks
+  formatting of `aeon-jit`, builds every target and runs the whole
+  workspace's tests on each push and pull request. `native_smoke`, which
+  used to fail, passes: two of its assertions expected a block to return 0
+  where `Ret` returns x30. Not in CI: clippy, and rustfmt for the crates
+  that are not yet formatted.
 - **Panics:** about 450 `unwrap`/`expect` calls in `src`. They matter most in
   the lifter, ELF and service paths, where a hostile binary should not kill a
   persistent session.
