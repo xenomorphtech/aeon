@@ -1,4 +1,4 @@
-use aeon::il::{BranchCond, Condition, Expr, Reg, Stmt};
+use aeon::il::Stmt;
 use aeon::AeonSession;
 use aeon_reduce::pipeline::{reduce_function_cfg_with_metrics, ReductionMetrics};
 use aeon_reduce::ssa::cfg::{build_cfg, Cfg};
@@ -850,182 +850,10 @@ fn normalize_cfg_artifact(
     })
 }
 
+/// A statement as it appears in goldens: serde's default shape for
+/// `aeonil::Stmt`, the same one the session API returns.
 fn normalize_stmt(stmt: &Stmt) -> Value {
-    match stmt {
-        Stmt::Assign { dst, src } => json!(["assign", normalize_reg(dst), normalize_expr(src)]),
-        Stmt::Store { addr, value, size } => {
-            json!(["store", normalize_expr(addr), normalize_expr(value), size])
-        }
-        Stmt::Branch { target } => json!(["branch", normalize_expr(target)]),
-        Stmt::CondBranch {
-            cond,
-            target,
-            fallthrough,
-        } => json!([
-            "cond_branch",
-            normalize_branch_cond(cond),
-            normalize_expr(target),
-            hex_addr(*fallthrough)
-        ]),
-        Stmt::Call { target } => json!(["call", normalize_expr(target)]),
-        Stmt::Ret => json!(["ret"]),
-        Stmt::Nop => json!(["nop"]),
-        Stmt::Pair(a, b) => json!(["pair", normalize_stmt(a), normalize_stmt(b)]),
-        Stmt::SetFlags { expr } => json!(["set_flags", normalize_expr(expr)]),
-        Stmt::Barrier(name) => json!(["barrier", name]),
-        Stmt::Trap { kind: _, imm: _ } => json!(["trap"]),
-        Stmt::Intrinsic { name, operands } => {
-            json!([
-                "intrinsic",
-                name.as_str(),
-                operands.iter().map(normalize_expr).collect::<Vec<_>>()
-            ])
-        }
-    }
-}
-
-fn normalize_branch_cond(cond: &BranchCond) -> Value {
-    match cond {
-        BranchCond::Flag(condition) => json!(["flag", normalize_condition(*condition)]),
-        BranchCond::Zero(expr) => json!(["zero", normalize_expr(expr)]),
-        BranchCond::NotZero(expr) => json!(["not_zero", normalize_expr(expr)]),
-        BranchCond::BitZero(expr, bit) => json!(["bit_zero", normalize_expr(expr), bit]),
-        BranchCond::BitNotZero(expr, bit) => {
-            json!(["bit_not_zero", normalize_expr(expr), bit])
-        }
-        BranchCond::Compare { cond, lhs, rhs } => json!([
-            "compare",
-            normalize_condition(*cond),
-            normalize_expr(lhs),
-            normalize_expr(rhs)
-        ]),
-    }
-}
-
-fn normalize_expr(expr: &Expr) -> Value {
-    match expr {
-        Expr::Reg(reg) => json!(["reg", normalize_reg(reg)]),
-        Expr::Imm(value) => json!(["imm", hex_addr(*value)]),
-        Expr::FImm(value) => json!(["fimm", value]),
-        Expr::Load { addr, size } => json!(["load", normalize_expr(addr), size]),
-        Expr::Add(lhs, rhs) => json!(["add", normalize_expr(lhs), normalize_expr(rhs)]),
-        Expr::Sub(lhs, rhs) => json!(["sub", normalize_expr(lhs), normalize_expr(rhs)]),
-        Expr::Mul(lhs, rhs) => json!(["mul", normalize_expr(lhs), normalize_expr(rhs)]),
-        Expr::Div(lhs, rhs) => json!(["div", normalize_expr(lhs), normalize_expr(rhs)]),
-        Expr::UDiv(lhs, rhs) => json!(["udiv", normalize_expr(lhs), normalize_expr(rhs)]),
-        Expr::Neg(value) => json!(["neg", normalize_expr(value)]),
-        Expr::Abs(value) => json!(["abs", normalize_expr(value)]),
-        Expr::And(lhs, rhs) => json!(["and", normalize_expr(lhs), normalize_expr(rhs)]),
-        Expr::Or(lhs, rhs) => json!(["or", normalize_expr(lhs), normalize_expr(rhs)]),
-        Expr::Xor(lhs, rhs) => json!(["xor", normalize_expr(lhs), normalize_expr(rhs)]),
-        Expr::Not(value) => json!(["not", normalize_expr(value)]),
-        Expr::Shl(lhs, rhs) => json!(["shl", normalize_expr(lhs), normalize_expr(rhs)]),
-        Expr::Lsr(lhs, rhs) => json!(["lsr", normalize_expr(lhs), normalize_expr(rhs)]),
-        Expr::Asr(lhs, rhs) => json!(["asr", normalize_expr(lhs), normalize_expr(rhs)]),
-        Expr::Ror(lhs, rhs) => json!(["ror", normalize_expr(lhs), normalize_expr(rhs)]),
-        Expr::SignExtend { src, from_bits } => {
-            json!(["sign_extend", normalize_expr(src), from_bits])
-        }
-        Expr::ZeroExtend { src, from_bits } => {
-            json!(["zero_extend", normalize_expr(src), from_bits])
-        }
-        Expr::Extract { src, lsb, width } => {
-            json!(["extract", normalize_expr(src), lsb, width])
-        }
-        Expr::Insert {
-            dst,
-            src,
-            lsb,
-            width,
-        } => json!([
-            "insert",
-            normalize_expr(dst),
-            normalize_expr(src),
-            lsb,
-            width
-        ]),
-        Expr::FAdd(lhs, rhs) => json!(["fadd", normalize_expr(lhs), normalize_expr(rhs)]),
-        Expr::FSub(lhs, rhs) => json!(["fsub", normalize_expr(lhs), normalize_expr(rhs)]),
-        Expr::FMul(lhs, rhs) => json!(["fmul", normalize_expr(lhs), normalize_expr(rhs)]),
-        Expr::FDiv(lhs, rhs) => json!(["fdiv", normalize_expr(lhs), normalize_expr(rhs)]),
-        Expr::FNeg(value) => json!(["fneg", normalize_expr(value)]),
-        Expr::FAbs(value) => json!(["fabs", normalize_expr(value)]),
-        Expr::FSqrt(value) => json!(["fsqrt", normalize_expr(value)]),
-        Expr::FMax(lhs, rhs) => json!(["fmax", normalize_expr(lhs), normalize_expr(rhs)]),
-        Expr::FMin(lhs, rhs) => json!(["fmin", normalize_expr(lhs), normalize_expr(rhs)]),
-        Expr::FCvt(value) => json!(["fcvt", normalize_expr(value)]),
-        Expr::IntToFloat(value) => json!(["int_to_float", normalize_expr(value)]),
-        Expr::FloatToInt(value) => json!(["float_to_int", normalize_expr(value)]),
-        Expr::Clz(value) => json!(["clz", normalize_expr(value)]),
-        Expr::Cls(value) => json!(["cls", normalize_expr(value)]),
-        Expr::Rev(value) => json!(["rev", normalize_expr(value)]),
-        Expr::Rbit(value) => json!(["rbit", normalize_expr(value)]),
-        Expr::CondSelect {
-            cond,
-            if_true,
-            if_false,
-        } => json!([
-            "cond_select",
-            normalize_condition(*cond),
-            normalize_expr(if_true),
-            normalize_expr(if_false)
-        ]),
-        Expr::Compare { cond, lhs, rhs } => json!([
-            "compare",
-            normalize_condition(*cond),
-            normalize_expr(lhs),
-            normalize_expr(rhs)
-        ]),
-        Expr::StackSlot { offset, size } => json!(["stack_slot", offset, size]),
-        Expr::MrsRead(name) => json!(["mrs_read", name]),
-        Expr::Intrinsic { name, operands } => {
-            json!([
-                "intrinsic",
-                name.as_str(),
-                operands.iter().map(normalize_expr).collect::<Vec<_>>()
-            ])
-        }
-        Expr::AdrpImm(value) => json!(["adrp_imm", hex_addr(*value)]),
-        Expr::AdrImm(value) => json!(["adr_imm", hex_addr(*value)]),
-    }
-}
-
-fn normalize_reg(reg: &Reg) -> String {
-    match reg {
-        Reg::X(n) => format!("x{}", n),
-        Reg::W(n) => format!("w{}", n),
-        Reg::SP => "sp".to_string(),
-        Reg::PC => "pc".to_string(),
-        Reg::XZR => "xzr".to_string(),
-        Reg::Flags => "flags".to_string(),
-        Reg::V(n) => format!("v{}", n),
-        Reg::Q(n) => format!("q{}", n),
-        Reg::D(n) => format!("d{}", n),
-        Reg::S(n) => format!("s{}", n),
-        Reg::H(n) => format!("h{}", n),
-        Reg::VByte(n) => format!("vbyte{}", n),
-    }
-}
-
-fn normalize_condition(condition: Condition) -> &'static str {
-    match condition {
-        Condition::EQ => "eq",
-        Condition::NE => "ne",
-        Condition::CS => "cs",
-        Condition::CC => "cc",
-        Condition::MI => "mi",
-        Condition::PL => "pl",
-        Condition::VS => "vs",
-        Condition::VC => "vc",
-        Condition::HI => "hi",
-        Condition::LS => "ls",
-        Condition::GE => "ge",
-        Condition::LT => "lt",
-        Condition::GT => "gt",
-        Condition::LE => "le",
-        Condition::AL => "al",
-        Condition::NV => "nv",
-    }
+    serde_json::to_value(stmt).expect("IL statements serialise")
 }
 
 fn hex_addr(value: u64) -> String {
@@ -1190,7 +1018,7 @@ fn run_task(task: &TaskSpec, binary_path: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aeon::il::{e_add, e_intrinsic, e_load, e_sub};
+    use aeon::il::{e_add, e_intrinsic, e_load, e_sub, BranchCond, Condition, Expr, Reg};
     use serde_json::json;
     use std::path::PathBuf;
 
@@ -1396,6 +1224,10 @@ mod tests {
 
         for (function_addr, instructions, golden_name) in cases {
             let actual = normalize_reduced_instructions_artifact(function_addr, &instructions);
+            if updating_goldens() {
+                write_golden(golden_name, &actual);
+                continue;
+            }
             let expected = read_json(golden_path(golden_name));
             assert_eq!(
                 actual, expected,
@@ -1421,6 +1253,21 @@ mod tests {
                 golden_path(golden_name).to_str().unwrap(),
             )
             .expect("binary golden evaluation should succeed");
+            if updating_goldens() {
+                let mut reduced = run
+                    .evidence
+                    .iter()
+                    .find(|item| item.id == "ev-reduced-il")
+                    .expect("reduced IL evidence should exist")
+                    .value
+                    .clone();
+                // Goldens leave the hashes open; they are filled in from the
+                // binary under test when comparing.
+                reduced["binary_sha256"] = Value::Null;
+                reduced["function_sha256"] = Value::Null;
+                write_golden(golden_name, &reduced);
+                continue;
+            }
             assert_eq!(
                 run.outcome,
                 RunOutcome::Passed,
@@ -1493,6 +1340,19 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../eval/goldens")
             .join(name)
+    }
+
+    /// `AEON_UPDATE_GOLDENS=1 cargo test -p aeon-eval` rewrites the goldens
+    /// from the current output instead of comparing against them. Review the
+    /// diff before committing it.
+    fn updating_goldens() -> bool {
+        std::env::var_os("AEON_UPDATE_GOLDENS").is_some()
+    }
+
+    fn write_golden(name: &str, value: &Value) {
+        let mut text = serde_json::to_string_pretty(value).unwrap();
+        text.push('\n');
+        fs::write(golden_path(name), text).unwrap();
     }
 
     fn read_json(path: PathBuf) -> Value {

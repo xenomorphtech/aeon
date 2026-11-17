@@ -1,36 +1,58 @@
 {
-  "function": "0x2000",
   "binary_sha256": null,
-  "function_sha256": null,
   "blocks": [
     {
       "addr": "0x2000",
       "predecessors": [],
-      "successors": ["0x2008", "0x3000"],
       "stmts": [
-        [
-          "cond_branch",
-          ["compare", "ne", ["reg", "w8"], ["imm", "0x1"]],
-          ["imm", "0x3000"],
-          "0x2008"
-        ]
+        {
+          "CondBranch": {
+            "cond": {
+              "Compare": {
+                "cond": "NE",
+                "lhs": {
+                  "Reg": {
+                    "W": 8
+                  }
+                },
+                "rhs": {
+                  "Imm": 1
+                }
+              }
+            },
+            "fallthrough": 8200,
+            "target": {
+              "Imm": 12288
+            }
+          }
+        }
+      ],
+      "successors": [
+        "0x2008",
+        "0x3000"
       ]
     },
     {
       "addr": "0x2008",
-      "predecessors": ["0x2000"],
-      "successors": [],
+      "predecessors": [
+        "0x2000"
+      ],
       "stmts": [
-        ["ret"]
-      ]
+        "Ret"
+      ],
+      "successors": []
     },
     {
       "addr": "0x3000",
-      "predecessors": ["0x2000"],
-      "successors": [],
+      "predecessors": [
+        "0x2000"
+      ],
       "stmts": [
-        ["ret"]
-      ]
+        "Ret"
+      ],
+      "successors": []
     }
-  ]
+  ],
+  "function": "0x2000",
+  "function_sha256": null
 }

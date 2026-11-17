@@ -1,18 +1,54 @@
 {
-  "function": "0x4000",
   "binary_sha256": null,
-  "function_sha256": null,
   "blocks": [
     {
       "addr": "0x4000",
       "predecessors": [],
-      "successors": [],
       "stmts": [
-        ["assign", "x0", ["imm", "0xbabe"]],
-        ["assign", "x0", ["imm", "0xcafebabe"]],
-        ["assign", "x0", ["imm", "0xbeefcafebabe"]],
-        ["assign", "x0", ["imm", "0xdeadbeefcafebabe"]]
-      ]
+        {
+          "Assign": {
+            "dst": {
+              "X": 0
+            },
+            "src": {
+              "Imm": 47806
+            }
+          }
+        },
+        {
+          "Assign": {
+            "dst": {
+              "X": 0
+            },
+            "src": {
+              "Imm": 3405691582
+            }
+          }
+        },
+        {
+          "Assign": {
+            "dst": {
+              "X": 0
+            },
+            "src": {
+              "Imm": 209937112152766
+            }
+          }
+        },
+        {
+          "Assign": {
+            "dst": {
+              "X": 0
+            },
+            "src": {
+              "Imm": 16045690984503098046
+            }
+          }
+        }
+      ],
+      "successors": []
     }
-  ]
+  ],
+  "function": "0x4000",
+  "function_sha256": null
 }

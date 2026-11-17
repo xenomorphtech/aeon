@@ -1,16 +1,31 @@
 {
-  "function": "0x710",
   "binary_sha256": null,
-  "function_sha256": null,
   "blocks": [
     {
       "addr": "0x710",
       "predecessors": [],
-      "successors": [],
       "stmts": [
-        ["intrinsic", "bti", [["imm", "0x0"]]],
-        ["branch", ["imm", "0x680"]]
-      ]
+        {
+          "Intrinsic": {
+            "name": "bti",
+            "operands": [
+              {
+                "Imm": 0
+              }
+            ]
+          }
+        },
+        {
+          "Branch": {
+            "target": {
+              "Imm": 1664
+            }
+          }
+        }
+      ],
+      "successors": []
     }
-  ]
+  ],
+  "function": "0x710",
+  "function_sha256": null
 }

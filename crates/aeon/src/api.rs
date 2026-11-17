@@ -1879,10 +1879,7 @@ mod tests {
     fn has_stack_slot(value: &Value) -> bool {
         match value {
             Value::Object(map) => {
-                map.get("op")
-                    .and_then(Value::as_str)
-                    .is_some_and(|op| op == "stack_slot")
-                    || map.values().any(has_stack_slot)
+                map.contains_key("StackSlot") || map.values().any(has_stack_slot)
             }
             Value::Array(items) => items.iter().any(has_stack_slot),
             _ => false,
@@ -1950,7 +1947,7 @@ mod tests {
         assert!(
             frame["saved_regs"]
                 .as_array()
-                .is_some_and(|saved| saved.iter().any(|reg| reg["reg"] == "x29")),
+                .is_some_and(|saved| saved.iter().any(|reg| reg["reg"] == serde_json::json!({ "X": 29 }))),
             "stack frame summary should expose saved registers"
         );
         assert!(

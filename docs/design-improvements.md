@@ -205,8 +205,7 @@ with one registry generating dispatch, schema and docs. Add an error enum with
 stable codes. Put serde derives behind a feature in `aeonil` and delete most of
 the view layer.
 
-**Status (2026-11-17): requests and errors are typed; typed responses are
-open.**
+**Status (2026-11-17): requests, errors and the IL on the wire are typed.**
 
 - `aeon-frontend`'s `TOOLS` table is the only list of tools: name,
   description, request type and handler in one entry. Dispatch, the
@@ -230,12 +229,24 @@ open.**
 - The frontend's integration tests use the library crate instead of
   including `service.rs` by path.
 
+- `aeonil` and `aeon-reduce` have a `serde` feature that derives
+  `Serialize`/`Deserialize` on the IL and SSA types. The reduced-IL and SSA
+  tool results serialise those types directly, in serde's default shape
+  (`{"Assign": {"dst": {"X": 0}, "src": {"Imm": 5}}}`). The
+  `ExprView`/`StmtView`/`SsaExprView` mirror enums and their conversions are
+  deleted (`function_ir.rs`: 2,137 lines to 786), and so is `aeon-eval`'s own
+  third serialiser. **This changed the wire format**: statements were
+  `{"op": "assign", ...}` in tool results and `["assign", "x0", ...]` in
+  goldens, with addresses as hex strings; addresses inside IL are now
+  numbers. The goldens are regenerated;
+  `AEON_UPDATE_GOLDENS=1 cargo test -p aeon-eval` rewrites them.
+
 Open:
 
 - `sandbox.rs` still reports every failure as a string, so all of them are
   `emulation_failed`, including a misspelt register name.
-- Responses are still `serde_json::Value`, and the `ExprView`/`StmtView`
-  mirror enums are still there.
+- Tool results other than the IL are still built as `serde_json::Value` by
+  hand in `api.rs`.
 
 ## 7. Smaller items
 
@@ -309,7 +320,7 @@ folding, so reducing first gains nothing there.
 1, then 2: they fix a correctness risk rather than tidiness, and they make the
 JIT split in 3 mostly mechanical. Items 1 to 5 and 8 are done, and the
 differential test from item 2 covers scalar code, memory, branches, a sample
-of SIMD and the reducer, with no known disagreements. Item 6 is partly
-done. Next: the rest of item 6 (typed responses), then explicit
+of SIMD and the reducer, with no known disagreements. Item 6 is done
+but for typed non-IL responses. Next: explicit
 widths in the IL (see item 8), and the pass manager from item 7 with per-pass
 differential validation.
