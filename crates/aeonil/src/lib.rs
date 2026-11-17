@@ -70,7 +70,15 @@ pub enum BranchCond {
 pub enum Expr {
     // Basics
     Reg(Reg),
+    /// An integer literal with no width of its own. It takes the width of
+    /// the operation it is an operand of, which its sibling operand decides
+    /// (`w1 + 5` is a 32-bit addition); an operation on literals alone is
+    /// 64-bit.
     Imm(u64),
+    /// A 32-bit integer constant. Unlike `Imm` it makes the operation it is
+    /// an operand of 32-bit by itself, so it can stand in for a W register:
+    /// `Lsr(Imm32(a), Imm(b))` shifts within 32 bits.
+    Imm32(u32),
     FImm(f64),
 
     // Memory
@@ -374,6 +382,7 @@ impl Expr {
             // Leaf nodes — no children
             Expr::Reg(_)
             | Expr::Imm(_)
+            | Expr::Imm32(_)
             | Expr::FImm(_)
             | Expr::AdrpImm(_)
             | Expr::AdrImm(_)
@@ -470,6 +479,112 @@ impl Expr {
                 name: name.clone(),
                 operands: operands.iter().map(|op| f(op)).collect(),
             },
+        }
+    }
+}
+
+impl Expr {
+    /// The value of an integer constant, typed or not.
+    pub fn as_int_const(&self) -> Option<u64> {
+        match self {
+            Expr::Imm(value) => Some(*value),
+            Expr::Imm32(value) => Some(u64::from(*value)),
+            _ => None,
+        }
+    }
+
+    /// A constant that can replace a read of `reg` without changing the
+    /// width of any operation the read is an operand of. `None` for
+    /// registers that do not hold integers.
+    pub fn const_for_reg(reg: &Reg, value: u64) -> Option<Expr> {
+        match reg {
+            Reg::X(_) => Some(Expr::Imm(value)),
+            Reg::W(_) => Some(Expr::Imm32(value as u32)),
+            _ => None,
+        }
+    }
+
+    /// The width in bits of an integer expression, or `None` if the
+    /// expression has no width of its own (an untyped literal, or an
+    /// operation on untyped literals) or is not an integer.
+    ///
+    /// This is the one definition of integer width in AeonIL. An operation
+    /// takes the width of its first operand that has one. `SignExtend` and
+    /// `ZeroExtend` report the width of their source here; the value they
+    /// produce is 64-bit, which `is_32_bit_operand` accounts for.
+    pub fn int_bits(&self) -> Option<u8> {
+        match self {
+            Expr::Reg(Reg::W(_)) | Expr::Imm32(_) => Some(32),
+            Expr::Reg(Reg::X(_) | Reg::SP | Reg::PC | Reg::Flags) => Some(64),
+            Expr::Imm(_) | Expr::AdrpImm(_) | Expr::AdrImm(_) => None,
+            Expr::Load { size, .. } | Expr::StackSlot { size, .. } => Some((*size).max(1) * 8),
+            Expr::Add(lhs, rhs)
+            | Expr::Sub(lhs, rhs)
+            | Expr::Mul(lhs, rhs)
+            | Expr::Div(lhs, rhs)
+            | Expr::UDiv(lhs, rhs)
+            | Expr::And(lhs, rhs)
+            | Expr::Or(lhs, rhs)
+            | Expr::Xor(lhs, rhs)
+            | Expr::Shl(lhs, rhs)
+            | Expr::Lsr(lhs, rhs)
+            | Expr::Asr(lhs, rhs)
+            | Expr::Ror(lhs, rhs)
+            | Expr::FAdd(lhs, rhs)
+            | Expr::FSub(lhs, rhs)
+            | Expr::FMul(lhs, rhs)
+            | Expr::FDiv(lhs, rhs)
+            | Expr::FMax(lhs, rhs)
+            | Expr::FMin(lhs, rhs)
+            | Expr::Compare { lhs, rhs, .. } => lhs.int_bits().or_else(|| rhs.int_bits()),
+            Expr::Neg(inner)
+            | Expr::Abs(inner)
+            | Expr::Not(inner)
+            | Expr::FNeg(inner)
+            | Expr::FAbs(inner)
+            | Expr::FSqrt(inner)
+            | Expr::FCvt(inner)
+            | Expr::IntToFloat(inner)
+            | Expr::FloatToInt(inner)
+            | Expr::Clz(inner)
+            | Expr::Cls(inner)
+            | Expr::Rev(inner)
+            | Expr::Rbit(inner)
+            | Expr::SignExtend { src: inner, .. }
+            | Expr::ZeroExtend { src: inner, .. }
+            | Expr::Extract { src: inner, .. } => inner.int_bits(),
+            Expr::Insert { dst, .. } => dst.int_bits(),
+            Expr::CondSelect {
+                if_true, if_false, ..
+            } => if_true.int_bits().or_else(|| if_false.int_bits()),
+            Expr::FImm(_)
+            | Expr::Intrinsic { .. }
+            | Expr::MrsRead(_)
+            | Expr::Reg(
+                Reg::V(_)
+                | Reg::Q(_)
+                | Reg::D(_)
+                | Reg::S(_)
+                | Reg::H(_)
+                | Reg::VByte(_)
+                | Reg::XZR,
+            ) => None,
+        }
+    }
+
+    /// Whether this operand makes its operation 32-bit. A sign or zero
+    /// extension always yields a 64-bit value, whatever its source.
+    pub fn is_32_bit_operand(&self) -> bool {
+        !matches!(self, Expr::SignExtend { .. } | Expr::ZeroExtend { .. })
+            && self.int_bits() == Some(32)
+    }
+
+    /// Whether a binary operation on `lhs` and `rhs` is 32-bit: the first
+    /// operand with a width decides.
+    pub fn binary_is_32_bit(lhs: &Expr, rhs: &Expr) -> bool {
+        match lhs.int_bits() {
+            Some(_) => lhs.is_32_bit_operand(),
+            None => rhs.is_32_bit_operand(),
         }
     }
 }

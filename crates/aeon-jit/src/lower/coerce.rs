@@ -84,6 +84,7 @@ impl LoweringState {
             Expr::Imm(_) | Expr::AdrpImm(_) | Expr::AdrImm(_) | Expr::StackSlot { .. } => {
                 Some(types::I64)
             }
+            Expr::Imm32(_) => Some(types::I32),
             Expr::FImm(_) => Some(types::F64),
             Expr::Load { size, .. } => type_for_memory_size(*size).ok(),
             Expr::Add(lhs, rhs)

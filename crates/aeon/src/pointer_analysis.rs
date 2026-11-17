@@ -1434,7 +1434,7 @@ fn contains_pc_relative(expr: &Expr) -> bool {
             if_true, if_false, ..
         } => contains_pc_relative(if_true) || contains_pc_relative(if_false),
         Expr::Intrinsic { operands, .. } => operands.iter().any(contains_pc_relative),
-        Expr::Reg(_) | Expr::Imm(_) | Expr::FImm(_) | Expr::MrsRead(_) | Expr::StackSlot { .. } => {
+        Expr::Reg(_) | Expr::Imm(_) | Expr::Imm32(_) | Expr::FImm(_) | Expr::MrsRead(_) | Expr::StackSlot { .. } => {
             false
         }
     }

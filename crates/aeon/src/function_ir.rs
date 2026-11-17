@@ -633,6 +633,7 @@ fn collect_expr_stack_slots(
         }
         Expr::Reg(_)
         | Expr::Imm(_)
+        | Expr::Imm32(_)
         | Expr::FImm(_)
         | Expr::AdrpImm(_)
         | Expr::AdrImm(_)

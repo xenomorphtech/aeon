@@ -9,6 +9,12 @@ use aeonil::{BranchCond, Expr, Reg, Stmt};
 /// unversioned `SsaVar` (version=0).
 pub fn convert_expr(expr: &Expr) -> SsaExpr {
     match expr {
+        // The same shape as a read of a W register: the low 32 bits.
+        Expr::Imm32(v) => SsaExpr::Extract {
+            src: Box::new(SsaExpr::Imm(u64::from(*v))),
+            lsb: 0,
+            width: 32,
+        },
         Expr::Reg(Reg::XZR) => SsaExpr::Imm(0),
         Expr::Reg(Reg::PC) => panic!("PC should not appear in reduced IL"),
         Expr::Reg(r) => {

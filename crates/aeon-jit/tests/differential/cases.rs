@@ -407,6 +407,51 @@ pub const CASES: &[Case] = &[
         words: &[0x128000a1, 0x52800082, 0x1ac20c28, 0x1ac20829, 0x928000a3, 0xd2800084, 0x9ac40c6a, 0x9ac4086b],
     },
     Case {
+        name: "const_w_bitops",
+        asm: "mov w1, #0x80000000; clz w8, w1; cls w9, w1; rbit w10, w1; rev w11, w1; rev16 w12, w1; mvn w13, w1; neg w14, w1; mov w2, #0; clz w15, w2",
+        words: &[0x52b00001, 0x5ac01028, 0x5ac01429, 0x5ac0002a, 0x5ac0082b, 0x5ac0042c, 0x2a2103ed, 0x4b0103ee, 0x52800002, 0x5ac0104f],
+    },
+    Case {
+        name: "const_w_flags",
+        asm: "mov w1, #0x80000000; mov w2, #1; cmp w1, w2; cset x8, lt; cset x9, hi; cset x10, vs; subs w11, w1, w2; cset x12, mi; adds w13, w1, w1; cset x14, cs; cset x15, eq; tst w1, w1; cset x16, mi; negs w17, w1; cset x9, vs",
+        words: &[0x52b00001, 0x52800022, 0x6b02003f, 0x9a9fa7e8, 0x9a9f97e9, 0x9a9f77ea, 0x6b02002b, 0x9a9f57ec, 0x2b01002d, 0x9a9f37ee, 0x9a9f17ef, 0x6a01003f, 0x9a9f57f0, 0x6b0103f1, 0x9a9f77e9],
+    },
+    Case {
+        name: "const_w_branch",
+        asm: "mov w1, #-1; mov x8, #0; cbz w1, 1f; orr x8, x8, #1; 1: tbz w1, #31, 2f; orr x8, x8, #2; 2: cmp w1, #0; b.ge 3f; orr x8, x8, #4; 3: mov x9, x8",
+        words: &[0x12800001, 0xd2800008, 0x34000041, 0xb2400108, 0x36f80041, 0xb27f0108, 0x7100003f, 0x5400004a, 0xb27e0108, 0xaa0803e9],
+    },
+    Case {
+        name: "const_w_extend",
+        asm: "mov w1, #0x80000000; sxtw x8, w1; uxtw x9, w1; add x10, x0, w1, sxtw; add x11, x0, w1, uxtw #2; sxtb x12, w1; mov w2, #0x80; sxtb w13, w2; sxth x14, w2; smull x15, w1, w1; umull x16, w1, w1",
+        words: &[0x52b00001, 0x93407c28, 0x2a0103e9, 0x8b21c00a, 0x8b21480b, 0x93401c2c, 0x52801002, 0x13001c4d, 0x93403c4e, 0x9b217c2f, 0x9ba17c30],
+    },
+    Case {
+        name: "const_w_fp",
+        asm: "mov w1, #-3; scvtf d0, w1; ucvtf d1, w1; scvtf s2, w1; fmov s3, w1; fmov w8, s3; fmov x9, d0; fmov x10, d1; fmov w11, s2",
+        words: &[0x12800041, 0x1e620020, 0x1e630021, 0x1e220022, 0x1e270023, 0x1e260068, 0x9e660009, 0x9e66002a, 0x1e26004b],
+    },
+    Case {
+        name: "const_w_select",
+        asm: "mov w1, #5; mov w2, #-7; cmp x0, x3; csel w8, w1, w2, lt; csinc w9, w1, w2, ge; csinv w10, w1, w2, eq; csneg w11, w1, w2, hi; ccmp w1, w2, #0, ne; cset x12, gt; adc w13, w1, w2; sbc w14, w1, w2",
+        words: &[0x528000a1, 0x128000c2, 0xeb03001f, 0x1a82b028, 0x1a82a429, 0x5a82002a, 0x5a82842b, 0x7a421020, 0x9a9fd7ec, 0x1a02002d, 0x5a02002e],
+    },
+    Case {
+        name: "const_w_bitfield",
+        asm: "mov w1, #0xf0f0f0f0; ubfx w8, w1, #4, #8; sbfx w9, w1, #4, #8; bfi w1, w0, #8, #4; mov w10, w1; mov w2, #0x8001; ubfiz w11, w2, #12, #20; sbfiz x12, x2, #48, #16; extr w13, w2, w2, #5",
+        words: &[0x3204cfe1, 0x53042c28, 0x13042c29, 0x33180c01, 0x2a0103ea, 0x52900022, 0x53144c4b, 0x93503c4c, 0x1382144d],
+    },
+    Case {
+        name: "const_w_arith",
+        asm: "mov w1, #0xffff0000; mov w2, #0x2345; movk w2, #0x1, lsl #16; mul w8, w1, w2; madd w9, w1, w2, w1; msub w10, w1, w2, w0; add w11, w1, w2, lsl #20; sub w12, w2, w1, asr #3; and w13, w1, w2, ror #7; bic w14, w2, w1; eon w15, w1, w2; add x16, x1, x2",
+        words: &[0x52bfffe1, 0x528468a2, 0x72a00022, 0x1b027c28, 0x1b020429, 0x1b02802a, 0x0b02502b, 0x4b810c4c, 0x0ac21c2d, 0x0a21004e, 0x4a22002f, 0x8b020030],
+    },
+    Case {
+        name: "const_w_store",
+        asm: "mov w1, #0xbeef; movk w1, #0xdead, lsl #16; str w1, [x20]; strb w1, [x20, #4]; strh w1, [x20, #6]; ldr x8, [x20]; mov w2, #8; ldr x9, [x20, w2, uxtw]; ldr w10, [x20, x2]",
+        words: &[0x5297dde1, 0x72bbd5a1, 0xb9000281, 0x39001281, 0x79000e81, 0xf9400288, 0x52800102, 0xf8624a89, 0xb8626a8a],
+    },
+    Case {
         name: "const_copy_redefined",
         asm: "mov x1, #5; mov x2, x1; mov x1, #7; add x8, x2, x1; mov x9, x2; mov x3, x0; add x0, x0, #1; mov x10, x3",
         words: &[0xd28000a1, 0xaa0103e2, 0xd28000e1, 0x8b010048, 0xaa0203e9, 0xaa0003e3, 0x91000400, 0xaa0303ea],

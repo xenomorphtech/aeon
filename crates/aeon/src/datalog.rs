@@ -281,6 +281,7 @@ fn collect_expr_uses(prog: &mut FunctionDatalog, addr: u64, expr: &aeonil::Expr)
         }
         // Leaf expressions (constants, immediate values, etc.)
         Expr::Imm(_)
+        | Expr::Imm32(_)
         | Expr::FImm(_)
         | Expr::AdrpImm(_)
         | Expr::AdrImm(_)

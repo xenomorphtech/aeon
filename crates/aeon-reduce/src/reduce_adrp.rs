@@ -118,27 +118,32 @@ fn resolve_stmt_exprs_with_count(stmt: Stmt, env: &RegisterEnv) -> (Stmt, usize)
     }
 }
 
-/// A value that may replace a read of the register it was assigned to.
+/// The value that may replace later reads of `dst` after `dst = value`, if
+/// there is one.
 ///
-/// Only 64-bit constants in X registers qualify. Anything else changes
-/// meaning when moved:
+/// Only integer constants qualify. Anything else changes meaning when
+/// moved:
 /// - an expression over registers is wrong once one of them is redefined
 ///   (`x29 = sp` after `sp` moved);
-/// - AeonIL infers an operation's width from its register operands, so a
-///   constant in place of a W register turns a 32-bit shift or division
-///   into a 64-bit one;
 /// - a float constant read through a general-purpose register is a bit
 ///   pattern, not that float.
-fn is_forwardable(dst: &Reg, value: &Expr) -> bool {
-    matches!(dst, Reg::X(_)) && matches!(value, Expr::Imm(_) | Expr::AdrpImm(_) | Expr::AdrImm(_))
+///
+/// A constant assigned to a W register is forwarded as an `Imm32`, so the
+/// operations that read it stay 32-bit.
+fn forwardable(dst: &Reg, value: &Expr) -> Option<Expr> {
+    match (dst, value) {
+        (Reg::X(_), Expr::Imm(_) | Expr::AdrpImm(_) | Expr::AdrImm(_)) => Some(value.clone()),
+        (Reg::W(_), Expr::Imm(_) | Expr::Imm32(_)) => Expr::const_for_reg(dst, value.as_int_const()?),
+        _ => None,
+    }
 }
 
-/// Forward-propagate ADRP/ADR values and other 64-bit constants through
+/// Forward-propagate ADRP/ADR values and other integer constants through
 /// register assignments and fold `Add(AdrpImm(page), Imm(offset))` into
 /// `Imm(page + offset)`.
 ///
 /// This is the main entry point.  It walks the statement list in order,
-/// maintaining a `RegisterEnv` that maps X registers to their known constant
+/// maintaining a `RegisterEnv` that maps registers to their known constant
 /// values.  For each `Assign`, it resolves the source expression (substituting
 /// known register values), constant-folds, and then applies the ADRP+ADD
 /// pattern match.
@@ -155,10 +160,9 @@ pub(crate) fn resolve_adrp_add_with_stats(stmts: Vec<Stmt>) -> (Vec<Stmt>, usize
         match stmt {
             Stmt::Assign { dst, src } => {
                 let (folded, count) = resolve_and_fold_with_count(&src, &env);
-                if is_forwardable(&dst, &folded) {
-                    env.assign(dst.clone(), folded.clone());
-                } else {
-                    env.remove(&dst);
+                match forwardable(&dst, &folded) {
+                    Some(constant) => env.assign(dst.clone(), constant),
+                    None => env.remove(&dst),
                 }
                 result.push(Stmt::Assign { dst, src: folded });
                 resolutions += count;
@@ -365,5 +369,54 @@ mod tests {
         ];
         let result = resolve_adrp_add(stmts);
         assert_eq!(result[2], assign(Reg::X(19), Expr::Imm(0x5010)));
+    }
+
+    // A constant in a W register is forwarded as a 32-bit constant, so the
+    // shift that reads it stays within 32 bits.
+    #[test]
+    fn w_constant_is_forwarded_at_32_bits() {
+        let stmts = vec![
+            assign(Reg::W(1), Expr::Imm(0xffff_ffff)),
+            assign(
+                Reg::W(8),
+                aeonil::e_lsr(Expr::Reg(Reg::W(1)), Expr::Imm(4)),
+            ),
+            assign(
+                Reg::W(9),
+                aeonil::e_asr(Expr::Reg(Reg::W(1)), Expr::Reg(Reg::W(2))),
+            ),
+        ];
+        let result = resolve_adrp_add(stmts);
+        assert_eq!(result[1], assign(Reg::W(8), Expr::Imm32(0x0fff_ffff)));
+        // Not foldable, but still a 32-bit shift.
+        assert_eq!(
+            result[2],
+            assign(
+                Reg::W(9),
+                aeonil::e_asr(Expr::Imm32(0xffff_ffff), Expr::Reg(Reg::W(2)))
+            )
+        );
+    }
+
+    // Writing the W view ends what was known about the X view, and the
+    // other way round.
+    #[test]
+    fn w_and_x_views_invalidate_each_other() {
+        let stmts = vec![
+            assign(Reg::X(1), Expr::Imm(u64::MAX)),
+            assign(Reg::W(1), Expr::Imm(5)),
+            assign(Reg::X(8), e_add(Expr::Reg(Reg::X(1)), Expr::Imm(1))),
+            assign(Reg::X(1), Expr::Reg(Reg::X(0))),
+            assign(Reg::W(9), e_add(Expr::Reg(Reg::W(1)), Expr::Imm(1))),
+        ];
+        let result = resolve_adrp_add(stmts);
+        assert_eq!(
+            result[2],
+            assign(Reg::X(8), e_add(Expr::Reg(Reg::X(1)), Expr::Imm(1)))
+        );
+        assert_eq!(
+            result[4],
+            assign(Reg::W(9), e_add(Expr::Reg(Reg::W(1)), Expr::Imm(1)))
+        );
     }
 }

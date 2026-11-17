@@ -400,6 +400,7 @@ impl<'a> Executor<'a> {
         match expr {
             Expr::Reg(reg) => self.read_reg(reg),
             Expr::Imm(value) | Expr::AdrpImm(value) | Expr::AdrImm(value) => Value::U64(*value),
+            Expr::Imm32(value) => Value::U64(u64::from(*value)),
             Expr::FImm(value) => Value::F64(*value),
             Expr::Load { addr, size } => {
                 let cell_id =
@@ -2370,78 +2371,16 @@ fn offset_location(location: MemoryLocation, delta: i64, subtract: bool) -> Memo
     }
 }
 
-/// Whether an operand makes its operation 32-bit. A sign or zero extension
-/// always yields a 64-bit value, whatever the width of its source.
 fn is_32_bit_operand(expr: &Expr) -> bool {
-    !matches!(expr, Expr::SignExtend { .. } | Expr::ZeroExtend { .. })
-        && expr_bit_width(expr) == Some(32)
+    expr.is_32_bit_operand()
 }
 
 fn operand_is_32_bit(lhs: &Expr, rhs: &Expr) -> bool {
-    match expr_bit_width(lhs) {
-        Some(_) => is_32_bit_operand(lhs),
-        None => is_32_bit_operand(rhs),
-    }
+    Expr::binary_is_32_bit(lhs, rhs)
 }
 
 fn expr_bit_width(expr: &Expr) -> Option<u8> {
-    match expr {
-        Expr::Reg(Reg::W(_)) => Some(32),
-        Expr::Reg(Reg::X(_)) | Expr::Reg(Reg::SP) | Expr::Reg(Reg::PC) | Expr::Reg(Reg::Flags) => {
-            Some(64)
-        }
-        Expr::Imm(_) | Expr::AdrpImm(_) | Expr::AdrImm(_) => None,
-        Expr::Load { size, .. } | Expr::StackSlot { size, .. } => Some((*size).max(1) * 8),
-        Expr::Add(lhs, rhs)
-        | Expr::Sub(lhs, rhs)
-        | Expr::Mul(lhs, rhs)
-        | Expr::Div(lhs, rhs)
-        | Expr::UDiv(lhs, rhs)
-        | Expr::And(lhs, rhs)
-        | Expr::Or(lhs, rhs)
-        | Expr::Xor(lhs, rhs)
-        | Expr::Shl(lhs, rhs)
-        | Expr::Lsr(lhs, rhs)
-        | Expr::Asr(lhs, rhs)
-        | Expr::Ror(lhs, rhs)
-        | Expr::FAdd(lhs, rhs)
-        | Expr::FSub(lhs, rhs)
-        | Expr::FMul(lhs, rhs)
-        | Expr::FDiv(lhs, rhs)
-        | Expr::FMax(lhs, rhs)
-        | Expr::FMin(lhs, rhs)
-        | Expr::Compare { lhs, rhs, .. } => expr_bit_width(lhs).or_else(|| expr_bit_width(rhs)),
-        Expr::Neg(inner)
-        | Expr::Abs(inner)
-        | Expr::Not(inner)
-        | Expr::FNeg(inner)
-        | Expr::FAbs(inner)
-        | Expr::FSqrt(inner)
-        | Expr::FCvt(inner)
-        | Expr::IntToFloat(inner)
-        | Expr::FloatToInt(inner)
-        | Expr::Clz(inner)
-        | Expr::Cls(inner)
-        | Expr::Rev(inner)
-        | Expr::Rbit(inner)
-        | Expr::SignExtend { src: inner, .. }
-        | Expr::ZeroExtend { src: inner, .. }
-        | Expr::Extract { src: inner, .. } => expr_bit_width(inner),
-        Expr::Insert { dst, .. } => expr_bit_width(dst),
-        Expr::CondSelect {
-            if_true, if_false, ..
-        } => expr_bit_width(if_true).or_else(|| expr_bit_width(if_false)),
-        Expr::FImm(_)
-        | Expr::Intrinsic { .. }
-        | Expr::MrsRead(_)
-        | Expr::Reg(Reg::V(_))
-        | Expr::Reg(Reg::Q(_))
-        | Expr::Reg(Reg::D(_))
-        | Expr::Reg(Reg::S(_))
-        | Expr::Reg(Reg::H(_))
-        | Expr::Reg(Reg::VByte(_))
-        | Expr::Reg(Reg::XZR) => None,
-    }
+    expr.int_bits()
 }
 
 fn eval_condition(flags: Option<Nzcv>, cond: Condition) -> Option<bool> {

@@ -220,6 +220,7 @@ fn expr_contains_intrinsic(expr: &Expr) -> bool {
         }
         Expr::Reg(_)
         | Expr::Imm(_)
+        | Expr::Imm32(_)
         | Expr::FImm(_)
         | Expr::AdrpImm(_)
         | Expr::AdrImm(_)

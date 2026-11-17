@@ -2264,6 +2264,7 @@ fn format_expr(expr: &Expr) -> String {
     match expr {
         Expr::Reg(reg) => format_reg(reg),
         Expr::Imm(value) => format!("0x{value:x}"),
+        Expr::Imm32(value) => format!("0x{value:x}:32"),
         Expr::FImm(value) => format!("{value:?}"),
         Expr::Load { addr, size } => format!("load{}({})", size * 8, format_expr(addr)),
         Expr::Add(lhs, rhs) => format!("add({}, {})", format_expr(lhs), format_expr(rhs)),

@@ -13,6 +13,10 @@ pub fn fold_expr(expr: &Expr) -> Expr {
     // First, recursively fold all sub-expressions
     let folded = expr.map_subexprs(|e| fold_expr(e));
 
+    if let Some(constant) = fold_32_bit(&folded) {
+        return constant;
+    }
+
     // Then try to simplify the folded result
     match &folded {
         // --- Binary constant folding ---
@@ -83,8 +87,8 @@ pub fn fold_expr(expr: &Expr) -> Expr {
 
         // --- Shifts ---
         // A shift by a register takes the amount modulo the width, and that
-        // is what `Shl`/`Lsr`/`Asr` mean in every engine. Constants are only
-        // ever forwarded from X registers, so the width here is 64.
+        // is what `Shl`/`Lsr`/`Asr` mean in every engine. A 32-bit value
+        // was folded above, so the width here is 64.
         Expr::Shl(a, b) => match (a.as_ref(), b.as_ref()) {
             (Expr::Imm(a), Expr::Imm(b)) => Expr::Imm(a.wrapping_shl((*b % 64) as u32)),
             _ => folded,
@@ -111,6 +115,11 @@ pub fn fold_expr(expr: &Expr) -> Expr {
                 (Expr::Imm(dst), Expr::Imm(src)) => {
                     fold_movk(*dst, *src).map(Expr::Imm).unwrap_or(folded)
                 }
+                (Expr::Imm32(dst), Expr::Imm(src)) if *src <= u64::from(u32::MAX) => {
+                    fold_movk(u64::from(*dst), *src)
+                        .map(|value| Expr::Imm32(value as u32))
+                        .unwrap_or(folded)
+                }
                 _ => folded,
             }
         }
@@ -118,6 +127,48 @@ pub fn fold_expr(expr: &Expr) -> Expr {
         // Everything else: already recursively folded by map_subexprs
         _ => folded,
     }
+}
+
+/// Folds an operation on constants that a typed operand makes 32-bit.
+///
+/// Arithmetic and logic are 32-bit if either operand is an `Imm32`; a shift
+/// is 32-bit if the value shifted is, whatever its amount. The result is an
+/// `Imm32`, so it keeps the width in whatever it is an operand of.
+fn fold_32_bit(expr: &Expr) -> Option<Expr> {
+    let typed = |e: &Expr| matches!(e, Expr::Imm32(_));
+    let low = |e: &Expr| e.as_int_const().map(|value| value as u32);
+    let amount = |e: &Expr| e.as_int_const().map(|value| (value % 32) as u32);
+
+    let value = match expr {
+        Expr::Add(a, b) if typed(a) || typed(b) => low(a)?.wrapping_add(low(b)?),
+        Expr::Sub(a, b) if typed(a) || typed(b) => low(a)?.wrapping_sub(low(b)?),
+        Expr::Mul(a, b) if typed(a) || typed(b) => low(a)?.wrapping_mul(low(b)?),
+        Expr::And(a, b) if typed(a) || typed(b) => low(a)? & low(b)?,
+        Expr::Or(a, b) if typed(a) || typed(b) => low(a)? | low(b)?,
+        Expr::Xor(a, b) if typed(a) || typed(b) => low(a)? ^ low(b)?,
+        Expr::Div(a, b) if typed(a) || typed(b) => {
+            let (a, b) = (low(a)? as i32, low(b)? as i32);
+            if b == 0 {
+                return None;
+            }
+            a.wrapping_div(b) as u32
+        }
+        Expr::UDiv(a, b) if typed(a) || typed(b) => {
+            let (a, b) = (low(a)?, low(b)?);
+            if b == 0 {
+                return None;
+            }
+            a / b
+        }
+        Expr::Shl(a, b) if typed(a) => low(a)?.wrapping_shl(amount(b)?),
+        Expr::Lsr(a, b) if typed(a) => low(a)?.wrapping_shr(amount(b)?),
+        Expr::Asr(a, b) if typed(a) => (low(a)? as i32).wrapping_shr(amount(b)?) as u32,
+        Expr::Ror(a, b) if typed(a) => low(a)?.rotate_right(amount(b)?),
+        Expr::Not(a) if typed(a) => !low(a)?,
+        Expr::Neg(a) if typed(a) => low(a)?.wrapping_neg(),
+        _ => return None,
+    };
+    Some(Expr::Imm32(value))
 }
 
 /// `movk x, #0, lsl #s` clears a 16-bit field. Its immediate is lifted as
@@ -142,6 +193,7 @@ fn fold_movk_clearing_a_field(expr: &Expr) -> Option<Expr> {
     }
     Some(match fold_expr(&operands[0]) {
         Expr::Imm(old) => Expr::Imm(old & !(0xffffu64 << shift)),
+        Expr::Imm32(old) if *shift < 32 => Expr::Imm32(old & !(0xffffu32 << shift)),
         old => Expr::Intrinsic {
             name: name.clone(),
             operands: vec![old, operands[1].clone()],
@@ -388,5 +440,45 @@ mod tests {
     fn wrap_u64_overflow() {
         let expr = e_add(Expr::Imm(u64::MAX), Expr::Imm(1));
         assert_eq!(fold_expr(&expr), Expr::Imm(0));
+    }
+
+    #[test]
+    fn a_32_bit_constant_keeps_the_operation_32_bit() {
+        // lsr w, #4 of 0x8000_0000 stays within 32 bits; asr sign-extends
+        // from bit 31, not bit 63.
+        assert_eq!(
+            fold_expr(&e_lsr(Expr::Imm32(0x8000_0010), Expr::Imm(4))),
+            Expr::Imm32(0x0800_0001)
+        );
+        assert_eq!(
+            fold_expr(&aeonil::e_asr(Expr::Imm32(0x8000_0000), Expr::Imm(4))),
+            Expr::Imm32(0xf800_0000)
+        );
+        // The amount is taken modulo 32.
+        assert_eq!(
+            fold_expr(&e_shl(Expr::Imm32(1), Expr::Imm32(33))),
+            Expr::Imm32(2)
+        );
+        // Wraps at 32 bits, whichever side the typed operand is on.
+        assert_eq!(
+            fold_expr(&e_add(Expr::Imm(1), Expr::Imm32(u32::MAX))),
+            Expr::Imm32(0)
+        );
+        assert_eq!(
+            fold_expr(&aeonil::e_div(Expr::Imm32(0x8000_0000), Expr::Imm32(u32::MAX))),
+            Expr::Imm32(0x8000_0000)
+        );
+        assert_eq!(
+            fold_expr(&aeonil::e_not(Expr::Imm32(0))),
+            Expr::Imm32(u32::MAX)
+        );
+    }
+
+    #[test]
+    fn untyped_constants_still_fold_at_64_bits() {
+        assert_eq!(
+            fold_expr(&e_lsr(Expr::Imm(0x1_0000_0000), Expr::Imm(4))),
+            Expr::Imm(0x1000_0000)
+        );
     }
 }

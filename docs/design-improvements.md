@@ -290,7 +290,7 @@ IL and it matches Unicorn on every case. What was wrong, and what it does now:
 - **Forwarding.** Any assigned expression was substituted into later uses:
   past a redefinition of its source (`mov x29, sp` after SP moved), into an
   operand an intrinsic writes, across a GPR-to-FP move, and through repeated
-  loads. Only 64-bit constants in X registers are forwarded now.
+  loads. Only integer constants are forwarded now.
 - **Constant folding** treated `Div` as unsigned (`MIN / -1` gave 0), shifted
   by the full amount instead of modulo the width, and simplified the
   top-level operator of a `SetFlags` (`cmp x, #0` became a bare register,
@@ -305,12 +305,26 @@ Two `aeon-eval` goldens had pinned wrong output (a `branch x1` that is a
 `branch x16`, a stack offset subtracted twice, `tst` as `== 1`) and are
 regenerated.
 
-Still open, and the reason forwarding is so restricted: AeonIL infers an
-operation's width from its register operands, so replacing a W register with
-a constant changes a 32-bit shift or division into a 64-bit one. Explicit
-widths on `Expr` would make W-register constant propagation safe, and would
-let `MOVK` be an `Insert` instead of an intrinsic whose shift is implied by
-its operand.
+**Widths (2026-11-18).** AeonIL inferred an operation's width from its
+register operands, so replacing a W register with a constant turned a 32-bit
+shift or division into a 64-bit one, and constants in W registers could not
+be forwarded. Now:
+
+- `Expr::Imm32` is a constant that is 32-bit by itself. `Expr::Imm` stays an
+  untyped literal that takes the width of its sibling operand (`w1 + 5`),
+  which is what the lifter emits and what the 900-odd existing uses mean.
+- `Expr::int_bits` in `aeonil` is the one definition of an integer
+  expression's width. The interpreter uses it; the JIT keeps its own
+  Cranelift type inference, extended with the same rule for `Imm32`.
+- The reducer forwards a constant assigned to a W register as an `Imm32`
+  and folds operations on it at 32 bits. The differential test has nine
+  cases that read such a constant from shifts, divisions, flags, branches,
+  bit operations, extensions, FP moves, selects, bitfields and stores.
+
+This is the small version: a width on the one leaf that lacked it, not a
+width on every node. Not done: a constant known through the X view is not
+used for a read of the W view (or the reverse), and SSA still spells a
+32-bit value as an `Extract`.
 
 `aeon-instrument` still compiles the IL as lifted: Cranelift does its own
 folding, so reducing first gains nothing there.
@@ -321,6 +335,6 @@ folding, so reducing first gains nothing there.
 JIT split in 3 mostly mechanical. Items 1 to 5 and 8 are done, and the
 differential test from item 2 covers scalar code, memory, branches, a sample
 of SIMD and the reducer, with no known disagreements. Item 6 is done
-but for typed non-IL responses. Next: explicit
-widths in the IL (see item 8), and the pass manager from item 7 with per-pass
+but for typed non-IL responses. Constants carry their width where it
+matters (item 8). Next: the pass manager from item 7 with per-pass
 differential validation.

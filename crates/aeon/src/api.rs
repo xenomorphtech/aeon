@@ -1386,7 +1386,7 @@ pub(crate) fn expr_uses_register(expr: &Expr, register: &str) -> bool {
             expr_uses_register(lhs, register) || expr_uses_register(rhs, register)
         }
         // Constants and literals
-        Expr::Imm(_) | Expr::FImm(_) | Expr::AdrpImm(_) | Expr::AdrImm(_) => false,
+        Expr::Imm(_) | Expr::Imm32(_) | Expr::FImm(_) | Expr::AdrpImm(_) | Expr::AdrImm(_) => false,
         // Stack slots don't directly use registers (the SP is implicit)
         Expr::StackSlot { .. } => false,
         // System register reads don't use GPRs

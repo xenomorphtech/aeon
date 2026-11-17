@@ -27,6 +27,11 @@ impl LoweringState {
                     ty,
                 })
             }
+            // Typed: 32 bits whatever the context asks for, like a W register.
+            Expr::Imm32(value) => Ok(LoweredValue {
+                value: self.iconst(builder, types::I32, u64::from(*value))?,
+                ty: types::I32,
+            }),
             Expr::FImm(value) => {
                 let ty = self.resolve_float_type(hint, Some(expr))?;
                 let value = match ty {

@@ -110,6 +110,17 @@ CASES = [
     ("const_w_shift", "mov w1, #-1; lsr w8, w1, #4; asr w9, w1, #4; mov w2, #0x80000000; asr w10, w2, #8; ror w11, w2, #4; lsr x12, x1, #4"),
     ("const_w_shift_reg", "mov w1, #-1; mov w2, #36; lsr w8, w1, w2; lsl w9, w1, w2; asr w10, w1, w2; mov x3, #-1; mov x4, #68; lsr x11, x3, x4"),
     ("const_div", "mov w1, #-6; mov w2, #4; sdiv w8, w1, w2; udiv w9, w1, w2; mov x3, #-6; mov x4, #4; sdiv x10, x3, x4; udiv x11, x3, x4"),
+    # A constant in a W register, read by every kind of operation whose
+    # result depends on being 32-bit.
+    ("const_w_bitops", "mov w1, #0x80000000; clz w8, w1; cls w9, w1; rbit w10, w1; rev w11, w1; rev16 w12, w1; mvn w13, w1; neg w14, w1; mov w2, #0; clz w15, w2"),
+    ("const_w_flags", "mov w1, #0x80000000; mov w2, #1; cmp w1, w2; cset x8, lt; cset x9, hi; cset x10, vs; subs w11, w1, w2; cset x12, mi; adds w13, w1, w1; cset x14, cs; cset x15, eq; tst w1, w1; cset x16, mi; negs w17, w1; cset x9, vs"),
+    ("const_w_branch", "mov w1, #-1; mov x8, #0; cbz w1, 1f; orr x8, x8, #1; 1: tbz w1, #31, 2f; orr x8, x8, #2; 2: cmp w1, #0; b.ge 3f; orr x8, x8, #4; 3: mov x9, x8"),
+    ("const_w_extend", "mov w1, #0x80000000; sxtw x8, w1; uxtw x9, w1; add x10, x0, w1, sxtw; add x11, x0, w1, uxtw #2; sxtb x12, w1; mov w2, #0x80; sxtb w13, w2; sxth x14, w2; smull x15, w1, w1; umull x16, w1, w1"),
+    ("const_w_fp", "mov w1, #-3; scvtf d0, w1; ucvtf d1, w1; scvtf s2, w1; fmov s3, w1; fmov w8, s3; fmov x9, d0; fmov x10, d1; fmov w11, s2"),
+    ("const_w_select", "mov w1, #5; mov w2, #-7; cmp x0, x3; csel w8, w1, w2, lt; csinc w9, w1, w2, ge; csinv w10, w1, w2, eq; csneg w11, w1, w2, hi; ccmp w1, w2, #0, ne; cset x12, gt; adc w13, w1, w2; sbc w14, w1, w2"),
+    ("const_w_bitfield", "mov w1, #0xf0f0f0f0; ubfx w8, w1, #4, #8; sbfx w9, w1, #4, #8; bfi w1, w0, #8, #4; mov w10, w1; mov w2, #0x8001; ubfiz w11, w2, #12, #20; sbfiz x12, x2, #48, #16; extr w13, w2, w2, #5"),
+    ("const_w_arith", "mov w1, #0xffff0000; mov w2, #0x2345; movk w2, #0x1, lsl #16; mul w8, w1, w2; madd w9, w1, w2, w1; msub w10, w1, w2, w0; add w11, w1, w2, lsl #20; sub w12, w2, w1, asr #3; and w13, w1, w2, ror #7; bic w14, w2, w1; eon w15, w1, w2; add x16, x1, x2"),
+    ("const_w_store", "mov w1, #0xbeef; movk w1, #0xdead, lsl #16; str w1, [x20]; strb w1, [x20, #4]; strh w1, [x20, #6]; ldr x8, [x20]; mov w2, #8; ldr x9, [x20, w2, uxtw]; ldr w10, [x20, x2]"),
     ("const_copy_redefined", "mov x1, #5; mov x2, x1; mov x1, #7; add x8, x2, x1; mov x9, x2; mov x3, x0; add x0, x0, #1; mov x10, x3"),
     ("const_w_alias", "mov x1, #-1; mov w1, #5; add x8, x1, #1; mov x2, #0x56780000; movk x2, #0x1234, lsl #32; add w2, w2, #1; add x9, x2, #0"),
     ("const_adr", "adr x1, .; add x8, x1, #0x10; sub x9, x1, #4; mov x1, x0; add x10, x1, #0x10"),
