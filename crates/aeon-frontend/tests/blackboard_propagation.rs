@@ -7,10 +7,7 @@
 use serde_json::json;
 use std::path::PathBuf;
 
-#[path = "../src/service.rs"]
-mod service;
-
-use service::AeonFrontend;
+use aeon_frontend::service::AeonFrontend;
 
 fn sample_binary_path() -> String {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

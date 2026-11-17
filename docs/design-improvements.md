@@ -185,27 +185,31 @@ with one registry generating dispatch, schema and docs. Add an error enum with
 stable codes. Put serde derives behind a feature in `aeonil` and delete most of
 the view layer.
 
-**Status (2026-11-17): registry and frontend error codes done; the rest open.**
+**Status (2026-11-17): requests are typed; the core error enum and typed
+responses are open.**
 
 - `aeon-frontend`'s `TOOLS` table is the only list of tools: name,
-  description, argument schema and handler in one entry. Dispatch, the
+  description, request type and handler in one entry. Dispatch, the
   `tools/list` result and the README table are derived from it. Before, the
   dispatch match and the schema list were separate, and the schema list
   existed twice, one copy dead. A test calls every listed tool.
+- Each tool's arguments are a struct in `requests.rs` deriving `Deserialize`
+  and `schemars::JsonSchema`. The published schema is generated from the same
+  type the arguments are parsed into; the hand-written schemas and the
+  per-handler `args.get(..)` code are gone. Arguments of the wrong type are
+  now rejected instead of silently replaced by the default.
 - Tool calls fail with a `ToolError` carrying an `ErrorCode` whose string
   form is stable: `unknown_tool`, `no_binary_loaded`, `invalid_argument`,
   `analysis_failed`. HTTP returns it as `"code"` next to `"error"`; MCP puts
   it in the result's `_meta`. `call_tool` still returns the message alone.
+- The frontend's integration tests use the library crate instead of
+  including `service.rs` by path.
 
 Open:
 
 - The core still returns `Result<_, String>`, so everything it reports is
   one code, `analysis_failed`. Splitting that (not found, out of range,
   load failure, ...) needs an error enum in `aeon`.
-- Arguments are still pulled out of `serde_json::Value` by hand in each
-  handler, and the schema is written separately from that code. Typed
-  request structs deriving `Deserialize` and `JsonSchema` would make the
-  schema and the parsing one thing; that adds a `schemars` dependency.
 - Responses are still `serde_json::Value`, and the `ExprView`/`StmtView`
   mirror enums are still there.
 
@@ -281,7 +285,7 @@ folding, so reducing first gains nothing there.
 1, then 2: they fix a correctness risk rather than tidiness, and they make the
 JIT split in 3 mostly mechanical. Items 1 to 5 and 8 are done, and the
 differential test from item 2 covers scalar code, memory, branches, a sample
-of SIMD and the reducer, with no known disagreements. Item 6 is started.
-Next: the rest of item 6 (a core error enum, typed requests), then explicit
+of SIMD and the reducer, with no known disagreements. Item 6 is partly
+done. Next: the rest of item 6 (a core error enum, typed responses), then explicit
 widths in the IL (see item 8), and the pass manager from item 7 with per-pass
 differential validation.

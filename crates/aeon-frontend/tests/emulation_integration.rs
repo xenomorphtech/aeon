@@ -10,10 +10,7 @@
 use serde_json::json;
 use std::path::PathBuf;
 
-#[path = "../src/service.rs"]
-mod service;
-
-use service::AeonFrontend;
+use aeon_frontend::service::AeonFrontend;
 
 fn sample_binary_path() -> String {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -293,7 +290,7 @@ fn emulate_snippet_alias_works() {
 /// Test native emulation: both tools registered in tools_list
 #[test]
 fn both_emulation_tools_in_schema() {
-    let tools = service::tools_list();
+    let tools = aeon_frontend::service::tools_list();
     let tool_array = tools
         .get("tools")
         .and_then(|t| t.as_array())
@@ -321,7 +318,7 @@ fn both_emulation_tools_in_schema() {
 /// Test schema for emulate_snippet_il
 #[test]
 fn emulate_snippet_il_has_valid_schema() {
-    let tools = service::tools_list();
+    let tools = aeon_frontend::service::tools_list();
     let tool_array = tools
         .get("tools")
         .and_then(|t| t.as_array())
@@ -369,7 +366,7 @@ fn emulate_snippet_il_has_valid_schema() {
 /// Test schema for emulate_snippet_native
 #[test]
 fn emulate_snippet_native_has_valid_schema() {
-    let tools = service::tools_list();
+    let tools = aeon_frontend::service::tools_list();
     let tool_array = tools
         .get("tools")
         .and_then(|t| t.as_array())

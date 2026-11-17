@@ -2,4 +2,5 @@
 
 pub mod http;
 pub mod mcp;
+pub mod requests;
 pub mod service;

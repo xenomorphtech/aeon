@@ -4,13 +4,7 @@
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
-// Re-use the test harness from aeon-frontend
-#[path = "../src/service.rs"]
-mod service;
-#[path = "../src/mcp.rs"]
-mod mcp;
-
-use service::AeonFrontend;
+use aeon_frontend::service::AeonFrontend;
 
 fn sample_binary_path() -> String {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
