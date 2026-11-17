@@ -20,6 +20,9 @@ jobs:
         with:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
+      # aeon-instrument's tests compile the C samples for AArch64.
+      - name: Install the AArch64 cross compiler
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
       # Only aeon-jit is kept rustfmt-clean so far.
       - name: Format
         run: cargo fmt -p aeon-jit -- --check
