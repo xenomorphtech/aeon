@@ -1,6 +1,6 @@
-//! SSA optimization pipeline -- orchestrates the SSA passes in the
-//! recommended order and provides a convenience entry point for the
-//! full reduce + SSA + optimize sequence.
+//! SSA optimization pipeline -- the SSA pass table, the fixed-point runner
+//! that drives it, and a convenience entry point for the full
+//! reduce + SSA + optimize sequence.
 
 use super::construct::SsaFunction;
 use super::copy_prop;
@@ -10,11 +10,72 @@ use super::dead_branch;
 use super::domtree::DomTree;
 use super::sccp;
 use super::use_def::UseDefMap;
+use super::validate::{validate_ssa, SsaValidationReport};
+use crate::pass::PassCounts;
 
 const MAX_ITERATIONS: usize = 10;
 
+/// A rewrite of a function in SSA form. Returns whether it changed
+/// anything.
+pub struct SsaPass {
+    pub name: &'static str,
+    run: fn(&mut SsaFunction, &mut UseDefMap) -> bool,
+    /// The pass leaves the use/def map unusable when it changes something,
+    /// so the map is rebuilt before the next pass.
+    invalidates_use_def: bool,
+}
+
+/// The SSA pipeline, in the order of one iteration.
+pub const SSA_PASSES: &[SsaPass] = &[
+    // Propagates constants and decides branches on them.
+    SsaPass {
+        name: "sccp",
+        run: sccp::run,
+        invalidates_use_def: false,
+    },
+    // Removing blocks renumbers the rest, and the use/def map locates
+    // statements by block id.
+    SsaPass {
+        name: "dead-branch",
+        run: dead_branch::run,
+        invalidates_use_def: true,
+    },
+    // Copy propagation and phi simplification.
+    SsaPass {
+        name: "copy-prop",
+        run: copy_prop::run,
+        invalidates_use_def: false,
+    },
+    // The dominator tree is built here: the block structure may have
+    // changed since the last iteration.
+    SsaPass {
+        name: "cse",
+        run: |func, use_def| {
+            let dom_tree = DomTree::build(func);
+            cse::run(func, &dom_tree, use_def)
+        },
+        invalidates_use_def: false,
+    },
+    SsaPass {
+        name: "dce",
+        run: dce::run,
+        invalidates_use_def: false,
+    },
+];
+
 /// Run all cross-block SSA optimizations on the given function to a fixed point.
 pub fn optimize_ssa(func: &mut SsaFunction) {
+    optimize_ssa_observed(func, &mut |_, _| {});
+}
+
+/// As `optimize_ssa`, calling `observe` with a pass's name and the function
+/// every time a pass has changed it. Returns, per pass, the number of
+/// iterations in which it changed the function.
+pub fn optimize_ssa_observed(
+    func: &mut SsaFunction,
+    observe: &mut dyn FnMut(&'static str, &SsaFunction),
+) -> PassCounts {
+    let mut counts = PassCounts::default();
     let mut use_def = UseDefMap::build(func);
 
     let mut iteration = 0;
@@ -23,31 +84,52 @@ pub fn optimize_ssa(func: &mut SsaFunction) {
         changed = false;
         iteration += 1;
 
-        // 1. SCCP: propagate constants, identify dead branches
-        changed |= sccp::run(func, &mut use_def);
-
-        // 2. Dead branch/block elimination. Removing blocks renumbers the
-        // rest, and the use/def map locates statements by block id.
-        if dead_branch::run(func, &mut use_def) {
-            changed = true;
-            use_def = UseDefMap::build(func);
+        for pass in SSA_PASSES {
+            let pass_changed = (pass.run)(func, &mut use_def);
+            counts.add(pass.name, usize::from(pass_changed));
+            if pass_changed {
+                changed = true;
+                if pass.invalidates_use_def {
+                    use_def = UseDefMap::build(func);
+                }
+                observe(pass.name, func);
+            }
         }
-
-        // 3. Copy propagation + phi simplification
-        changed |= copy_prop::run(func, &mut use_def);
-
-        // 4. CSE (rebuild domtree since block structure may have changed)
-        let dom_tree = DomTree::build(func);
-        changed |= cse::run(func, &dom_tree, &mut use_def);
-
-        // 5. DCE: clean up dead definitions
-        changed |= dce::run(func, &mut use_def);
 
         // Rebuild use_def for next iteration since passes may have
         // made incremental updates that drifted from reality
         if changed {
             use_def = UseDefMap::build(func);
         }
+    }
+    counts
+}
+
+/// The first pass after which a function stopped being valid SSA.
+#[derive(Debug, Clone)]
+pub struct SsaPassFailure {
+    pub pass: &'static str,
+    pub report: SsaValidationReport,
+}
+
+/// As `optimize_ssa`, validating the function after every pass that changed
+/// it. On failure the function is left as the remaining passes made it.
+///
+/// `func` must be valid on entry; an error names the first pass whose output
+/// was not.
+pub fn optimize_ssa_validated(func: &mut SsaFunction) -> Result<PassCounts, SsaPassFailure> {
+    let mut failure = None;
+    let counts = optimize_ssa_observed(func, &mut |pass, func| {
+        if failure.is_none() {
+            let report = validate_ssa(func);
+            if !report.is_valid {
+                failure = Some(SsaPassFailure { pass, report });
+            }
+        }
+    });
+    match failure {
+        Some(failure) => Err(failure),
+        None => Ok(counts),
     }
 }
 

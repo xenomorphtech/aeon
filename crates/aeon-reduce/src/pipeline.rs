@@ -1,17 +1,15 @@
-//! Reduction pipeline -- sequences the individual peephole passes (const,
-//! adrp, pair, flags, ext) in the correct order for intra-block
-//! reduction.
+//! Reduction entry points. The passes and their order are in `crate::pass`;
+//! this module runs them and derives the quality metrics.
 
 use std::collections::HashSet;
 
 use aeonil::{Expr, Stmt};
 
-use crate::reduce_adrp::resolve_adrp_add_with_stats;
-use crate::reduce_const::fold_constants;
-use crate::reduce_ext::fold_extensions;
-use crate::reduce_flags::{eliminate_dead_flags, eliminate_dead_flags_cfg, fuse_flags_with_stats};
-use crate::reduce_pair::flatten_pairs;
-use crate::reduce_stack::{detect_prologue, recognize_stack_frame, rewrite_stack_accesses};
+use crate::pass::{
+    run_block_passes, run_cfg_passes, PassCounts, BLOCK_PASSES, CFG_PASSES, FORWARD_CONSTANTS,
+    FUSE_FLAGS, STACK_SLOTS,
+};
+use crate::reduce_stack::{detect_prologue, recognize_stack_frame};
 use crate::ssa::cfg::{build_cfg, Cfg};
 use crate::ssa::construct::{build_ssa, SsaFunction};
 use crate::ssa::pipeline::optimize_ssa;
@@ -38,33 +36,14 @@ impl ReductionMetrics {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-struct BlockReductionMetrics {
-    adrp_resolutions: usize,
-    flag_fusions: usize,
-}
-
-fn reduce_block_local_with_metrics(stmts: Vec<Stmt>) -> (Vec<Stmt>, BlockReductionMetrics) {
-    let stmts = flatten_pairs(stmts); // 1. structural
-    let stmts = fold_constants(stmts); // 2. expression-level
-    let (stmts, adrp_resolutions) = resolve_adrp_add_with_stats(stmts); // 3. multi-stmt, RegisterEnv
-    let stmts = fold_constants(stmts); // 4. again (forwarding may produce foldable exprs)
-    let (stmts, flag_fusions) = fuse_flags_with_stats(stmts); // 5. multi-stmt, flag tracking
-    let stmts = eliminate_dead_flags(stmts); // 6. liveness
-    let stmts = fold_extensions(stmts); // 7. expression-level
-
-    (
-        stmts,
-        BlockReductionMetrics {
-            adrp_resolutions,
-            flag_fusions,
-        },
-    )
-}
-
 /// Apply only the block-local reductions.
 pub fn reduce_block_local(stmts: Vec<Stmt>) -> Vec<Stmt> {
-    reduce_block_local_with_metrics(stmts).0
+    run_block_passes(
+        BLOCK_PASSES,
+        stmts,
+        &mut PassCounts::default(),
+        &mut |_, _| {},
+    )
 }
 
 /// Apply the historical single-block pipeline, including immediate stack-frame
@@ -80,24 +59,12 @@ pub fn reduce_block(stmts: Vec<Stmt>) -> Vec<Stmt> {
 /// stack-slot rewriting uses one shared prologue from the function entry.
 pub fn reduce_function_cfg(instructions: &[(u64, Stmt, Vec<u64>)]) -> Cfg {
     let mut cfg = build_cfg(instructions);
-
-    for block in &mut cfg.blocks {
-        block.stmts = reduce_block_local(std::mem::take(&mut block.stmts));
-    }
-    // A block cannot tell whether its flags are read later; the function can.
-    eliminate_dead_flags_cfg(&mut cfg);
-
-    let prologue = cfg
-        .blocks
-        .get(cfg.entry as usize)
-        .and_then(|entry| detect_prologue(&entry.stmts));
-
-    if let Some(prologue) = prologue.as_ref() {
-        for block in &mut cfg.blocks {
-            block.stmts = rewrite_stack_accesses(std::mem::take(&mut block.stmts), prologue);
-        }
-    }
-
+    run_cfg_passes(
+        CFG_PASSES,
+        &mut cfg,
+        &mut PassCounts::default(),
+        &mut |_, _, _| {},
+    );
     cfg
 }
 
@@ -112,37 +79,33 @@ pub fn reduce_function_cfg_with_metrics(
     }
 
     let mut cfg = build_cfg(instructions);
-    for block in &mut cfg.blocks {
-        let (stmts, block_metrics) =
-            reduce_block_local_with_metrics(std::mem::take(&mut block.stmts));
-        block.stmts = stmts;
-        metrics.adrp_resolutions += block_metrics.adrp_resolutions;
-        metrics.flag_fusions += block_metrics.flag_fusions;
-    }
-    eliminate_dead_flags_cfg(&mut cfg);
-
-    let prologue = cfg
-        .blocks
-        .get(cfg.entry as usize)
-        .and_then(|entry| detect_prologue(&entry.stmts));
-
-    if let Some(prologue) = prologue.as_ref() {
-        metrics.eligible_stack_accesses = cfg
-            .blocks
-            .iter()
-            .map(|block| count_eligible_stack_accesses(&block.stmts, prologue.has_frame_pointer))
-            .sum();
-
-        for block in &mut cfg.blocks {
-            block.stmts = rewrite_stack_accesses(std::mem::take(&mut block.stmts), prologue);
+    let mut counts = PassCounts::default();
+    run_cfg_passes(CFG_PASSES, &mut cfg, &mut counts, &mut |name, done, cfg| {
+        if name != STACK_SLOTS {
+            return;
         }
-
-        metrics.stack_slots_recognized = cfg
+        if done {
+            metrics.stack_slots_recognized = cfg
+                .blocks
+                .iter()
+                .map(|block| count_recognized_stack_slots(&block.stmts))
+                .sum();
+        } else if let Some(prologue) = cfg
             .blocks
-            .iter()
-            .map(|block| count_recognized_stack_slots(&block.stmts))
-            .sum();
-    }
+            .get(cfg.entry as usize)
+            .and_then(|entry| detect_prologue(&entry.stmts))
+        {
+            metrics.eligible_stack_accesses = cfg
+                .blocks
+                .iter()
+                .map(|block| {
+                    count_eligible_stack_accesses(&block.stmts, prologue.has_frame_pointer)
+                })
+                .sum();
+        }
+    });
+    metrics.adrp_resolutions = counts.get(FORWARD_CONSTANTS);
+    metrics.flag_fusions = counts.get(FUSE_FLAGS);
 
     let ssa_before = build_ssa(&cfg);
     metrics.ssa_vars_before_optimization = count_ssa_vars(&ssa_before);

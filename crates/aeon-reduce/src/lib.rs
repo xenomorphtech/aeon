@@ -3,6 +3,7 @@
 /// Top-level modules implement peephole/local reductions on AeonIL statements,
 /// while the `ssa` submodule provides SSA construction, analysis, and transforms.
 pub mod env;
+pub mod pass;
 pub mod pipeline;
 pub mod reduce_adrp;
 pub mod reduce_const;

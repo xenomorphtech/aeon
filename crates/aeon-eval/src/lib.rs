@@ -1305,6 +1305,54 @@ mod tests {
         assert_eq!(validation.value["issue_count"], json!(0));
     }
 
+    /// Every SSA pass must hand valid SSA to the next one, on every
+    /// function of every sample binary, not only at the end of the pipeline.
+    #[test]
+    fn every_ssa_pass_keeps_sample_functions_valid() {
+        use aeon_reduce::ssa::pipeline::optimize_ssa_validated;
+
+        let samples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../samples");
+        let mut checked = 0usize;
+        let mut problems = Vec::new();
+        for entry in fs::read_dir(samples).expect("samples directory") {
+            let path = entry.expect("directory entry").path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("elf") {
+                continue;
+            }
+            let session =
+                AeonSession::load(path.to_str().expect("utf-8 path")).expect("load sample");
+            let addrs: Vec<u64> = session.binary().functions.iter().map(|f| f.addr).collect();
+            for addr in addrs {
+                let Ok(instructions) = session.lift_function_instructions(addr) else {
+                    continue;
+                };
+                let cfg = reduce_function_cfg_with_metrics(&instructions).0;
+                let mut ssa = build_ssa(&cfg);
+                if !validate_ssa(&ssa).is_valid {
+                    // Not the optimizer's doing; construction is checked
+                    // elsewhere.
+                    continue;
+                }
+                checked += 1;
+                if let Err(failure) = optimize_ssa_validated(&mut ssa) {
+                    problems.push(format!(
+                        "{} {addr:#x}: after `{}`: {:?}",
+                        path.file_name().unwrap().to_string_lossy(),
+                        failure.pass,
+                        failure.report.issues.first()
+                    ));
+                }
+            }
+        }
+        assert!(checked > 0, "no sample function was checked");
+        assert!(
+            problems.is_empty(),
+            "{} of {checked} functions:\n{}",
+            problems.len(),
+            problems.join("\n")
+        );
+    }
+
     #[test]
     fn sample_corpus_manifest_lists_expected_cases() {
         let manifest = read_json(

@@ -251,9 +251,24 @@ Open:
 ## 7. Smaller items
 
 - **Two reduction pipelines:** `aeon-reduce/src/pipeline.rs` and
-  `ssa/pipeline.rs` have fixed pass orders in free functions. A small `Pass`
-  trait and a pass manager would make ordering, metrics and per-pass validation
-  uniform.
+  `ssa/pipeline.rs` had fixed pass orders in free functions.
+
+  **Status (2026-11-18): done.** Each stage is a table of named passes:
+  `BLOCK_PASSES` and `CFG_PASSES` in `aeon-reduce/src/pass.rs`, `SSA_PASSES`
+  in `ssa/pipeline.rs`. A table's order is the pipeline's order. One runner
+  per stage applies a table, collects per-pass counts (`PassCounts`) and
+  calls an observer after every pass. The metrics are read from the counts,
+  and `reduce_function_cfg` and its `_with_metrics` twin are one code path.
+  Per-pass validation, in `aeon-jit/tests/differential.rs`:
+  - the reducer is run against Unicorn after every block pass that changed
+    the IL, so a disagreement reads ``after pass `fuse-flags`: ...``;
+  - `optimize_ssa_validated` checks SSA validity after every SSA pass, on
+    every differential case and on every function of the sample binary.
+
+  Not done: the function-level passes (cross-block dead flags, stack
+  slots) are not executed by any engine, so they are only covered by their
+  unit tests and the goldens; and there is no width check on the IL between
+  passes.
 - **Layering:** `aeon-swarm` depends on `aeon-frontend`, an orchestrator
   depending on the transport layer. Extract the service into its own crate.
 - **Repo hygiene:** the root has about 35 generated status reports, and the
@@ -343,5 +358,6 @@ JIT split in 3 mostly mechanical. Items 1 to 5 and 8 are done, and the
 differential test from item 2 covers scalar code, memory, branches, a sample
 of SIMD and the reducer, with no known disagreements. Item 6 is done
 but for typed non-IL responses. Constants carry their width where it
-matters (item 8). Next: the pass manager from item 7 with per-pass
-differential validation.
+matters (item 8), and the reducer's passes are tables that are validated
+pass by pass (item 7). What remains is the rest of item 7 (layering, repo
+hygiene, CI, panics) and the leftovers listed under items 5, 6 and 8.

@@ -9,9 +9,10 @@
 //! 1. natively under Unicorn, which is the reference;
 //! 2. lifted to AeonIL and interpreted (`aeon::emulation::execute_block`);
 //! 3. lifted to AeonIL, JIT-compiled and executed on the host;
-//! 4. as 3, but with each block passed through
-//!    `aeon_reduce::pipeline::reduce_block_local` first, which checks that
-//!    the reducer preserves behaviour.
+//! 4. as 3, but with each block passed through the reducer's block-local
+//!    pipeline first, once for every prefix of `aeon_reduce::pass::BLOCK_PASSES`
+//!    that changes the IL. This checks that every pass preserves behaviour,
+//!    and a disagreement names the first pass after which it appears.
 //!
 //! Afterwards x0-x30, SP, NZCV, v0-v31 and a data region must match the
 //! reference. Snippets may branch: the interpreter and the JIT work a block at
@@ -30,6 +31,7 @@ use aeon::emulation::{
     execute_block, BackingStore, BlockStop, MemoryLocation, MissingMemoryPolicy, Value,
 };
 use aeon_jit::{JitCompiler, JitConfig, JitContext, JitEntry};
+use aeon_reduce::pass::{run_block_passes, PassCounts, BLOCK_PASSES};
 use aeonil::{Reg, Stmt};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -71,7 +73,7 @@ enum Engine {
     Interpreter,
     Jit,
     /// The JIT fed with IL that went through `aeon_reduce`'s block-local
-    /// pipeline first. Nothing compiles reduced IL; this engine checks that
+    /// pipeline first, checked after each pass. Nothing compiles reduced IL; this engine checks that
     /// the reducer preserves behaviour, which the analyses built on reduced
     /// IL rely on.
     ReducedJit,
@@ -510,18 +512,29 @@ struct JitProgram {
     _compiler: JitCompiler,
 }
 
-fn compile_jit(stmts: &[Stmt], reduce: bool) -> Result<JitProgram, Finding> {
+/// The block starting at each instruction, after the first `passes` passes
+/// of the reducer's block-local pipeline.
+fn blocks_after(stmts: &[Stmt], passes: usize) -> Vec<Vec<Stmt>> {
+    (0..stmts.len())
+        .map(|begin| {
+            run_block_passes(
+                &BLOCK_PASSES[..passes],
+                stmts[begin..block_end(stmts, begin)].to_vec(),
+                &mut PassCounts::default(),
+                &mut |_, _| {},
+            )
+        })
+        .collect()
+}
+
+/// Compiles `il[i]` as the block that starts at instruction `i` of `stmts`.
+fn compile_jit(stmts: &[Stmt], il: &[Vec<Stmt>]) -> Result<JitProgram, Finding> {
     let mut compiler = JitCompiler::new(JitConfig::default());
     let mut blocks = Vec::new();
-    for begin in 0..stmts.len() {
+    for (begin, block) in il.iter().enumerate() {
         let end = block_end(stmts, begin);
-        let block = if reduce {
-            aeon_reduce::pipeline::reduce_block_local(stmts[begin..end].to_vec())
-        } else {
-            stmts[begin..end].to_vec()
-        };
         let entry = compiler
-            .compile_block(BASE + 4 * begin as u64, &block)
+            .compile_block(BASE + 4 * begin as u64, block)
             .map_err(|err| Finding {
                 gap: Gap::Unsupported,
                 detail: err.to_string(),
@@ -723,7 +736,26 @@ fn engines_agree_with_unicorn() {
 
     for case in CASES {
         let stmts = lift(case);
-        let programs = [compile_jit(&stmts, false), compile_jit(&stmts, true)];
+        let lifted = blocks_after(&stmts, 0);
+        let jit = compile_jit(&stmts, &lifted);
+        // The reducer is checked after every pass that changed the IL, in
+        // pipeline order, so the first disagreement names the pass.
+        let mut stages = Vec::new();
+        let mut previous = lifted;
+        for (index, pass) in BLOCK_PASSES.iter().enumerate() {
+            let il = blocks_after(&stmts, index + 1);
+            if il != previous {
+                stages.push((pass.name, compile_jit(&stmts, &il)));
+                previous = il;
+            }
+        }
+        let run = |program: &Result<JitProgram, Finding>, start: &State| match program {
+            Ok(program) => run_jit(program, start),
+            Err(finding) => Err(Finding {
+                gap: finding.gap,
+                detail: finding.detail.clone(),
+            }),
+        };
         // Record the first disagreement per engine; one is enough to act on.
         let mut seen: [Option<(Finding, [u64; 8])>; 3] = [None, None, None];
         for inputs in &vectors {
@@ -732,18 +764,20 @@ fn engines_agree_with_unicorn() {
             if seen[0].is_none() {
                 seen[0] = check(&reference, run_interpreter(&stmts, &start)).map(|f| (f, *inputs));
             }
-            for (slot, program) in seen[1..].iter_mut().zip(&programs) {
-                if slot.is_some() {
-                    continue;
-                }
-                let outcome = match program {
-                    Ok(program) => run_jit(program, &start),
-                    Err(finding) => Err(Finding {
-                        gap: finding.gap,
-                        detail: finding.detail.clone(),
-                    }),
-                };
-                *slot = check(&reference, outcome).map(|f| (f, *inputs));
+            if seen[1].is_none() {
+                seen[1] = check(&reference, run(&jit, &start)).map(|f| (f, *inputs));
+            }
+            if seen[2].is_none() {
+                seen[2] = stages.iter().find_map(|(pass, program)| {
+                    let finding = check(&reference, run(program, &start))?;
+                    Some((
+                        Finding {
+                            gap: finding.gap,
+                            detail: format!("after pass `{pass}`: {}", finding.detail),
+                        },
+                        *inputs,
+                    ))
+                });
             }
         }
         let engines = [Engine::Interpreter, Engine::Jit, Engine::ReducedJit];
@@ -791,6 +825,57 @@ fn engines_agree_with_unicorn() {
         CASES.len(),
         vectors.len(),
         problems.join("\n\n")
+    );
+}
+
+/// The SSA passes have no engine to run their output, so they are held to
+/// the structural check instead: after every pass, on every case, the
+/// function must still be valid SSA.
+#[test]
+fn ssa_passes_keep_every_case_valid() {
+    use aeon_reduce::ssa::construct::build_ssa;
+    use aeon_reduce::ssa::pipeline::optimize_ssa_validated;
+    use aeon_reduce::ssa::validate::validate_ssa;
+
+    let mut checked = 0usize;
+    let mut problems = Vec::new();
+    for case in CASES {
+        let instructions: Vec<(u64, Stmt, Vec<u64>)> = case
+            .words
+            .iter()
+            .enumerate()
+            .map(|(index, word)| {
+                let pc = BASE + 4 * index as u64;
+                let insn = bad64::decode(*word, pc).expect("decodes");
+                let lifted = aeon::lifter::lift(&insn, pc, Some(pc + 4));
+                (pc, lifted.stmt, lifted.edges)
+            })
+            .collect();
+        let cfg = aeon_reduce::pipeline::reduce_function_cfg(&instructions);
+        let mut ssa = build_ssa(&cfg);
+        if !validate_ssa(&ssa).is_valid {
+            // Construction's problem, not a pass's.
+            continue;
+        }
+        checked += 1;
+        if let Err(failure) = optimize_ssa_validated(&mut ssa) {
+            problems.push(format!(
+                "{}: after `{}`: {:?}",
+                case.name,
+                failure.pass,
+                failure.report.issues.first()
+            ));
+        }
+    }
+    assert!(
+        checked > CASES.len() / 2,
+        "only {checked} cases were checked"
+    );
+    assert!(
+        problems.is_empty(),
+        "{} of {checked} cases:\n{}",
+        problems.len(),
+        problems.join("\n")
     );
 }
 
